@@ -1,0 +1,88 @@
+import { Router } from "express";
+import { RequestCancelledError } from "../services/errors.js";
+import { cancelTask, createTask, getTask, listTasks, resumeTask } from "../services/orchestrator.js";
+import { abortOnClientDisconnect } from "./streamUtils.js";
+import type { Response } from "express";
+import type { OrchestratorTask } from "../services/orchestrator.js";
+
+export const orchestratorRouter = Router();
+
+interface CreateTaskBody {
+  agentId?: unknown;
+  objective?: unknown;
+}
+
+/**
+ * Streams the agent's reply text as it's generated (NDJSON lines of {type:"chunk", content}) so
+ * the UI can show live "thinking" output, then a final {type:"task", task} line once the step
+ * settles (tool request, final answer, or terminal status). Mirrors the confirm-execution stream
+ * in routes/tools.ts: headers aren't sent until the first write, so an error raised before any
+ * agent output (e.g. AgentNotFoundError) still reaches the error middleware as normal JSON.
+ */
+async function runAndStreamTask(
+  res: Response,
+  next: (err: unknown) => void,
+  run: (onChunk: (content: string) => void, signal: AbortSignal) => Promise<OrchestratorTask>,
+): Promise<void> {
+  const controller = abortOnClientDisconnect(res);
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-cache");
+
+  try {
+    const task = await run((content) => {
+      res.write(`${JSON.stringify({ type: "chunk", content })}\n`);
+    }, controller.signal);
+    res.write(`${JSON.stringify({ type: "task", task })}\n`);
+    res.end();
+  } catch (err) {
+    if (err instanceof RequestCancelledError) {
+      res.end();
+      return;
+    }
+    if (!res.headersSent) {
+      next(err);
+      return;
+    }
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.write(`${JSON.stringify({ type: "error", error: message })}\n`);
+    res.end();
+  }
+}
+
+orchestratorRouter.post("/tasks", async (req, res, next) => {
+  const body = req.body as CreateTaskBody;
+  if (typeof body.agentId !== "string" || !body.agentId.trim()) {
+    res.status(400).json({ error: "agentId is required", code: "INVALID_REQUEST" });
+    return;
+  }
+  if (typeof body.objective !== "string" || !body.objective.trim()) {
+    res.status(400).json({ error: "objective is required", code: "INVALID_REQUEST" });
+    return;
+  }
+  await runAndStreamTask(res, next, (onChunk, signal) => createTask(body.agentId as string, body.objective as string, onChunk, signal));
+});
+
+orchestratorRouter.get("/tasks", (_req, res) => {
+  res.json({ tasks: listTasks() });
+});
+
+orchestratorRouter.get("/tasks/:id", (req, res) => {
+  const task = getTask(req.params.id);
+  if (!task) {
+    res.status(404).json({ error: `Task "${req.params.id}" was not found`, code: "TASK_NOT_FOUND" });
+    return;
+  }
+  res.json({ task });
+});
+
+orchestratorRouter.post("/tasks/:id/resume", async (req, res, next) => {
+  await runAndStreamTask(res, next, (onChunk, signal) => resumeTask(req.params.id, onChunk, signal));
+});
+
+orchestratorRouter.post("/tasks/:id/cancel", (req, res, next) => {
+  try {
+    res.json({ task: cancelTask(req.params.id) });
+  } catch (err) {
+    next(err);
+  }
+});

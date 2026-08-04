@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Exec tool workspace (read_file/write_file/bash/etc. sandbox root) - runtime scratch space
+backend/workspace/*
+!backend/workspace/.gitkeep
+
+# Env files
+.env
+.env.local
+!.env.example
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+
+*.local
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

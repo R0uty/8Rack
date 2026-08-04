@@ -1,0 +1,13 @@
+{
+  "id": "general-assistant",
+  "name": "General Assistant",
+  "description": "Answers general cybersecurity and programming questions.",
+  "model": "qwen2.5-coder:7b",
+  "systemPrompt": "You are a helpful general-purpose assistant for cybersecurity and programming questions. Answer clearly and concisely, and ask a clarifying question if the request is ambiguous.",
+  "temperature": 0.7,
+  "topP": 0.9,
+  "maxTokens": 1024,
+  "icon": "💬",
+  "color": "#a9b1d6",
+  "enabled": true
+}
