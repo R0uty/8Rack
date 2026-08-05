@@ -5,6 +5,7 @@ import path from "node:path";
 import { env } from "../config/env.js";
 import { runExecutable } from "./toolExecutor.js";
 import type { OutputChunk } from "./toolExecutor.js";
+import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
 import {
   ExecToolDisabledError,
   ExecToolNotFoundError,
@@ -28,6 +29,7 @@ const runningControllers = new Map<string, AbortController>();
 const pendingStdin = new Map<string, string>();
 
 const MAX_HISTORY = 200;
+const EXECUTIONS_FILE = "executions.json";
 
 export function registerExecTool(tool: ExecTool): void {
   tools.set(tool.id, tool);
@@ -89,11 +91,31 @@ function buildResolvedCommand(tool: ExecTool, args: string[]): string {
   return [tool.executable, ...tool.defaultArguments, ...args].join(" ");
 }
 
-function trimHistory(): void {
-  if (executions.size <= MAX_HISTORY) return;
-  const oldestFirst = [...executions.values()].sort((a, b) => a.createdAt - b.createdAt);
-  for (const record of oldestFirst.slice(0, executions.size - MAX_HISTORY)) {
+/** Caps history per project (not globally) — each project's execution log is independent. */
+function trimHistory(projectId: string): void {
+  const projectRecords = [...executions.values()].filter((r) => r.projectId === projectId);
+  if (projectRecords.length <= MAX_HISTORY) return;
+  const oldestFirst = projectRecords.sort((a, b) => a.createdAt - b.createdAt);
+  for (const record of oldestFirst.slice(0, projectRecords.length - MAX_HISTORY)) {
     executions.delete(record.id);
+  }
+}
+
+function projectExecutions(projectId: string): ExecutionRecord[] {
+  return [...executions.values()].filter((r) => r.projectId === projectId).sort((a, b) => b.createdAt - a.createdAt);
+}
+
+async function persistExecutions(projectId: string): Promise<void> {
+  await writeProjectJson(projectId, EXECUTIONS_FILE, projectExecutions(projectId));
+}
+
+/** Hydrates the in-memory execution history from disk — called once at server startup so history
+ * survives a restart instead of only being written-through from that point on. */
+export async function loadExecutionsFromDisk(): Promise<void> {
+  const projectIds = await listProjectIds();
+  for (const projectId of projectIds) {
+    const records = await readProjectJson<ExecutionRecord>(projectId, EXECUTIONS_FILE);
+    for (const record of records) executions.set(record.id, record);
   }
 }
 
@@ -147,6 +169,7 @@ async function runRecord(
     `[tools] ${record.status}: ${record.resolvedCommand} (exit ${result.exitCode}, ${result.executionTimeMs}ms)`,
   );
 
+  await persistExecutions(record.projectId);
   return record;
 }
 
@@ -173,6 +196,7 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
 
   const record: ExecutionRecord = {
     id: randomUUID(),
+    projectId: body.projectId,
     toolId: tool.id,
     arguments: body.arguments,
     resolvedCommand: buildResolvedCommand(tool, body.arguments),
@@ -181,7 +205,8 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
     createdAt: Date.now(),
   };
   executions.set(record.id, record);
-  trimHistory();
+  trimHistory(record.projectId);
+  await persistExecutions(record.projectId);
 
   console.log(`[tools] requested: ${record.resolvedCommand} (execution ${record.id})`);
 
@@ -218,6 +243,9 @@ export function rejectExecution(id: string): ExecutionRecord {
   pendingStdin.delete(id);
   record.status = "rejected";
   record.finishedAt = Date.now();
+  // Fire-and-forget: rejectExecution stays synchronous (its route calls it inline), and a local
+  // JSON write lagging by a tick is harmless here - see persistExecutions/DEVELOPMENT.md.
+  void persistExecutions(record.projectId).catch((err) => console.error("[tools] persist failed:", err));
   return record;
 }
 
@@ -236,6 +264,6 @@ export function getExecution(id: string): ExecutionRecord | undefined {
   return executions.get(id);
 }
 
-export function listExecutions(): ExecutionRecord[] {
-  return [...executions.values()].sort((a, b) => b.createdAt - a.createdAt);
+export function listExecutions(projectId: string): ExecutionRecord[] {
+  return projectExecutions(projectId);
 }

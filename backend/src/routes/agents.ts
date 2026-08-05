@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getAgent, getEnabledAgents, reloadAgents } from "../services/agentManager.js";
+import { getAgent, getAgentConfigWarnings, getEnabledAgents, reloadAgents } from "../services/agentManager.js";
 import { streamAgentChat } from "../services/chatService.js";
 import { abortOnClientDisconnect, pipeNdjsonStream } from "./streamUtils.js";
 import { isValidMessages, isValidToolNames } from "./chatValidation.js";
@@ -15,13 +15,14 @@ interface AgentChatRequestBody {
 }
 
 agentsRouter.get("/", async (_req, res) => {
-  res.json({ agents: await getEnabledAgents() });
+  res.json({ agents: await getEnabledAgents(), warnings: getAgentConfigWarnings() });
 });
 
 /** Forces a fresh read of every agent config file and re-validates their models against Ollama —
  * lets a newly dropped-in agent file (or a freshly pulled model) take effect without a restart. */
 agentsRouter.post("/reload", async (_req, res) => {
-  res.json({ agents: await reloadAgents() });
+  const agents = await reloadAgents();
+  res.json({ agents, warnings: getAgentConfigWarnings() });
 });
 
 agentsRouter.get("/:id", async (req, res) => {

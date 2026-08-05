@@ -7,11 +7,14 @@ import {
   ExecToolDisabledError,
   ExecToolNotFoundError,
   ExecutionNotFoundError,
+  InvalidPlanStateError,
   InvalidTaskStateError,
   InvalidToolArgumentsError,
   OllamaConnectionError,
   OllamaModelNotFoundError,
   OllamaRequestError,
+  PlanNotFoundError,
+  ProjectNotFoundError,
   RequestCancelledError,
   TaskNotFoundError,
   UnknownToolError,
@@ -85,6 +88,18 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof InvalidTaskStateError) {
     res.status(409).json({ error: err.message, code: "INVALID_TASK_STATE" });
+    return;
+  }
+  if (err instanceof ProjectNotFoundError) {
+    res.status(404).json({ error: err.message, code: "PROJECT_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof PlanNotFoundError) {
+    res.status(404).json({ error: err.message, code: "PLAN_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof InvalidPlanStateError) {
+    res.status(409).json({ error: err.message, code: "INVALID_PLAN_STATE" });
     return;
   }
 

@@ -9,6 +9,11 @@ dist-ssr/
 backend/workspace/*
 !backend/workspace/.gitkeep
 
+# User-created projects (tool execution + orchestrator task history) - runtime data, not shipped
+# config like backend/data/agents/*.json, and project notes may contain sensitive target/scope info
+backend/data/projects/*
+!backend/data/projects/.gitkeep
+
 # Env files
 .env
 .env.local

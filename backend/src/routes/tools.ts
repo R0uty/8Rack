@@ -15,6 +15,7 @@ export const toolsRouter = Router();
 interface ToolRequestBodyRaw {
   tool?: unknown;
   arguments?: unknown;
+  projectId?: unknown;
   stdin?: unknown;
 }
 
@@ -24,6 +25,8 @@ function isValidToolRequest(body: ToolRequestBodyRaw): body is ToolRequestBody {
     body.tool.trim().length > 0 &&
     Array.isArray(body.arguments) &&
     body.arguments.every((a) => typeof a === "string") &&
+    typeof body.projectId === "string" &&
+    body.projectId.trim().length > 0 &&
     (body.stdin === undefined || typeof body.stdin === "string")
   );
 }
@@ -32,8 +35,13 @@ toolsRouter.get("/", (_req, res) => {
   res.json({ tools: listExecToolsWithStatus() });
 });
 
-toolsRouter.get("/executions", (_req, res) => {
-  res.json({ executions: listExecutions() });
+toolsRouter.get("/executions", (req, res) => {
+  const { projectId } = req.query;
+  if (typeof projectId !== "string" || !projectId.trim()) {
+    res.status(400).json({ error: "projectId query parameter is required", code: "INVALID_REQUEST" });
+    return;
+  }
+  res.json({ executions: listExecutions(projectId) });
 });
 
 toolsRouter.get("/executions/:id", (req, res) => {
@@ -50,7 +58,7 @@ toolsRouter.post("/request", async (req, res, next) => {
   const body = req.body as ToolRequestBodyRaw;
   if (!isValidToolRequest(body)) {
     res.status(400).json({
-      error: 'Request must be {"tool": string, "arguments": string[], "stdin"?: string}',
+      error: 'Request must be {"tool": string, "arguments": string[], "projectId": string, "stdin"?: string}',
       code: "INVALID_REQUEST",
     });
     return;

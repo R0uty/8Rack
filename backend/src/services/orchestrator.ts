@@ -3,6 +3,7 @@ import { env } from "../config/env.js";
 import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
 import { cancelExecution, getExecution, listExecTools, requestExecution } from "./toolManager.js";
+import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
 import { AgentNotFoundError, InvalidTaskStateError, RequestCancelledError, TaskNotFoundError } from "./errors.js";
 import type { ChatMessage } from "../types/ollama.js";
 import type { ExecutionRecord } from "../types/execTool.js";
@@ -21,6 +22,7 @@ export type TaskStatus =
 
 export interface OrchestratorTask {
   id: string;
+  projectId: string;
   agentId: string;
   objective: string;
   /** user/assistant/tool turns only — the agent's systemPrompt + tools preamble are injected fresh each call. */
@@ -36,6 +38,25 @@ export interface OrchestratorTask {
 }
 
 const tasks = new Map<string, OrchestratorTask>();
+const TASKS_FILE = "orchestrator-tasks.json";
+
+function projectTasks(projectId: string): OrchestratorTask[] {
+  return [...tasks.values()].filter((t) => t.projectId === projectId).sort((a, b) => b.createdAt - a.createdAt);
+}
+
+async function persistTasks(projectId: string): Promise<void> {
+  await writeProjectJson(projectId, TASKS_FILE, projectTasks(projectId));
+}
+
+/** Hydrates in-memory tasks from disk - called once at server startup so task history survives a
+ * restart instead of only being written-through from that point on. */
+export async function loadTasksFromDisk(): Promise<void> {
+  const projectIds = await listProjectIds();
+  for (const projectId of projectIds) {
+    const projectTasksOnDisk = await readProjectJson<OrchestratorTask>(projectId, TASKS_FILE);
+    for (const task of projectTasksOnDisk) tasks.set(task.id, task);
+  }
+}
 
 /**
  * Describes the available tools and the exact JSON shape the agent must respond with to request
@@ -84,7 +105,7 @@ function tryParseCandidate(candidate: string): { tool: string; arguments: string
  * first "{" and last "}" in the reply — handles the common one-JSON-object-plus-prose case
  * without trying to be a general-purpose JSON extractor.
  */
-function parseToolRequest(text: string): { tool: string; arguments: string[] } | undefined {
+export function parseToolRequest(text: string): { tool: string; arguments: string[] } | undefined {
   const trimmed = text.trim();
   const fence = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   const strict = tryParseCandidate(fence ? fence[1].trim() : trimmed);
@@ -159,7 +180,11 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
 
   let record: ExecutionRecord;
   try {
-    record = await requestExecution({ tool: toolRequest.tool, arguments: toolRequest.arguments });
+    record = await requestExecution({
+      tool: toolRequest.tool,
+      arguments: toolRequest.arguments,
+      projectId: task.projectId,
+    });
   } catch (err) {
     task.messages.push({
       role: "tool",
@@ -178,6 +203,7 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
 export async function createTask(
   agentId: string,
   objective: string,
+  projectId: string,
   onChunk?: ChunkListener,
   signal?: AbortSignal,
 ): Promise<OrchestratorTask> {
@@ -186,6 +212,7 @@ export async function createTask(
 
   const task: OrchestratorTask = {
     id: randomUUID(),
+    projectId,
     agentId,
     objective,
     messages: [{ role: "user", content: objective }],
@@ -196,7 +223,14 @@ export async function createTask(
     updatedAt: Date.now(),
   };
   tasks.set(task.id, task);
-  return advance(task, onChunk, signal);
+  try {
+    const result = await advance(task, onChunk, signal);
+    await persistTasks(task.projectId);
+    return result;
+  } catch (err) {
+    await persistTasks(task.projectId).catch(() => {});
+    throw err;
+  }
 }
 
 /**
@@ -234,13 +268,21 @@ export async function resumeTask(id: string, onChunk?: ChunkListener, signal?: A
             stderr: execution.result?.stderr ?? "",
             timedOut: execution.result?.timedOut ?? false,
             cancelled: execution.result?.cancelled ?? false,
+            parsedOutput: execution.result?.parsedOutput,
           }),
         };
 
   task.messages.push(resultMessage);
   task.pendingExecutionId = undefined;
   task.status = "running";
-  return advance(task, onChunk, signal);
+  try {
+    const result = await advance(task, onChunk, signal);
+    await persistTasks(task.projectId);
+    return result;
+  } catch (err) {
+    await persistTasks(task.projectId).catch(() => {});
+    throw err;
+  }
 }
 
 export function cancelTask(id: string): OrchestratorTask {
@@ -255,6 +297,9 @@ export function cancelTask(id: string): OrchestratorTask {
   }
   task.status = "cancelled";
   touch(task);
+  // Fire-and-forget: cancelTask stays synchronous (its route calls it inline) - see
+  // persistTasks/DEVELOPMENT.md for the same tradeoff made in toolManager.ts.
+  void persistTasks(task.projectId).catch((err) => console.error("[orchestrator] persist failed:", err));
   return task;
 }
 
@@ -262,6 +307,6 @@ export function getTask(id: string): OrchestratorTask | undefined {
   return tasks.get(id);
 }
 
-export function listTasks(): OrchestratorTask[] {
-  return [...tasks.values()].sort((a, b) => b.createdAt - a.createdAt);
+export function listTasks(projectId: string): OrchestratorTask[] {
+  return projectTasks(projectId);
 }

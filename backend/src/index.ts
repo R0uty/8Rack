@@ -7,9 +7,14 @@ import { chatRouter } from "./routes/chat.js";
 import { agentsRouter } from "./routes/agents.js";
 import { toolsRouter } from "./routes/tools.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
+import { projectsRouter } from "./routes/projects.js";
+import { plansRouter } from "./routes/plans.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { loadAgents } from "./services/agentManager.js";
-import { listExecToolsWithStatus, registerExecTool } from "./services/toolManager.js";
+import { listExecToolsWithStatus, loadExecutionsFromDisk, registerExecTool } from "./services/toolManager.js";
+import { loadTasksFromDisk } from "./services/orchestrator.js";
+import { loadPlansFromDisk } from "./services/multiAgentOrchestrator.js";
+import { listProjects } from "./services/projectManager.js";
 import { builtinExecTools } from "./tools/exec/builtins.js";
 
 for (const tool of builtinExecTools) registerExecTool(tool);
@@ -28,6 +33,8 @@ app.use("/api/chat", chatRouter);
 app.use("/api/agents", agentsRouter);
 app.use("/api/tools", toolsRouter);
 app.use("/api/orchestrator", orchestratorRouter);
+app.use("/api/projects", projectsRouter);
+app.use("/api/plans", plansRouter);
 
 app.use(errorHandler);
 
@@ -45,4 +52,10 @@ app.listen(env.port, async () => {
     `Loaded ${tools.length} tool(s): ${available} available, ${tools.length - available} unavailable ` +
       `(workspace: ${env.workspaceRoot})`,
   );
+
+  const projects = await listProjects();
+  await loadExecutionsFromDisk();
+  await loadTasksFromDisk();
+  await loadPlansFromDisk();
+  console.log(`Loaded ${projects.length} project(s) with persisted execution/task/plan history`);
 });

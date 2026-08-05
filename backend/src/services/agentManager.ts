@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listModels } from "./ollama.js";
-import type { Agent, AgentWithStatus } from "../types/agent.js";
+import type { Agent, AgentConfigWarning, AgentWithStatus } from "../types/agent.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENTS_DIR = path.resolve(__dirname, "../../data/agents");
@@ -28,13 +28,17 @@ function isValidAgent(value: unknown): value is Agent {
 }
 
 /** Reads and validates every agent config file from disk. Malformed files are skipped with a warning
- * rather than failing the whole load — one bad file shouldn't take down every other agent. */
-async function readAgentConfigs(): Promise<Agent[]> {
+ * rather than failing the whole load — one bad file shouldn't take down every other agent. Returns
+ * both the valid agents and a record of every file that got skipped and why, so callers (the API,
+ * ultimately the UI) can surface load problems instead of only a server-side console.warn. */
+async function readAgentConfigs(): Promise<{ agents: Agent[]; warnings: AgentConfigWarning[] }> {
+  const warnings: AgentConfigWarning[] = [];
+
   let entries: string[];
   try {
     entries = await readdir(AGENTS_DIR);
   } catch {
-    return [];
+    return { agents: [], warnings };
   }
 
   const agents: Agent[] = [];
@@ -45,22 +49,28 @@ async function readAgentConfigs(): Promise<Agent[]> {
     try {
       parsed = JSON.parse(await readFile(path.join(AGENTS_DIR, entry), "utf-8"));
     } catch {
+      const reason = "Invalid JSON";
       console.warn(`Skipping invalid agent file (bad JSON): ${entry}`);
+      warnings.push({ file: entry, reason });
       continue;
     }
     if (!isValidAgent(parsed)) {
+      const reason = "Missing or malformed required fields";
       console.warn(`Skipping invalid agent file (missing/malformed fields): ${entry}`);
+      warnings.push({ file: entry, reason });
       continue;
     }
     if (seenIds.has(parsed.id)) {
+      const reason = `Duplicate agent id "${parsed.id}"`;
       console.warn(`Skipping agent file with duplicate id "${parsed.id}": ${entry}`);
+      warnings.push({ file: entry, reason });
       continue;
     }
     seenIds.add(parsed.id);
     agents.push(parsed);
   }
 
-  return agents.sort((a, b) => a.name.localeCompare(b.name));
+  return { agents: agents.sort((a, b) => a.name.localeCompare(b.name)), warnings };
 }
 
 /**
@@ -83,6 +93,7 @@ async function withStatus(agents: Agent[]): Promise<AgentWithStatus[]> {
 }
 
 let cache: AgentWithStatus[] | null = null;
+let warningsCache: AgentConfigWarning[] = [];
 
 /** Returns the agent list, loading it from disk (and validating against Ollama) on first call only. */
 export async function loadAgents(): Promise<AgentWithStatus[]> {
@@ -92,8 +103,16 @@ export async function loadAgents(): Promise<AgentWithStatus[]> {
 
 /** Forces a fresh read from disk and re-validates every agent's model against Ollama. */
 export async function reloadAgents(): Promise<AgentWithStatus[]> {
-  cache = await withStatus(await readAgentConfigs());
+  const { agents, warnings } = await readAgentConfigs();
+  cache = await withStatus(agents);
+  warningsCache = warnings;
   return cache;
+}
+
+/** Config-file problems (bad JSON, missing fields, duplicate ids) from the most recent load/reload —
+ * populated as a side effect of loadAgents()/reloadAgents(), so call one of those first. */
+export function getAgentConfigWarnings(): AgentConfigWarning[] {
+  return warningsCache;
 }
 
 export async function getAgent(id: string): Promise<AgentWithStatus | undefined> {

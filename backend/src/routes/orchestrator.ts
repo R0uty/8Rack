@@ -10,6 +10,7 @@ export const orchestratorRouter = Router();
 interface CreateTaskBody {
   agentId?: unknown;
   objective?: unknown;
+  projectId?: unknown;
 }
 
 /**
@@ -59,11 +60,22 @@ orchestratorRouter.post("/tasks", async (req, res, next) => {
     res.status(400).json({ error: "objective is required", code: "INVALID_REQUEST" });
     return;
   }
-  await runAndStreamTask(res, next, (onChunk, signal) => createTask(body.agentId as string, body.objective as string, onChunk, signal));
+  if (typeof body.projectId !== "string" || !body.projectId.trim()) {
+    res.status(400).json({ error: "projectId is required", code: "INVALID_REQUEST" });
+    return;
+  }
+  await runAndStreamTask(res, next, (onChunk, signal) =>
+    createTask(body.agentId as string, body.objective as string, body.projectId as string, onChunk, signal),
+  );
 });
 
-orchestratorRouter.get("/tasks", (_req, res) => {
-  res.json({ tasks: listTasks() });
+orchestratorRouter.get("/tasks", (req, res) => {
+  const { projectId } = req.query;
+  if (typeof projectId !== "string" || !projectId.trim()) {
+    res.status(400).json({ error: "projectId query parameter is required", code: "INVALID_REQUEST" });
+    return;
+  }
+  res.json({ tasks: listTasks(projectId) });
 });
 
 orchestratorRouter.get("/tasks/:id", (req, res) => {

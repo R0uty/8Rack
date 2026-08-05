@@ -1,0 +1,162 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getAgent } from "./agentManager.js";
+import { resolveOllamaTools, streamChat, streamChatWithTools } from "./ollama.js";
+import { AgentDisabledError, AgentNotFoundError, AgentOfflineError, UnknownToolError } from "./errors.js";
+import { streamAgentChat } from "./chatService.js";
+import type { AgentWithStatus } from "../types/agent.js";
+import type { ChatResponseChunk } from "../types/ollama.js";
+
+vi.mock("./agentManager.js", () => ({ getAgent: vi.fn() }));
+vi.mock("./ollama.js", () => ({
+  streamChat: vi.fn(),
+  streamChatWithTools: vi.fn(),
+  resolveOllamaTools: vi.fn(),
+}));
+
+const mockGetAgent = vi.mocked(getAgent);
+const mockStreamChat = vi.mocked(streamChat);
+const mockStreamChatWithTools = vi.mocked(streamChatWithTools);
+const mockResolveOllamaTools = vi.mocked(resolveOllamaTools);
+
+const fixtureAgent: AgentWithStatus = {
+  id: "planner",
+  name: "Planner",
+  description: "",
+  model: "test-model",
+  systemPrompt: "You are the Planner.",
+  temperature: 0.7,
+  topP: 0.9,
+  maxTokens: 0,
+  icon: "",
+  color: "",
+  enabled: true,
+  status: "online",
+};
+
+const fixtureChunk: ChatResponseChunk = {
+  model: "test-model",
+  created_at: "",
+  message: { role: "assistant", content: "hi" },
+  done: true,
+};
+
+async function drain(agentId: string, opts: Parameters<typeof streamAgentChat>[0] = { agentId, messages: [] }) {
+  const chunks: ChatResponseChunk[] = [];
+  for await (const chunk of streamAgentChat(opts)) chunks.push(chunk);
+  return chunks;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockGetAgent.mockResolvedValue(fixtureAgent);
+  mockStreamChat.mockImplementation(async function* () {
+    yield fixtureChunk;
+  });
+  mockStreamChatWithTools.mockImplementation(async function* () {
+    yield fixtureChunk;
+  });
+});
+
+describe("agent validity checks", () => {
+  it("throws AgentNotFoundError for an unknown agent", async () => {
+    mockGetAgent.mockResolvedValue(undefined);
+    await expect(drain("nope")).rejects.toThrow(AgentNotFoundError);
+  });
+
+  it("throws AgentDisabledError for a disabled agent", async () => {
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, enabled: false });
+    await expect(drain("planner")).rejects.toThrow(AgentDisabledError);
+  });
+
+  it("throws AgentOfflineError for an offline agent", async () => {
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, status: "offline" });
+    await expect(drain("planner")).rejects.toThrow(AgentOfflineError);
+  });
+});
+
+describe("system prompt + options assembly", () => {
+  it("injects the agent's system prompt as the first message", async () => {
+    await drain("planner", { agentId: "planner", messages: [{ role: "user", content: "hi" }] });
+
+    const [{ messages }] = mockStreamChat.mock.calls[0];
+    expect(messages[0]).toEqual({ role: "system", content: "You are the Planner." });
+    expect(messages[1]).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("appends toolsPreamble to the system prompt when provided", async () => {
+    await drain("planner", { agentId: "planner", messages: [], toolsPreamble: "Available tools: bash" });
+
+    const [{ messages }] = mockStreamChat.mock.calls[0];
+    expect(messages[0].content).toBe("You are the Planner.\n\nAvailable tools: bash");
+  });
+
+  it("omits num_predict when the agent's maxTokens is 0", async () => {
+    await drain("planner");
+    const [{ options }] = mockStreamChat.mock.calls[0];
+    expect(options).not.toHaveProperty("num_predict");
+    expect(options).toMatchObject({ temperature: 0.7, top_p: 0.9 });
+  });
+
+  it("includes num_predict when the agent's maxTokens is > 0", async () => {
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, maxTokens: 512 });
+    await drain("planner");
+    const [{ options }] = mockStreamChat.mock.calls[0];
+    expect(options?.num_predict).toBe(512);
+  });
+
+  it("layers per-request options on top of the agent's own settings", async () => {
+    await drain("planner", { agentId: "planner", messages: [], options: { temperature: 0.1 } });
+    const [{ options }] = mockStreamChat.mock.calls[0];
+    expect(options?.temperature).toBe(0.1);
+    expect(options?.top_p).toBe(0.9);
+  });
+});
+
+describe("tool resolution branch", () => {
+  it("calls streamChat (not streamChatWithTools) when no tools are requested", async () => {
+    await drain("planner");
+    expect(mockStreamChat).toHaveBeenCalledOnce();
+    expect(mockStreamChatWithTools).not.toHaveBeenCalled();
+  });
+
+  it("resolves and passes tool specs through to streamChatWithTools", async () => {
+    mockResolveOllamaTools.mockReturnValue({
+      specs: [{ type: "function", function: { name: "calc", description: "", parameters: { type: "object", properties: {} } } }],
+      unknown: [],
+    });
+
+    await drain("planner", { agentId: "planner", messages: [], tools: ["calc"] });
+
+    expect(mockResolveOllamaTools).toHaveBeenCalledWith(["calc"]);
+    expect(mockStreamChatWithTools).toHaveBeenCalledOnce();
+    expect(mockStreamChat).not.toHaveBeenCalled();
+    const [{ tools }] = mockStreamChatWithTools.mock.calls[0];
+    expect(tools).toEqual([{ type: "function", function: { name: "calc", description: "", parameters: { type: "object", properties: {} } } }]);
+  });
+
+  it("throws UnknownToolError and never calls streamChatWithTools for unresolvable tools", async () => {
+    mockResolveOllamaTools.mockReturnValue({ specs: [], unknown: ["ghost-tool"] });
+
+    await expect(drain("planner", { agentId: "planner", messages: [], tools: ["ghost-tool"] })).rejects.toThrow(
+      UnknownToolError,
+    );
+    expect(mockStreamChatWithTools).not.toHaveBeenCalled();
+  });
+});
+
+describe("passthrough", () => {
+  it("yields exactly what the underlying generator produced", async () => {
+    const custom: ChatResponseChunk = {
+      model: "m",
+      created_at: "t",
+      message: { role: "assistant", content: "custom content" },
+      done: false,
+    };
+    mockStreamChat.mockImplementation(async function* () {
+      yield custom;
+    });
+
+    const chunks = await drain("planner");
+    expect(chunks).toEqual([custom]);
+  });
+});

@@ -43,6 +43,7 @@ export interface ExecToolWithStatus extends ExecTool {
 export interface ToolRequestBody {
   tool: string;
   arguments: string[];
+  projectId: string;
   /** Piped to the process's stdin — used by tools like write_file. */
   stdin?: string;
 }
@@ -70,6 +71,7 @@ export type ExecutionStatus =
 
 export interface ExecutionRecord {
   id: string;
+  projectId: string;
   toolId: string;
   arguments: string[];
   /** Human-readable resolved command, e.g. "nmap -sV -A 127.0.0.1". */

@@ -106,3 +106,24 @@ export class InvalidTaskStateError extends Error {
     this.name = "InvalidTaskStateError";
   }
 }
+
+export class ProjectNotFoundError extends Error {
+  constructor(projectId: string) {
+    super(`Project "${projectId}" was not found`);
+    this.name = "ProjectNotFoundError";
+  }
+}
+
+export class PlanNotFoundError extends Error {
+  constructor(planId: string) {
+    super(`Plan "${planId}" was not found`);
+    this.name = "PlanNotFoundError";
+  }
+}
+
+export class InvalidPlanStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidPlanStateError";
+  }
+}

@@ -151,13 +151,18 @@ seam where future features (tool execution, RAG, scanners) will plug in without 
 
 - No automated tests exist yet (verification so far has been manual: curl for the backend, browser
   automation for the frontend). Worth adding before the project grows much further.
-- The dev-mode "backend is down" error path returns a generic message because Vite's proxy
-  returns an HTML 502 page rather than JSON; the frontend detects `status >= 500` and shows a
-  reasonable fallback ("Could not reach the backend server"), but it's not as precise as the
-  Ollama-down case (which the backend detects and reports specifically).
-- `backend/data/agents/*.json` has no schema validation beyond the minimal shape check in
-  `services/agentManager.ts` — a malformed file (or one with a duplicate `id`) is skipped with a
-  `console.warn`, not surfaced to the UI.
+  *(Backend service-level tests added — see "Automated tests" near the end of this document.
+  Frontend hooks and HTTP route tests are still manual-only, deliberately deferred.)*
+- ~~The dev-mode "backend is down" error path returns a generic message~~ — done. Turns out Vite's
+  proxy actually responds with an *empty-bodied* `502` (confirmed via curl), not literal HTML as
+  guessed here originally — either way `res.json()` on it throws, so
+  `httpClient.ts#throwForErrorResponse`'s `status >= 500` fallback was already the right detection,
+  it just needed a better message: it now says "Could not reach the backend server. Is it running?
+  Start it with `./start.sh` (or `cd backend && npm run dev`)." — as actionable as the Ollama-down
+  message it was being compared against.
+- ~~`backend/data/agents/*.json` has no schema validation beyond the minimal shape check~~ — the
+  shape check itself is unchanged (still minimal, still just structural), but bad files are no
+  longer silent: see "Agent Manager & Chat Service" below for `getAgentConfigWarnings()`.
 
 ## Extension points (Task 11)
 
@@ -165,8 +170,10 @@ Interfaces + empty registries for the six future areas, all under `backend/src/`
 
 - **Tool execution** — `types/tool.ts` (`Tool`, `ToolDefinition`, `ToolResult`) +
   `extensions/toolRegistry.ts` (`registerTool`, `getTool`, `listTools`)
-- **Multi-agent orchestration** — `types/orchestration.ts` (`OrchestrationPlan`/`Result`) +
-  `extensions/orchestrator.ts` (`runOrchestration` — throws "not implemented")
+- ~~**Multi-agent orchestration**~~ — implemented for real; `extensions/orchestrator.ts` is deleted
+  (its call-and-return signature couldn't express pausing mid-plan for a tool confirmation) and
+  `types/orchestration.ts` was rewritten in place rather than superseded elsewhere. See "Multi-Agent
+  Orchestration" near the end of this document.
 - **RAG** — `types/rag.ts` (`RetrievalSource`, `RetrievedDocument`) +
   `extensions/retrievalRegistry.ts` (`registerRetrievalSource`, `retrieve` — returns `[]`)
 - **Security scanners** — `types/scanner.ts` (`Scanner`, `ScanFinding`, `ScanResult`) +
@@ -259,6 +266,20 @@ a fresh disk read + re-validates every model against Ollama), `getAgent(id)`, an
 `getEnabledAgents()`. Model validation and the enabled-vs-online/offline distinction are covered
 under "Key decisions" above.
 
+Skipped files stop being silent as of this pass: `readAgentConfigs` now returns `{agents,
+warnings}` instead of just `agents`, where each warning is `{file, reason}` (`"Invalid JSON"` /
+`"Missing or malformed required fields"` / `` `Duplicate agent id "<id>"` ``) — `console.warn` stays
+too, this is additive. `reloadAgents()` stashes the latest batch in a module-level
+`warningsCache`, read back via the new `getAgentConfigWarnings()`; since `loadAgents()` delegates to
+`reloadAgents()` on a cache miss, the very first load populates it too, not just explicit reloads.
+Both `GET /api/agents` and `POST /api/agents/reload` (`routes/agents.ts`) now include `warnings` in
+their response alongside `agents`. Frontend: `AgentList.tsx` renders a small amber box above the
+agent list whenever `warnings.length > 0`, naming each bad file and why — gone again once the file
+is fixed and reloaded. Verified live by dropping in an invalid-JSON file and a duplicate-id file
+side by side, confirming both showed with the right reasons, then fixing them and confirming the
+banner cleared on reload; also covered in `agentManager.test.ts` (one case per warning reason, plus
+a stale-warnings-clear-on-next-reload case).
+
 **`backend/src/services/chatService.ts`** — the reusable Chat Service. `streamAgentChat(request,
 signal)` takes an agent ID and a message history, loads the agent via the Agent Manager, throws a
 typed error if it's missing/disabled/offline (`AgentNotFoundError` / `AgentDisabledError` /
@@ -266,8 +287,9 @@ typed error if it's missing/disabled/offline (`AgentNotFoundError` / `AgentDisab
 `systemPrompt` as a system message, layers the agent's temperature/topP/maxTokens under any
 request-level `options` override, and delegates to `services/ollama.ts#streamChat` or
 `streamChatWithTools` exactly like the plain chat path. It's a plain async generator with no HTTP
-dependency, so future multi-agent orchestration (sequential/parallel runs) can call it directly
-instead of going through `POST /api/agents/:id/chat`.
+dependency — both `services/orchestrator.ts` (single-agent tool loop) and, transitively,
+`services/multiAgentOrchestrator.ts` (see "Multi-Agent Orchestration" near the end of this
+document) call it directly instead of going through `POST /api/agents/:id/chat`.
 
 **Routes** (`backend/src/routes/agents.ts`):
 - `GET /api/agents` — enabled agents with computed status
@@ -309,14 +331,12 @@ generic reply), and deselecting (re-clicking the active agent) unlocks manual mo
 - Add a second real tool now that both the backend loop and frontend rendering are proven — the
   current UI is a single checkbox, which will need to become a multi-select once there's more than
   one tool to offer.
-- No automated tests cover the Agent Manager / Chat Service yet (see "Known gaps" above) —
-  `agentManager.ts`'s validation/caching/status logic and `chatService.ts`'s error paths are prime
-  candidates for the first real test suite, since they were exercised manually via curl this
-  session but nothing pins that behavior down against regressions.
-- Multi-agent orchestration (`types/orchestration.ts`, `extensions/orchestrator.ts`) is the natural
-  next extension point now that `chatService.ts` exists as a clean, HTTP-independent entry point
-  for "run this agent with this input" — an orchestrator could call `streamAgentChat` directly for
-  each step of a sequential or parallel plan.
+- ~~No automated tests cover the Agent Manager / Chat Service~~ — done, see "Automated tests" near
+  the end of this document.
+- ~~Multi-agent orchestration~~ — done, see "Multi-Agent Orchestration" near the end of this
+  document. (It ended up calling into `services/orchestrator.ts` per step rather than
+  `chatService.ts#streamAgentChat` directly, so a step gets tool-use + confirmation, not just a bare
+  chat completion — see that section for why.)
 
 ## Tool Execution Framework (Phase 1: engine + confirmation gating, no orchestrator/UI yet)
 
@@ -419,6 +439,9 @@ projects already exist as a concept; they don't, so execution history here is a 
 in-memory list (capped, lost on restart), not project-scoped or persisted. Building "projects" is
 itself a real feature, not a detail to fold into the next tool-framework pass.
 
+*(Resolved in the "Projects" section near the end of this document — tool execution history and
+Orchestrator tasks are now project-scoped and persisted; chat intentionally stayed out of scope.)*
+
 ### What's next (as of the Phase 1 write-up above)
 
 - ~~The Orchestrator~~ — done, see "Orchestrator" below.
@@ -429,9 +452,8 @@ itself a real feature, not a detail to fold into the next tool-framework pass.
 - **Project awareness** (see "Known limitation" above) — needs actual project selection UI plus
   per-project persisted execution history before "make previous results available to agents as
   context" means anything.
-- No automated tests cover `toolExecutor.ts`/`toolManager.ts` yet — timeout/cancellation/
-  path-containment logic is exactly the kind of thing that silently regresses without a test
-  pinning it down, and it was only exercised manually via curl this session.
+- ~~No automated tests cover `toolExecutor.ts`/`toolManager.ts`~~ — done, see "Automated tests" near
+  the end of this document.
 
 ## Orchestrator
 
@@ -441,10 +463,10 @@ tool execution changed), the result goes back into the conversation, and this re
 agent gives a final plain-text answer or a limit trips. This is what turns the previously
 curl-only-drivable execution engine into something an agent can actually use to complete a task.
 
-**Not to be confused with `extensions/orchestrator.ts`/`types/orchestration.ts`** — that's an
-unrelated, still-unimplemented placeholder for future *multi-agent* orchestration (running several
-agents across a plan of steps). This section is about the single-agent tool loop, implemented in
-`services/orchestrator.ts`.
+**Not to be confused with `services/multiAgentOrchestrator.ts`** — that's the *multi-agent*
+orchestrator (running several agents across a plan of steps, each step being a full instance of
+*this* single-agent loop), documented in "Multi-Agent Orchestration" near the end of this document.
+This section is about the single-agent tool loop itself, implemented in `services/orchestrator.ts`.
 
 **Why it's a pause/resume state machine, not a single call.** Every tool requires human
 confirmation (see "Tool Execution Framework" above), so the loop cannot run start-to-finish inside
@@ -529,9 +551,8 @@ forever.
 - ~~Tool Registry UI + Execution Console UI~~ — done, see "Workbench UI" below.
 - ~~Streaming the agent's own text token-by-token during a task~~ — done, see "Token-level
   streaming" above.
-- No automated tests cover `orchestrator.ts` — the state machine transitions, the loop-prevention
-  counting-failed-attempts behavior, and `parseToolRequest`'s fence-stripping are all exactly the
-  kind of logic that benefits from a pinned-down test rather than only manual verification.
+- ~~No automated tests cover `orchestrator.ts`~~ — done, see "Automated tests" near the end of this
+  document.
 
 ## Workbench UI (Tool Registry + Execution Console + interactive Orchestrator)
 
