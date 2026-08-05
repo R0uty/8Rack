@@ -18,3 +18,10 @@ export type AgentStatus = "online" | "offline";
 export interface AgentWithStatus extends Agent {
   status: AgentStatus;
 }
+
+/** A config file under backend/data/agents/ that failed to load (bad JSON, missing fields,
+ * duplicate id) - see agentManager.ts#getAgentConfigWarnings. */
+export interface AgentConfigWarning {
+  file: string;
+  reason: string;
+}

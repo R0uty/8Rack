@@ -84,22 +84,80 @@ This is the actionable list for what's next.
       "Starting…" with no visible output on a long generation). Verified via curl (raw NDJSON) and
       browser: plain-answer tasks, and the tool-call → confirm → resume path, both stream live and
       settle cleanly into the transcript with no duplication.
-- [ ] Add a "project" concept (selection UI + persisted per-project state) — currently there's
-      exactly one global chat session and one global (in-memory, unpersisted) tool execution
-      history; the spec's "every execution belongs to the currently selected project" assumes
-      projects exist, and they don't yet.
+- [x] Add a "project" concept, scoped to tool execution history and Orchestrator tasks (chat stays
+      a single global `sessionStorage` thread, unchanged — deliberately out of scope, see
+      DEVELOPMENT.md's "Projects" section). Done: `services/projectManager.ts` (CRUD) +
+      `services/projectStore.ts` (generic per-project JSON persistence) back `GET/POST/PATCH/DELETE
+      /api/projects*`; `ExecutionRecord`/`OrchestratorTask` both gained `projectId`, every
+      list/request/create endpoint now requires it (400 if missing), and both
+      `toolManager.ts`/`orchestrator.ts` write-through to `backend/data/projects/<id>/*.json` on
+      every mutation and hydrate from disk at server startup — history survives a restart. Frontend:
+      new `ProjectPanel` (create/select/delete, inline two-step delete instead of a native
+      `confirm()`) drives `useTools`/`useOrchestratorTask` via a `projectId`; starting a task is
+      gated on both an agent and a project being selected, and the panel locks while a task is
+      active so switching projects mid-task can't strand the confirm UI. Verified via curl
+      (isolation between two projects, 400s on missing `projectId`, a backend restart preserving
+      history) and in-browser (create/select/delete, scoped Tool Registry history, a full
+      tool-call-and-resume task run inside a project). `backend/data/projects/*` is gitignored
+      (with `.gitkeep`) since project notes may contain sensitive target/scope info, unlike the
+      shipped `backend/data/agents/*.json` configs.
 
 ## Polish / hardening
 
-- [ ] Add automated tests (backend: route + service tests — `agentManager.ts` and `chatService.ts`
-      are the highest-value first targets, see DEVELOPMENT.md; frontend: at least the hooks). All
-      verification so far has been manual (curl + browser automation).
-- [ ] Improve the dev-mode "backend unreachable" error message — currently generic because Vite's
-      proxy returns an HTML 502 page instead of JSON (see `frontend/src/services/api.ts`).
-- [ ] Add schema validation feedback for malformed `backend/data/agents/*.json` files — invalid
-      files are currently skipped silently (`console.warn` only, not surfaced to the UI).
+- [x] Add automated tests — first pass, backend service-level unit tests (Vitest). Covers the
+      exact gaps `DEVELOPMENT.md` had been flagging: `orchestrator.ts`'s state machine + the
+      `parseToolRequest` fence/JSON-extraction logic (now exported for direct testing),
+      `toolExecutor.ts`'s timeout/cancellation/truncation behavior (real subprocesses via
+      `process.execPath`, no mocking), `toolManager.ts`'s validation/path-containment/confirm-
+      reject-cancel lifecycle, `agentManager.ts`'s config loading + online/offline status,
+      `chatService.ts`'s system-prompt/options assembly, and `projectManager.ts`/`projectStore.ts`'s
+      CRUD + persistence. 81 tests across 6 files (`npm test` in `backend/`), all mocking done via a
+      small shared in-memory `node:fs/promises` double (`backend/src/test-utils/fakeFs.ts`) rather
+      than a new dependency or refactoring source just for testability. Sanity-checked by
+      temporarily breaking two source lines and confirming the matching tests actually fail (see
+      DEVELOPMENT.md's "Automated tests" section). Deliberately deferred: frontend hook tests and
+      HTTP route-level (`supertest`) tests — see that same section for why.
+- [x] Improve the dev-mode "backend unreachable" error message. Confirmed via curl that Vite's
+      proxy actually returns an empty-bodied `502` (not literal HTML as originally guessed) when
+      nothing's listening on :3001 — `res.json()` on that empty body throws, so
+      `httpClient.ts#throwForErrorResponse`'s existing `status >= 500` fallback was already the
+      right code path, just under-specific. It now reads "Could not reach the backend server. Is
+      it running? Start it with `./start.sh` (or `cd backend && npm run dev`)." — matching the
+      specificity of the existing Ollama-down message. Verified live: ran the frontend alone (no
+      backend) and confirmed the new message renders in both the Model and Agents sidebar panels.
+- [x] Add schema validation feedback for malformed `backend/data/agents/*.json` files. Done:
+      `agentManager.ts#readAgentConfigs` now also returns a list of `{file, reason}` warnings
+      (invalid JSON / missing-or-malformed fields / duplicate id) alongside the loaded agents,
+      exposed via a new `getAgentConfigWarnings()` and threaded onto both `GET /api/agents` and
+      `POST /api/agents/reload`'s existing response payloads (`console.warn` logging kept too, not
+      replaced). Frontend: `AgentList` renders a small amber warning box above the agent list when
+      any exist, naming each bad file and why. Verified live: dropped in a file with invalid JSON
+      and one with a duplicate id, saw both listed with the right reasons; fixed and reloaded, the
+      banner cleared. Added backend test coverage (`agentManager.test.ts`) for each warning
+      reason and for stale warnings clearing on a subsequent successful reload.
+- [x] Redesign the frontend into a premium "AI operating system" desktop UI (dark charcoal +
+      emerald, glass panels, glow borders, animation) per an explicit design spec — visual/UX only,
+      no backend or `hooks`/`services`/`types` changes. New 3-column shell (`components/layout/`:
+      `AppShell`/`Sidebar`/`TopBar`/`RightPanel`/`CommandPalette`), a shared `components/ui/`
+      primitive set (`GlassPanel`/`StatusPill`/`Button`/`Collapsible`/`Sheet`/`ProgressRing`), a
+      frontend-only emoji→Lucide icon map (`lib/icons.ts`) so agent/tool configs stay untouched, and
+      a real dark/light theme toggle (`hooks/useTheme.ts`). Every existing view (Chat, Workbench,
+      Plans, Projects, Settings) was reskinned onto this system; Chat's empty state became an
+      animated agent-network "Command Center" built from real agent data. Deliberately did not add
+      Risk Score/Coverage/heatmap-style widgets (no backend data source) or Reports/Plugins nav
+      entries (those backend systems are still unbuilt placeholders). Verified live in-browser
+      against real Ollama + real tools: agent selection, chat send/receive, a full Workbench
+      tool-confirmation round trip, the Plans builder, the Settings sheet, and the theme toggle. See
+      DEVELOPMENT.md's "Premium UI/UX Redesign" section, including a non-obvious finding about
+      framer-motion animations freezing in backgrounded browser-automation tabs (not an app bug).
 - [ ] `start.sh` kills anything matching the dev-server process patterns before launching — revisit
       if this ever needs to coexist with other projects' dev servers on the same machine.
+- [ ] The redesign's Workbench `ExecutionConsole` got Copy + Export (download output as `.txt`) but
+      deliberately not Search/Bookmark across execution history (from the original design spec's
+      Terminal section) — would need real state design (indexing/persisting across runs)
+      disproportionate to a visual pass. Natural follow-up if actually wanted.
+- [ ] Frontend hook/component tests still don't exist (see "Automated tests" in DEVELOPMENT.md) —
+      unaffected by the UI redesign either way, still a real gap.
 
 ## Later (once a real tool is wired up)
 
@@ -107,12 +165,32 @@ This is the actionable list for what's next.
 - [ ] Security scanners (`types/scanner.ts`, `extensions/scannerRegistry.ts`)
 - [ ] Report generation (`types/report.ts`, `extensions/reportGenerator.ts`)
 - [ ] Plugin system (`types/plugin.ts`, `extensions/pluginRegistry.ts`)
-- [ ] Multi-agent orchestration (`types/orchestration.ts`, `extensions/orchestrator.ts`) — now that
-      `chatService.ts#streamAgentChat` exists as an HTTP-independent "run this agent" primitive,
-      an orchestrator can call it directly for each step of a sequential or parallel plan.
+- [x] Multi-agent orchestration. Done: a user-authored, ordered plan of `{agent, objective}` steps
+      (≥2) runs sequentially, where each step is a *full* single-agent Orchestrator task
+      (`services/orchestrator.ts`) — so a step can request tools and pause for the exact same
+      Approve/Reject confirmation a standalone task uses — and each step's final answer is
+      prepended (labeled by agent name) as context into the next step's objective, so e.g. Recon
+      Agent → General Assistant actually chains real output, not just instructions in isolation.
+      New `services/multiAgentOrchestrator.ts` (`createPlan`/`resumePlan`/`cancelPlan`), same
+      pause/resume/persist pattern as the single-agent Orchestrator one level up, persisted per
+      project to `multi-agent-plans.json`. `routes/plans.ts` streams create/resume as NDJSON and
+      joins in the current step's live task server-side so the client needs only one fetch. This
+      supersedes the `extensions/orchestrator.ts` placeholder (deleted — its call-and-return
+      signature couldn't express "pause mid-plan for confirmation") and `types/orchestration.ts`
+      (rewritten in place to the real shape). Frontend: extracted `OrchestratorTaskView.tsx` out of
+      `OrchestratorWorkbench.tsx` (shared transcript/confirm-card rendering, real reuse since the
+      new "Plans" tab needs the exact same view for its current step) and a new
+      `MultiAgentPlanner.tsx` (step builder + run view with collapsible completed-step summaries).
+      Verified via curl (context-chaining, pause-mid-plan-for-a-real-tool-confirmation via
+      reject→resume, project isolation, restart persistence) and in-browser (a real Recon Agent →
+      General Assistant plan, approving a live tool call mid-plan, watching it chain automatically
+      into step 2 with the correct answer); also re-verified the single-agent Workbench tab is
+      byte-for-byte unaffected by the `OrchestratorTaskView` extraction. 13 new backend tests
+      (`multiAgentOrchestrator.test.ts`, mirroring `orchestrator.test.ts`'s mocking approach).
 - [x] Real tool execution for recon (nmap, ffuf, nuclei, httpx, etc.) — done as the Tool Execution
       Framework above (`toolManager.ts`/`toolExecutor.ts`/`tools/exec/builtins.ts`), separate from
       the in-process `Tool`/`toolRegistry` used by the tool-calling round trip.
-- [ ] Project-based conversations / a memory system — currently there's exactly one global chat
-      session (`sessionStorage`) and one global tool execution history, no concept of separate
-      projects or targets. See the Tool Execution Framework section for why this matters now too.
+- [ ] Project-scoped chat — projects now exist (see "Next up" above) but only scope tool execution
+      history and Orchestrator tasks; chat is still exactly one global `sessionStorage` session, on
+      purpose (deliberately deferred, not forgotten — see DEVELOPMENT.md's "Projects" section for
+      why). Making chat project-aware too is the natural follow-up once that's actually wanted.

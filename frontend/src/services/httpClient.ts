@@ -11,9 +11,13 @@ export class ApiError extends Error {
 }
 
 export async function throwForErrorResponse(res: Response): Promise<never> {
+  // Every real backend error response is JSON (see middleware/errorHandler.ts), so a >=500 that
+  // fails to parse as JSON below means the request never reached the backend at all - in dev
+  // that's Vite's proxy responding on the backend's behalf with an empty-bodied 502 because
+  // nothing is listening on :3001 yet.
   let message =
     res.status >= 500
-      ? "Could not reach the backend server. Is it running?"
+      ? "Could not reach the backend server. Is it running? Start it with ./start.sh (or cd backend && npm run dev)."
       : `Request failed with status ${res.status}`;
   let code: string | undefined;
   try {
@@ -21,7 +25,7 @@ export async function throwForErrorResponse(res: Response): Promise<never> {
     if (body?.error) message = body.error;
     code = body?.code;
   } catch {
-    // response body wasn't JSON (e.g. a dev-server proxy error page); keep the fallback message
+    // response body wasn't JSON (e.g. Vite's empty-bodied dev-proxy 502); keep the fallback message
   }
   throw new ApiError(message, res.status, code);
 }

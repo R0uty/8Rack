@@ -1,97 +1,32 @@
 import { useEffect, useState } from "react";
 import { Markdown } from "./Markdown";
 import { ToolRegistry } from "./ToolRegistry";
-import { ExecutionConsole } from "./ExecutionConsole";
+import { ProjectPanel } from "./ProjectPanel";
+import { OrchestratorTaskView, TERMINAL_STATUSES } from "./OrchestratorTaskView";
+import { Button, GlassPanel, StreamingCursor } from "./ui";
 import { useOrchestratorTask } from "../hooks/useOrchestratorTask";
 import { useTools } from "../hooks/useTools";
+import { useProjects } from "../hooks/useProjects";
 import type { AgentWithStatus } from "../types/agent";
-import type { OrchestratorMessage, TaskStatus } from "../types/orchestrator";
+import type { Project } from "../types/project";
 
 interface OrchestratorWorkbenchProps {
   agents: AgentWithStatus[];
   selectedAgentId: string | null;
 }
 
-const TERMINAL_STATUSES: TaskStatus[] = [
-  "completed",
-  "failed",
-  "cancelled",
-  "max_executions_reached",
-  "max_time_reached",
-];
-
-const STATUS_LABEL: Record<TaskStatus, string> = {
-  running: "Running…",
-  waiting_confirmation: "Waiting for confirmation",
-  completed: "Completed",
-  failed: "Failed",
-  cancelled: "Cancelled",
-  max_executions_reached: "Stopped: max tool executions reached",
-  max_time_reached: "Stopped: max task time reached",
-};
-
-/** Best-effort detection of a tool-request JSON in an assistant message, for nicer display only —
- * mirrors backend/src/services/orchestrator.ts#parseToolRequest's shape check. */
-function tryParseToolRequestForDisplay(content: string): { tool: string; arguments: string[] } | undefined {
-  let candidate = content.trim();
-  const fence = candidate.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  if (fence) candidate = fence[1].trim();
-  if (!candidate.startsWith("{")) return undefined;
-  try {
-    const parsed = JSON.parse(candidate) as { tool?: unknown; arguments?: unknown };
-    if (typeof parsed.tool === "string" && Array.isArray(parsed.arguments)) {
-      return { tool: parsed.tool, arguments: parsed.arguments as string[] };
-    }
-  } catch {
-    // Not a tool request - render as plain text/markdown below.
-  }
-  return undefined;
-}
-
-function TaskMessageView({ message }: { message: OrchestratorMessage }) {
-  if (message.role === "user") {
-    return (
-      <div className="workbench-message workbench-message--user">
-        <div className="workbench-message__role">objective</div>
-        <div className="workbench-message__body">{message.content}</div>
-      </div>
-    );
-  }
-
-  if (message.role === "tool") {
-    let pretty = message.content;
-    try {
-      pretty = JSON.stringify(JSON.parse(message.content), null, 2);
-    } catch {
-      // Not JSON for some reason - show the raw content.
-    }
-    return (
-      <div className="workbench-message workbench-message--tool">
-        <div className="workbench-message__role">tool result</div>
-        <pre className="workbench-message__tool-json">{pretty}</pre>
-      </div>
-    );
-  }
-
-  const toolRequest = tryParseToolRequestForDisplay(message.content);
-  return (
-    <div className="workbench-message workbench-message--assistant">
-      <div className="workbench-message__role">assistant</div>
-      {toolRequest ? (
-        <div className="workbench-message__tool-call">
-          called <code>{toolRequest.tool}</code>({JSON.stringify(toolRequest.arguments)})
-        </div>
-      ) : (
-        <div className="workbench-message__body">
-          <Markdown content={message.content} />
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function OrchestratorWorkbench({ agents, selectedAgentId }: OrchestratorWorkbenchProps) {
-  const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools } = useTools();
+  const {
+    projects,
+    loading: projectsLoading,
+    error: projectsError,
+    refresh: refreshProjects,
+    create: createProject,
+    remove: removeProject,
+  } = useProjects();
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools } =
+    useTools(selectedProjectId);
   const { task, liveOutput, streamingText, busy, error, start, approve, reject, cancel, reset } =
     useOrchestratorTask();
   const [objective, setObjective] = useState("");
@@ -107,9 +42,21 @@ export function OrchestratorWorkbench({ agents, selectedAgentId }: OrchestratorW
     if (taskUpdatedAt) refreshTools();
   }, [taskUpdatedAt, refreshTools]);
 
+  // If the selected project was just deleted (e.g. from another tab, or a stale delete retried),
+  // fall back to no selection rather than continuing to operate against a project that's gone.
+  useEffect(() => {
+    if (selectedProjectId && !projectsLoading && !projects.some((p) => p.id === selectedProjectId)) {
+      setSelectedProjectId(null);
+    }
+  }, [projects, projectsLoading, selectedProjectId]);
+
+  const handleSelectProject = (project: Project) => {
+    setSelectedProjectId((current) => (current === project.id ? null : project.id));
+  };
+
   const handleStart = () => {
-    if (!selectedAgentId || !objective.trim()) return;
-    start(selectedAgentId, objective.trim());
+    if (!selectedAgentId || !selectedProjectId || !objective.trim()) return;
+    start(selectedAgentId, objective.trim(), selectedProjectId);
     setObjective("");
   };
 
@@ -123,101 +70,77 @@ export function OrchestratorWorkbench({ agents, selectedAgentId }: OrchestratorW
     : undefined;
 
   return (
-    <div className="workbench">
-      <div className="workbench__main">
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
+      <div className="flex flex-col gap-4">
+        <ProjectPanel
+          projects={projects}
+          loading={projectsLoading}
+          error={projectsError}
+          selectedProjectId={selectedProjectId}
+          onSelect={handleSelectProject}
+          onCreate={createProject}
+          onDelete={removeProject}
+          onRefresh={refreshProjects}
+          disabled={!!task && !TERMINAL_STATUSES.includes(task.status)}
+        />
+
         {!task && (
-          <div className="workbench__start">
-            <h2 className="workbench__heading">New Task</h2>
-            {!selectedAgentId && <p className="workbench__hint">Select an agent in the sidebar to start a task.</p>}
+          <GlassPanel padding="lg" className="flex flex-col gap-3">
+            <h2 className="text-sm font-semibold text-text">New Task</h2>
+            {!selectedAgentId && !selectedProjectId && (
+              <p className="text-xs text-muted">Select an agent in the sidebar and a project above to start a task.</p>
+            )}
+            {!selectedAgentId && selectedProjectId && (
+              <p className="text-xs text-muted">Select an agent in the sidebar to start a task.</p>
+            )}
+            {selectedAgentId && !selectedProjectId && (
+              <p className="text-xs text-muted">Select or create a project above to start a task.</p>
+            )}
             <textarea
-              className="workbench__objective"
               placeholder='Describe the objective for the agent, e.g. "List the workspace directory contents."'
               rows={4}
               value={objective}
               onChange={(e) => setObjective(e.target.value)}
-              disabled={!selectedAgentId || busy}
+              disabled={!selectedAgentId || !selectedProjectId || busy}
+              className="resize-none rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60 disabled:opacity-50"
             />
-            <button
-              type="button"
-              className="workbench__start-button"
+            <Button
+              variant="primary"
               onClick={handleStart}
-              disabled={!selectedAgentId || !objective.trim() || busy}
+              disabled={!selectedAgentId || !selectedProjectId || !objective.trim() || busy}
+              className="self-start"
             >
               {busy ? "Starting…" : "Start Task"}
-            </button>
-            {error && <p className="workbench__error">{error}</p>}
+            </Button>
+            {error && <p className="text-xs text-critical">{error}</p>}
             {busy && streamingText && (
-              <div className="workbench__transcript">
-                <div className="workbench-message workbench-message--assistant workbench-message--streaming">
-                  <div className="workbench-message__role">assistant</div>
-                  <div className="workbench-message__body">
-                    <Markdown content={streamingText} />
-                  </div>
-                </div>
-              </div>
+              <GlassPanel padding="md" raised className="border-primary/15">
+                <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">assistant</div>
+                <Markdown content={streamingText} />
+                <StreamingCursor />
+              </GlassPanel>
             )}
-          </div>
+          </GlassPanel>
         )}
 
         {task && (
-          <div className="workbench__task">
-            <div className="workbench__task-header">
-              <span>Agent: {selectedAgent?.name ?? task.agentId}</span>
-              <span className={`workbench__task-status workbench__task-status--${task.status}`}>
-                {STATUS_LABEL[task.status]}
-              </span>
-              {!TERMINAL_STATUSES.includes(task.status) && (
-                <button type="button" onClick={cancel} disabled={busy} className="workbench__cancel">
-                  Cancel
-                </button>
-              )}
-              {TERMINAL_STATUSES.includes(task.status) && (
-                <button type="button" onClick={handleReset} className="workbench__new-task">
-                  New Task
-                </button>
-              )}
-            </div>
-
-            <div className="workbench__transcript">
-              {task.messages.map((m, i) => (
-                <TaskMessageView key={i} message={m} />
-              ))}
-              {task.status === "running" && streamingText && (
-                <div className="workbench-message workbench-message--assistant workbench-message--streaming">
-                  <div className="workbench-message__role">assistant</div>
-                  <div className="workbench-message__body">
-                    <Markdown content={streamingText} />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {task.status === "waiting_confirmation" && pendingExecution && (
-              <div className="workbench__confirm">
-                <ExecutionConsole
-                  toolId={pendingExecution.toolId}
-                  resolvedCommand={pendingExecution.resolvedCommand}
-                  status={busy ? "running" : pendingExecution.status}
-                  liveOutput={liveOutput}
-                />
-                <div className="workbench__confirm-actions">
-                  <button type="button" onClick={approve} disabled={busy} className="workbench__approve">
-                    {busy ? "Running…" : "Approve"}
-                  </button>
-                  <button type="button" onClick={reject} disabled={busy} className="workbench__reject">
-                    Reject
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {task.error && <p className="workbench__error">{task.error}</p>}
-            {error && <p className="workbench__error">{error}</p>}
-          </div>
+          <OrchestratorTaskView
+            task={task}
+            headerLabel={`Agent: ${selectedAgent?.name ?? task.agentId}`}
+            pendingExecution={pendingExecution}
+            liveOutput={liveOutput}
+            streamingText={streamingText}
+            busy={busy}
+            error={error}
+            onApprove={approve}
+            onReject={reject}
+            onCancel={cancel}
+            onReset={handleReset}
+          />
         )}
       </div>
 
-      <aside className="workbench__sidebar">
+      <aside>
         <ToolRegistry
           tools={tools}
           executions={executions}

@@ -1,4 +1,6 @@
-import type { KeyboardEvent } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
+import { ArrowUp, Square } from "lucide-react";
+import { GlassPanel, IconButton } from "./ui";
 
 interface PromptInputProps {
   value: string;
@@ -9,7 +11,18 @@ interface PromptInputProps {
   disabled: boolean;
 }
 
+const MAX_HEIGHT = 200;
+
 export function PromptInput({ value, onChange, onSubmit, onCancel, sending, disabled }: PromptInputProps) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`;
+  }, [value]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!sending) onSubmit();
@@ -23,27 +36,30 @@ export function PromptInput({ value, onChange, onSubmit, onCancel, sending, disa
   };
 
   return (
-    <form className="prompt-input" onSubmit={handleSubmit}>
-      <textarea
-        className="prompt-input__textarea"
-        placeholder="Send a message..."
-        rows={3}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={handleKeyDown}
-        disabled={disabled}
-      />
-      <div className="prompt-input__actions">
+    <form onSubmit={handleSubmit}>
+      <GlassPanel padding="none" className="flex items-end gap-2 p-2.5" raised>
+        <textarea
+          ref={textareaRef}
+          className="max-h-[200px] min-h-[24px] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-text placeholder:text-muted focus:outline-none disabled:opacity-50"
+          placeholder="Send a message…"
+          rows={1}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+          disabled={disabled}
+        />
         {sending ? (
-          <button type="button" className="prompt-input__send prompt-input__send--stop" onClick={onCancel}>
-            Stop
-          </button>
+          <IconButton icon={Square} label="Stop generating" variant="danger" onClick={onCancel} />
         ) : (
-          <button type="submit" className="prompt-input__send" disabled={disabled || !value.trim()}>
-            Send
-          </button>
+          <IconButton
+            icon={ArrowUp}
+            label="Send message"
+            variant="primary"
+            type="submit"
+            disabled={disabled || !value.trim()}
+          />
         )}
-      </div>
+      </GlassPanel>
     </form>
   );
 }

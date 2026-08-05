@@ -1,5 +1,9 @@
+import { useState } from "react";
+import { Check, Copy, Download, Terminal } from "lucide-react";
 import type { ExecutionResult, ExecutionStatus } from "../types/execTool";
 import type { LiveOutputChunk } from "../hooks/useOrchestratorTask";
+import { GlassPanel, IconButton, ProgressRing, StatusPill, type Tone } from "./ui";
+import { cn } from "../lib/cn";
 
 interface ExecutionConsoleProps {
   toolId: string;
@@ -19,44 +23,96 @@ const STATUS_LABEL: Record<ExecutionStatus, string> = {
   failed: "Failed",
 };
 
+const STATUS_TONE: Record<ExecutionStatus, Tone> = {
+  pending_confirmation: "warning",
+  running: "info",
+  completed: "primary",
+  rejected: "neutral",
+  cancelled: "neutral",
+  failed: "critical",
+};
+
 export function ExecutionConsole({ toolId, resolvedCommand, status, result, liveOutput }: ExecutionConsoleProps) {
+  const [copied, setCopied] = useState(false);
+
+  const outputText = liveOutput?.length
+    ? liveOutput.map((c) => c.data).join("")
+    : [result?.stdout, result?.stderr].filter(Boolean).join("\n");
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(outputText);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const handleExport = () => {
+    const blob = new Blob([`$ ${resolvedCommand}\n\n${outputText}`], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${toolId}-${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
-    <div className="exec-console">
-      <div className="exec-console__header">
-        <span className="exec-console__tool">{toolId}</span>
-        <span className={`exec-console__status exec-console__status--${status}`}>{STATUS_LABEL[status]}</span>
+    <GlassPanel padding="none" className="overflow-hidden">
+      <div className="flex items-center justify-between border-b border-border px-3.5 py-2.5">
+        <div className="flex items-center gap-2 font-mono text-xs font-medium text-text">
+          <Terminal size={13} className="text-muted" />
+          {toolId}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <StatusPill tone={STATUS_TONE[status]} pulse={status === "running"} dot={status !== "running"}>
+            {status === "running" && <ProgressRing size={11} />}
+            {STATUS_LABEL[status]}
+          </StatusPill>
+        </div>
       </div>
-      <pre className="exec-console__command">$ {resolvedCommand}</pre>
 
-      {liveOutput && liveOutput.length > 0 && (
-        <pre className="exec-console__output">
-          {liveOutput.map((chunk, i) => (
-            <span key={i} className={`exec-console__chunk exec-console__chunk--${chunk.stream}`}>
-              {chunk.data}
-            </span>
-          ))}
-        </pre>
-      )}
+      <pre className="overflow-x-auto px-3.5 py-2.5 font-mono text-xs text-info">$ {resolvedCommand}</pre>
 
-      {!liveOutput?.length && result && (result.stdout || result.stderr) && (
-        <pre className="exec-console__output">
-          {result.stdout && <span className="exec-console__chunk exec-console__chunk--stdout">{result.stdout}</span>}
-          {result.stderr && <span className="exec-console__chunk exec-console__chunk--stderr">{result.stderr}</span>}
+      {(!!liveOutput?.length || (result && (result.stdout || result.stderr))) && (
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap border-t border-border bg-black/20 px-3.5 py-3 font-mono text-xs">
+          {liveOutput && liveOutput.length > 0
+            ? liveOutput.map((chunk, i) => (
+                <span key={i} className={chunk.stream === "stderr" ? "text-critical" : "text-text"}>
+                  {chunk.data}
+                </span>
+              ))
+            : (
+                <>
+                  {result?.stdout && <span className="text-text">{result.stdout}</span>}
+                  {result?.stderr && <span className="text-critical">{result.stderr}</span>}
+                </>
+              )}
         </pre>
       )}
 
       {result && (
-        <div className="exec-console__footer">
-          <span className={result.success ? "exec-console__badge exec-console__badge--success" : "exec-console__badge exec-console__badge--failure"}>
+        <div className="flex flex-wrap items-center gap-2 border-t border-border px-3.5 py-2.5 text-xs">
+          <span
+            className={cn(
+              "rounded-pill px-2 py-0.5 text-[11px] font-medium",
+              result.success ? "bg-primary-dim text-primary" : "bg-critical-dim text-critical",
+            )}
+          >
             {result.success ? "Success" : "Failure"}
           </span>
-          <span>exit {result.exitCode ?? "—"}</span>
-          <span>{result.executionTimeMs}ms</span>
-          {result.timedOut && <span className="exec-console__flag">timed out</span>}
-          {result.cancelled && <span className="exec-console__flag">cancelled</span>}
-          {result.truncated && <span className="exec-console__flag">output truncated</span>}
+          <span className="text-muted">exit {result.exitCode ?? "—"}</span>
+          <span className="text-muted">{result.executionTimeMs}ms</span>
+          {result.timedOut && <span className="text-warning">timed out</span>}
+          {result.cancelled && <span className="text-muted">cancelled</span>}
+          {result.truncated && <span className="text-muted">output truncated</span>}
+
+          {outputText && (
+            <div className="ml-auto flex items-center gap-1">
+              <IconButton icon={copied ? Check : Copy} label="Copy output" size="sm" onClick={handleCopy} />
+              <IconButton icon={Download} label="Export output" size="sm" onClick={handleExport} />
+            </div>
+          )}
         </div>
       )}
-    </div>
+    </GlassPanel>
   );
 }

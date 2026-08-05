@@ -1,21 +1,108 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+@import "@fontsource-variable/inter";
 @import "highlight.js/styles/github-dark.css";
 
-:root {
-  --text: #d4d4d8;
-  --bg: #1a1b20;
-  --border: #333;
+@theme {
+  --font-sans: "Inter Variable", system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Consolas, monospace;
 
-  --sans: system-ui, "Segoe UI", Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  /* Dark theme (default) values baked as the fallback theme tokens; overridden per-var below via
+     [data-theme] so Tailwind utilities (bg-bg, text-muted, ...) stay theme-aware automatically. */
+  --color-bg: #0b0f14;
+  --color-surface: #131a22;
+  --color-surface-2: #172029;
+  --color-card: #1b2430;
+  --color-card-hover: #212c3a;
+  --color-border: rgb(255 255 255 / 0.08);
+  --color-border-strong: rgb(255 255 255 / 0.16);
+  --color-primary: #00e676;
+  --color-primary-dim: rgb(0 230 118 / 0.16);
+  --color-info: #00c2ff;
+  --color-info-dim: rgb(0 194 255 / 0.16);
+  --color-warning: #ffc400;
+  --color-warning-dim: rgb(255 196 0 / 0.16);
+  --color-critical: #ff5252;
+  --color-critical-dim: rgb(255 82 82 / 0.16);
+  --color-text: #ffffff;
+  --color-muted: #8e9aa8;
 
-  font: 15px/145% var(--sans);
+  --radius-panel: 16px;
+  --radius-pill: 999px;
+
+  --animate-pulse-dot: pulse-dot 2s ease-in-out infinite;
+  --animate-blink: blink 1s step-end infinite;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  50% {
+    opacity: 0.6;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+:root,
+:root[data-theme="dark"] {
   color-scheme: dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-bg: #f4f6f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef1f4;
+  --color-card: #ffffff;
+  --color-card-hover: #f3f5f7;
+  --color-border: rgb(15 23 32 / 0.08);
+  --color-border-strong: rgb(15 23 32 / 0.16);
+  --color-primary: #00a85c;
+  --color-primary-dim: rgb(0 168 92 / 0.12);
+  --color-info: #0091c2;
+  --color-info-dim: rgb(0 145 194 / 0.12);
+  --color-warning: #a66b00;
+  --color-warning-dim: rgb(166 107 0 / 0.12);
+  --color-critical: #d33;
+  --color-critical-dim: rgb(221 51 51 / 0.12);
+  --color-text: #0f1520;
+  --color-muted: #5b6673;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --color-bg: #f4f6f8;
+    --color-surface: #ffffff;
+    --color-surface-2: #eef1f4;
+    --color-card: #ffffff;
+    --color-card-hover: #f3f5f7;
+    --color-border: rgb(15 23 32 / 0.08);
+    --color-border-strong: rgb(15 23 32 / 0.16);
+    --color-primary: #00a85c;
+    --color-primary-dim: rgb(0 168 92 / 0.12);
+    --color-info: #0091c2;
+    --color-info-dim: rgb(0 145 194 / 0.12);
+    --color-warning: #a66b00;
+    --color-warning-dim: rgb(166 107 0 / 0.12);
+    --color-critical: #d33;
+    --color-critical-dim: rgb(221 51 51 / 0.12);
+    --color-text: #0f1520;
+    --color-muted: #5b6673;
+  }
 }
 
 * {
@@ -29,6 +116,59 @@ body,
   margin: 0;
 }
 
-code {
-  font-family: var(--mono);
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+.prose-8rack {
+  --tw-prose-body: var(--color-text);
+  --tw-prose-headings: var(--color-text);
+  --tw-prose-links: var(--color-primary);
+  --tw-prose-bold: var(--color-text);
+  --tw-prose-counters: var(--color-muted);
+  --tw-prose-bullets: var(--color-muted);
+  --tw-prose-code: var(--color-primary);
+  --tw-prose-pre-code: var(--color-text);
+  --tw-prose-pre-bg: transparent;
+  --tw-prose-quotes: var(--color-muted);
+  --tw-prose-quote-borders: var(--color-border);
+  --tw-prose-hr: var(--color-border);
+  --tw-prose-th-borders: var(--color-border);
+  --tw-prose-td-borders: var(--color-border);
+}
+.prose-8rack :first-child {
+  margin-top: 0;
+}
+.prose-8rack :last-child {
+  margin-bottom: 0;
+}
+.prose-8rack code::before,
+.prose-8rack code::after {
+  content: "";
 }

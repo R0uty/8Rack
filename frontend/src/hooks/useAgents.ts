@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchAgents, reloadAgents } from "../services/api";
-import type { AgentWithStatus } from "../types/agent";
+import type { AgentConfigWarning, AgentWithStatus } from "../types/agent";
 
 export function useAgents() {
   const [agents, setAgents] = useState<AgentWithStatus[]>([]);
+  const [warnings, setWarnings] = useState<AgentConfigWarning[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -11,7 +12,9 @@ export function useAgents() {
     setLoading(true);
     setError(null);
     try {
-      setAgents(await fetchAgents());
+      const result = await fetchAgents();
+      setAgents(result.agents);
+      setWarnings(result.warnings);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load agents");
     } finally {
@@ -25,7 +28,9 @@ export function useAgents() {
     setLoading(true);
     setError(null);
     try {
-      setAgents(await reloadAgents());
+      const result = await reloadAgents();
+      setAgents(result.agents);
+      setWarnings(result.warnings);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to reload agents");
     } finally {
@@ -37,5 +42,5 @@ export function useAgents() {
     load();
   }, [load]);
 
-  return { agents, loading, error, refresh };
+  return { agents, warnings, loading, error, refresh };
 }

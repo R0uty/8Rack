@@ -50,20 +50,21 @@ async function streamTask(
 export async function createTask(
   agentId: string,
   objective: string,
+  projectId: string,
   onChunk: (content: string) => void,
   signal?: AbortSignal,
 ): Promise<OrchestratorTask> {
   const res = await apiFetch("/api/orchestrator/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agentId, objective }),
+    body: JSON.stringify({ agentId, objective, projectId }),
     signal,
   });
   return streamTask(res, onChunk, signal);
 }
 
-export async function fetchTasks(): Promise<OrchestratorTask[]> {
-  const res = await apiFetch("/api/orchestrator/tasks");
+export async function fetchTasks(projectId: string): Promise<OrchestratorTask[]> {
+  const res = await apiFetch(`/api/orchestrator/tasks?projectId=${encodeURIComponent(projectId)}`);
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { tasks?: OrchestratorTask[] } | null;
   if (!data?.tasks) throw new ApiError("Received an invalid response from the server", 502);

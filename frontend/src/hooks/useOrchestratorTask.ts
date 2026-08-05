@@ -23,7 +23,7 @@ export function useOrchestratorTask() {
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const start = useCallback(async (agentId: string, objective: string) => {
+  const start = useCallback(async (agentId: string, objective: string, projectId: string) => {
     setBusy(true);
     setError(null);
     setLiveOutput([]);
@@ -36,6 +36,7 @@ export function useOrchestratorTask() {
         await createTask(
           agentId,
           objective,
+          projectId,
           (chunk) => setStreamingText((prev) => prev + chunk),
           controller.signal,
         ),

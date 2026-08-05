@@ -1,9 +1,14 @@
 import type { OllamaModel } from "../types/ollama";
 import type { ChatOptions, ChatRole, ToolCallInfo } from "../types/chat";
-import type { AgentWithStatus } from "../types/agent";
+import type { AgentConfigWarning, AgentWithStatus } from "../types/agent";
 import { ApiError, apiFetch, readNdjsonStream, throwForErrorResponse } from "./httpClient";
 
 export { ApiError };
+
+export interface AgentsResponse {
+  agents: AgentWithStatus[];
+  warnings: AgentConfigWarning[];
+}
 
 export async function fetchModels(): Promise<OllamaModel[]> {
   const res = await apiFetch("/api/models");
@@ -13,21 +18,22 @@ export async function fetchModels(): Promise<OllamaModel[]> {
   return data.models;
 }
 
-export async function fetchAgents(): Promise<AgentWithStatus[]> {
-  const res = await apiFetch("/api/agents");
+async function unwrapAgentsResponse(res: Response): Promise<AgentsResponse> {
   if (!res.ok) await throwForErrorResponse(res);
-  const data = (await res.json().catch(() => null)) as { agents?: AgentWithStatus[] } | null;
+  const data = (await res.json().catch(() => null)) as
+    | { agents?: AgentWithStatus[]; warnings?: AgentConfigWarning[] }
+    | null;
   if (!data?.agents) throw new ApiError("Received an invalid response from the server", 502);
-  return data.agents;
+  return { agents: data.agents, warnings: data.warnings ?? [] };
+}
+
+export async function fetchAgents(): Promise<AgentsResponse> {
+  return unwrapAgentsResponse(await apiFetch("/api/agents"));
 }
 
 /** Forces the backend to re-read agent config files from disk and re-check their models against Ollama. */
-export async function reloadAgents(): Promise<AgentWithStatus[]> {
-  const res = await apiFetch("/api/agents/reload", { method: "POST" });
-  if (!res.ok) await throwForErrorResponse(res);
-  const data = (await res.json().catch(() => null)) as { agents?: AgentWithStatus[] } | null;
-  if (!data?.agents) throw new ApiError("Received an invalid response from the server", 502);
-  return data.agents;
+export async function reloadAgents(): Promise<AgentsResponse> {
+  return unwrapAgentsResponse(await apiFetch("/api/agents/reload", { method: "POST" }));
 }
 
 interface ChatRequestPayload {

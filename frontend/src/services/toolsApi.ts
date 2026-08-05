@@ -9,8 +9,8 @@ export async function fetchTools(): Promise<ExecToolWithStatus[]> {
   return data.tools;
 }
 
-export async function fetchExecutions(): Promise<ExecutionRecord[]> {
-  const res = await apiFetch("/api/tools/executions");
+export async function fetchExecutions(projectId: string): Promise<ExecutionRecord[]> {
+  const res = await apiFetch(`/api/tools/executions?projectId=${encodeURIComponent(projectId)}`);
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { executions?: ExecutionRecord[] } | null;
   if (!data?.executions) throw new ApiError("Received an invalid response from the server", 502);
@@ -18,11 +18,16 @@ export async function fetchExecutions(): Promise<ExecutionRecord[]> {
 }
 
 /** Requests a tool execution — lands as `pending_confirmation` since every built-in tool requires it. */
-export async function requestToolExecution(tool: string, args: string[], stdin?: string): Promise<ExecutionRecord> {
+export async function requestToolExecution(
+  tool: string,
+  args: string[],
+  projectId: string,
+  stdin?: string,
+): Promise<ExecutionRecord> {
   const res = await apiFetch("/api/tools/request", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tool, arguments: args, stdin }),
+    body: JSON.stringify({ tool, arguments: args, projectId, stdin }),
   });
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { execution?: ExecutionRecord } | null;
