@@ -23,7 +23,13 @@ export interface PlanStepRun {
   finalResponse?: string;
 }
 
-export type MultiAgentPlanStatus = "running" | "waiting_confirmation" | "completed" | "failed" | "cancelled";
+export type MultiAgentPlanStatus =
+  | "running"
+  | "waiting_confirmation"
+  | "waiting_guidance"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface MultiAgentPlan {
   id: string;

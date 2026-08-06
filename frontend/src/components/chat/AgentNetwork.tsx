@@ -1,57 +1,118 @@
 import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
+import { MessageSquare, Wrench } from "lucide-react";
 import type { AgentWithStatus } from "../../types/agent";
+import type { SessionMeta } from "../../hooks/useSessions";
 import { iconFor } from "../../lib/icons";
 import { cn } from "../../lib/cn";
+import type { Tone } from "../ui";
 
 interface AgentNetworkProps {
   agents: AgentWithStatus[];
-  selectedAgentId: string | null;
+  /** All open sessions, both kinds - each renders as a small node connected to its parent agent
+   * (or to the hub, for a manual/no-agent chat). */
+  sessions: SessionMeta[];
+  statuses: Record<string, Tone>;
+  /** Opens/focuses a chat session for the clicked agent - the default "start working with this
+   * agent" gesture. */
   onSelectAgent: (agent: AgentWithStatus) => void;
+  /** Focuses an existing session's tab - the caller switches view first if it's a task session and
+   * the Workbench isn't currently showing. */
+  onSelectSession: (session: SessionMeta) => void;
 }
 
-/** The Chat view's empty-state "Command Center" - a radial network of the real configured
- * agents (name/icon/status/model, all real data). Connective lines + node entrance are purely
- * decorative motion; clicking a node reuses the same select/toggle-deselect behavior as the
- * sidebar agent list. Positions are computed, not fabricated telemetry. */
-export function AgentNetwork({ agents, selectedAgentId, onSelectAgent }: AgentNetworkProps) {
+const TONE_COLOR: Record<Tone, string> = {
+  primary: "var(--color-primary)",
+  info: "var(--color-info)",
+  warning: "var(--color-warning)",
+  critical: "var(--color-critical)",
+  neutral: "var(--color-muted)",
+};
+
+/** The Chat view's Home tab - a live map of the real configured agents plus every currently open
+ * session (see hooks/useSessions.ts), each rendered as a node connected to its parent agent (or,
+ * for a manual/no-agent chat, to the center hub). New nodes/lines appear the moment a session
+ * opens and disappear when it closes - this is a direct visualization of `sessions`, not a
+ * separate decorative state. */
+export function AgentNetwork({ agents, sessions, statuses, onSelectAgent, onSelectSession }: AgentNetworkProps) {
   const total = agents.length;
+  const manualSessions = sessions.filter((s) => s.agentId === null);
 
   return (
-    <div className="relative mx-auto h-[420px] w-full max-w-2xl">
-      {total > 0 && (
-        <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-          {agents.map((agent, i) => {
-            const { x, y } = nodePosition(i, total);
-            return (
+    <div className="relative mx-auto h-[460px] w-full max-w-2xl">
+      <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {agents.map((agent, i) => {
+          const { x, y } = agentNodePosition(i, total);
+          const agentSessions = sessions.filter((s) => s.agentId === agent.id);
+          return (
+            <g key={agent.id}>
               <motion.line
-                key={agent.id}
                 x1={50}
                 y1={50}
                 x2={x}
                 y2={y}
-                stroke={agent.id === selectedAgentId ? agent.color : "rgb(255 255 255 / 0.12)"}
+                stroke={agentSessions.length > 0 ? agent.color : "rgb(255 255 255 / 0.12)"}
                 strokeWidth={0.3}
                 initial={{ pathLength: 0, opacity: 0 }}
                 animate={{ pathLength: 1, opacity: 1 }}
                 transition={{ duration: 0.6, delay: 0.05 * i }}
               />
-            );
-          })}
-        </svg>
-      )}
+              {agentSessions.map((session, si) => {
+                const { x: sx, y: sy } = sessionNodePosition(i, total, si, agentSessions.length);
+                const tone = statuses[session.id] ?? "neutral";
+                return (
+                  <motion.line
+                    key={session.id}
+                    x1={x}
+                    y1={y}
+                    x2={sx}
+                    y2={sy}
+                    stroke={TONE_COLOR[tone]}
+                    strokeWidth={0.25}
+                    initial={{ pathLength: 0, opacity: 0 }}
+                    animate={{ pathLength: 1, opacity: 1 }}
+                    transition={{ duration: 0.4 }}
+                  />
+                );
+              })}
+            </g>
+          );
+        })}
+
+        {manualSessions.map((session, i) => {
+          const { x, y } = manualSessionPosition(i);
+          const tone = statuses[session.id] ?? "neutral";
+          return (
+            <motion.line
+              key={session.id}
+              x1={50}
+              y1={50}
+              x2={x}
+              y2={y}
+              stroke={TONE_COLOR[tone]}
+              strokeWidth={0.25}
+              initial={{ pathLength: 0, opacity: 0 }}
+              animate={{ pathLength: 1, opacity: 1 }}
+              transition={{ duration: 0.4 }}
+            />
+          );
+        })}
+      </svg>
 
       <div className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary text-lg font-bold text-black shadow-[0_0_28px_rgba(0,230,118,0.5)]">
-          8R
-        </div>
+        <img
+          src="/8rack-icon.png"
+          alt="8Rack"
+          className="h-14 w-14 rounded-2xl object-cover shadow-[0_0_28px_rgba(0,230,118,0.5)]"
+        />
         <span className="text-xs text-muted">Command Center</span>
       </div>
 
       {agents.map((agent, i) => {
-        const { x, y } = nodePosition(i, total);
+        const { x, y } = agentNodePosition(i, total);
         const Icon = iconFor(agent.icon);
-        const active = agent.id === selectedAgentId;
+        const agentSessions = sessions.filter((s) => s.agentId === agent.id);
+        const active = agentSessions.length > 0;
         return (
           <motion.button
             key={agent.id}
@@ -90,13 +151,93 @@ export function AgentNetwork({ agents, selectedAgentId, onSelectAgent }: AgentNe
           </motion.button>
         );
       })}
+
+      {agents.map((agent, i) => {
+        const agentSessions = sessions.filter((s) => s.agentId === agent.id);
+        return agentSessions.map((session, si) => (
+          <SessionNode
+            key={session.id}
+            session={session}
+            position={sessionNodePosition(i, total, si, agentSessions.length)}
+            tone={statuses[session.id] ?? "neutral"}
+            color={agent.color}
+            onClick={() => onSelectSession(session)}
+          />
+        ));
+      })}
+
+      {manualSessions.map((session, i) => (
+        <SessionNode
+          key={session.id}
+          session={session}
+          position={manualSessionPosition(i)}
+          tone={statuses[session.id] ?? "neutral"}
+          color="var(--color-muted)"
+          onClick={() => onSelectSession(session)}
+        />
+      ))}
     </div>
   );
 }
 
-function nodePosition(index: number, total: number): { x: number; y: number } {
+function SessionNode({
+  session,
+  position,
+  tone,
+  color,
+  onClick,
+}: {
+  session: SessionMeta;
+  position: { x: number; y: number };
+  tone: Tone;
+  color: string;
+  onClick: () => void;
+}) {
+  const Icon = session.kind === "task" ? Wrench : MessageSquare;
+  return (
+    <motion.button
+      type="button"
+      onClick={onClick}
+      initial={{ opacity: 0, scale: 0.4 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.4 }}
+      transition={{ duration: 0.25 }}
+      whileHover={{ scale: 1.15 }}
+      style={{ left: `${position.x}%`, top: `${position.y}%` }}
+      className="absolute flex -translate-x-1/2 -translate-y-1/2 items-center justify-center"
+      title={session.kind === "task" ? (session.initialObjective ?? "Task session") : "Chat session"}
+    >
+      <span
+        className="flex h-6 w-6 items-center justify-center rounded-full border backdrop-blur-xl"
+        style={{ borderColor: color, backgroundColor: `color-mix(in srgb, ${color} 22%, transparent)` }}
+      >
+        <Icon size={10} color={color} />
+      </span>
+      <span
+        className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border border-bg"
+        style={{ backgroundColor: TONE_COLOR[tone] }}
+      />
+    </motion.button>
+  );
+}
+
+function agentNodePosition(index: number, total: number): { x: number; y: number } {
   const angle = (index / Math.max(total, 1)) * 2 * Math.PI - Math.PI / 2;
-  const radiusX = 42;
-  const radiusY = 40;
-  return { x: 50 + radiusX * Math.cos(angle), y: 50 + radiusY * Math.sin(angle) };
+  return { x: 50 + 38 * Math.cos(angle), y: 50 + 36 * Math.sin(angle) };
+}
+
+function sessionNodePosition(
+  agentIndex: number,
+  totalAgents: number,
+  siblingIndex: number,
+  siblingCount: number,
+): { x: number; y: number } {
+  const baseAngle = (agentIndex / Math.max(totalAgents, 1)) * 2 * Math.PI - Math.PI / 2;
+  const spread = siblingCount > 1 ? 0.22 : 0;
+  const angle = baseAngle + (siblingIndex - (siblingCount - 1) / 2) * spread;
+  return { x: 50 + 50 * Math.cos(angle), y: 50 + 47 * Math.sin(angle) };
+}
+
+function manualSessionPosition(index: number): { x: number; y: number } {
+  return { x: 50, y: 50 + 24 + index * 9 };
 }

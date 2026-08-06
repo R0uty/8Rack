@@ -2,7 +2,14 @@ import { Router } from "express";
 import { RequestCancelledError } from "../services/errors.js";
 import { getAgent } from "../services/agentManager.js";
 import { getTask } from "../services/orchestrator.js";
-import { cancelPlan, createPlan, getPlan, listPlans, resumePlan } from "../services/multiAgentOrchestrator.js";
+import {
+  cancelPlan,
+  createPlan,
+  getPlan,
+  listPlans,
+  provideStepGuidance,
+  resumePlan,
+} from "../services/multiAgentOrchestrator.js";
 import { abortOnClientDisconnect } from "./streamUtils.js";
 import type { Response } from "express";
 import type { MultiAgentPlan, PlanStep } from "../types/orchestration.js";
@@ -126,6 +133,17 @@ plansRouter.get("/:id", (req, res) => {
 
 plansRouter.post("/:id/resume", async (req, res, next) => {
   await runAndStreamPlan(res, next, (onChunk, signal) => resumePlan(req.params.id, onChunk, signal));
+});
+
+plansRouter.post("/:id/guidance", async (req, res, next) => {
+  const body = req.body as { note?: unknown };
+  if (body.note !== undefined && typeof body.note !== "string") {
+    res.status(400).json({ error: "note must be a string", code: "INVALID_REQUEST" });
+    return;
+  }
+  await runAndStreamPlan(res, next, (onChunk, signal) =>
+    provideStepGuidance(req.params.id, body.note as string | undefined, onChunk, signal),
+  );
 });
 
 plansRouter.post("/:id/cancel", (req, res, next) => {

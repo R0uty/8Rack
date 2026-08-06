@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { FolderKanban, Plus, RefreshCw, X } from "lucide-react";
 import type { Project } from "../types/project";
-import { Button, GlassPanel, IconButton, SectionHeading } from "./ui";
+import { Button, FOCUS_RING, GlassPanel, IconButton, SectionHeading, Skeleton } from "./ui";
 import { cn } from "../lib/cn";
 
 interface ProjectPanelProps {
@@ -93,6 +93,12 @@ export function ProjectPanel({
           started.
         </p>
       )}
+      {loading && projects.length === 0 && (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <Skeleton className="h-[52px]" />
+          <Skeleton className="h-[52px]" />
+        </div>
+      )}
 
       {creating && (
         <GlassPanel padding="md" className="mb-3">
@@ -103,7 +109,7 @@ export function ProjectPanel({
             onChange={(e) => setName(e.target.value)}
             disabled={busy}
             autoFocus
-            className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60"
+            className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60"
           />
           <textarea
             placeholder="Notes (target scope, program, anything worth remembering)"
@@ -111,7 +117,7 @@ export function ProjectPanel({
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             disabled={busy}
-            className="mt-2 w-full resize-none rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60"
+            className="mt-2 w-full resize-none rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60"
           />
           <Button variant="primary" size="sm" onClick={handleCreate} disabled={!name.trim() || busy} className="mt-2.5">
             {busy ? "Creating…" : "Create"}
@@ -167,7 +173,10 @@ export function ProjectPanel({
                     }}
                     disabled={disabled}
                     title="Delete project"
-                    className="shrink-0 rounded p-0.5 text-muted opacity-0 transition-opacity hover:text-critical group-hover:opacity-100"
+                    className={cn(
+                      "shrink-0 rounded p-0.5 text-muted opacity-0 transition-opacity hover:text-critical group-hover:opacity-100 focus-visible:opacity-100",
+                      FOCUS_RING,
+                    )}
                   >
                     <X size={13} />
                   </button>

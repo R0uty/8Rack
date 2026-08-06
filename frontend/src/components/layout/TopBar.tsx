@@ -1,6 +1,6 @@
 import { Command, Moon, Settings, Sun } from "lucide-react";
 import type { Theme } from "../../hooks/useTheme";
-import { IconButton } from "../ui";
+import { FOCUS_RING, IconButton } from "../ui";
 import { type AppView, VIEW_LABEL } from "./types";
 
 interface TopBarProps {
@@ -29,7 +29,7 @@ export function TopBar({
       <button
         type="button"
         onClick={onOpenCommandPalette}
-        className="ml-2 flex flex-1 max-w-md items-center gap-2 rounded-full border border-border bg-card/60 px-4 py-2 text-left text-sm text-muted backdrop-blur-xl transition-colors hover:border-border-strong hover:text-text"
+        className={`ml-2 flex flex-1 max-w-md items-center gap-2 rounded-full border border-border bg-card/60 px-4 py-2 text-left text-sm text-muted backdrop-blur-xl transition-colors hover:border-border-strong hover:text-text ${FOCUS_RING}`}
       >
         <Command size={14} />
         <span className="flex-1">Search or run a command…</span>

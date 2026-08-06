@@ -9,12 +9,16 @@ import { toolsRouter } from "./routes/tools.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
 import { projectsRouter } from "./routes/projects.js";
 import { plansRouter } from "./routes/plans.js";
+import { ragRouter } from "./routes/rag.js";
+import { findingsRouter, projectFindingsRouter } from "./routes/findings.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { loadAgents } from "./services/agentManager.js";
 import { listExecToolsWithStatus, loadExecutionsFromDisk, registerExecTool } from "./services/toolManager.js";
 import { loadTasksFromDisk } from "./services/orchestrator.js";
 import { loadPlansFromDisk } from "./services/multiAgentOrchestrator.js";
+import { loadFindingsFromDisk } from "./services/findingsManager.js";
 import { listProjects } from "./services/projectManager.js";
+import { getStatus as getRagStatus, loadIndexFromDisk } from "./services/ragIndex.js";
 import { builtinExecTools } from "./tools/exec/builtins.js";
 
 for (const tool of builtinExecTools) registerExecTool(tool);
@@ -34,7 +38,10 @@ app.use("/api/agents", agentsRouter);
 app.use("/api/tools", toolsRouter);
 app.use("/api/orchestrator", orchestratorRouter);
 app.use("/api/projects", projectsRouter);
+app.use("/api/projects/:projectId/findings", projectFindingsRouter);
+app.use("/api/findings", findingsRouter);
 app.use("/api/plans", plansRouter);
+app.use("/api/rag", ragRouter);
 
 app.use(errorHandler);
 
@@ -57,5 +64,14 @@ app.listen(env.port, async () => {
   await loadExecutionsFromDisk();
   await loadTasksFromDisk();
   await loadPlansFromDisk();
-  console.log(`Loaded ${projects.length} project(s) with persisted execution/task/plan history`);
+  await loadFindingsFromDisk();
+  console.log(`Loaded ${projects.length} project(s) with persisted execution/task/plan/finding history`);
+
+  await loadIndexFromDisk();
+  const ragStatus = getRagStatus();
+  console.log(
+    ragStatus.indexedAt
+      ? `RAG index loaded: ${ragStatus.chunkCount} chunk(s) across ${ragStatus.fileCount} file(s) (${ragStatus.embeddingModel})`
+      : "RAG index not built yet - POST /api/rag/reindex once an embedding model is pulled",
+  );
 });

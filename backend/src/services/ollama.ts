@@ -1,5 +1,6 @@
 import { env } from "../config/env.js";
 import {
+  EmbeddingModelUnavailableError,
   OllamaConnectionError,
   OllamaModelNotFoundError,
   OllamaRequestError,
@@ -52,6 +53,39 @@ export async function listModels(): Promise<OllamaModel[]> {
 
   const data = (await res.json()) as { models: OllamaModel[] };
   return data.models;
+}
+
+/**
+ * Embeds a batch of strings with the given model via POST /api/embed. Most chat/coder models
+ * don't declare Ollama's "embedding" capability and get flatly rejected (confirmed live against
+ * this project's own installed models) - that specific failure is surfaced as
+ * EmbeddingModelUnavailableError so callers (services/ragIndex.ts) can give an actionable message
+ * instead of a raw Ollama error string.
+ */
+export async function embed(model: string, input: string[]): Promise<number[][]> {
+  const res = await ollamaFetch("/api/embed", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, input }),
+  });
+
+  if (!res.ok) {
+    let message = `Ollama request failed with status ${res.status}`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body?.error) message = body.error;
+    } catch {
+      // response body wasn't JSON; keep the default message
+    }
+    if (isModelNotFoundMessage(message) || message.toLowerCase().includes("does not support embeddings")) {
+      throw new EmbeddingModelUnavailableError(model);
+    }
+    throw new OllamaRequestError(message, res.status);
+  }
+
+  const data = (await res.json()) as { embeddings?: number[][] };
+  if (!data.embeddings) throw new OllamaRequestError("Ollama returned no embeddings", 502);
+  return data.embeddings;
 }
 
 /**

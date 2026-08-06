@@ -1,8 +1,8 @@
-import type { ReactNode } from "react";
-import { Wrench } from "lucide-react";
+import { useState, type KeyboardEvent, type ReactNode } from "react";
+import { AlertTriangle, ArrowUp, Wrench } from "lucide-react";
 import { Markdown } from "./Markdown";
 import { ExecutionConsole } from "./ExecutionConsole";
-import { Button, Collapsible, GlassPanel, StatusPill, StreamingCursor, type Tone } from "./ui";
+import { Button, Collapsible, GlassPanel, IconButton, StatusPill, StreamingCursor, type Tone } from "./ui";
 import type { LiveOutputChunk } from "../hooks/useOrchestratorTask";
 import type { ExecutionRecord } from "../types/execTool";
 import type { OrchestratorMessage, OrchestratorTask, TaskStatus } from "../types/orchestrator";
@@ -26,6 +26,7 @@ export const TERMINAL_STATUSES: TaskStatus[] = [
 export const STATUS_LABEL: Record<TaskStatus, string> = {
   running: "Running…",
   waiting_confirmation: "Waiting for confirmation",
+  waiting_guidance: "Needs your input",
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -36,6 +37,7 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
 export const STATUS_TONE: Record<TaskStatus, Tone> = {
   running: "info",
   waiting_confirmation: "warning",
+  waiting_guidance: "critical",
   completed: "primary",
   failed: "critical",
   cancelled: "neutral",
@@ -211,6 +213,93 @@ function TaskMessageView({ message }: { message: OrchestratorMessage }) {
   return <AssistantCard message={message} />;
 }
 
+/** A follow-up message box shown once a task has completed - sends more instructions into the
+ * same task (same message history, same tool budget already spent) instead of forcing a brand
+ * new task with no memory of what came before. Mirrors PromptInput's Enter-to-send convention. */
+function ContinueTaskInput({ busy, onContinue }: { busy: boolean; onContinue: (message: string) => void }) {
+  const [value, setValue] = useState("");
+
+  const submit = () => {
+    const trimmed = value.trim();
+    if (!trimmed || busy) return;
+    onContinue(trimmed);
+    setValue("");
+  };
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
+
+  return (
+    <GlassPanel padding="none" className="flex items-end gap-2 p-2.5" raised>
+      <textarea
+        className="max-h-[160px] min-h-[24px] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-text placeholder:text-muted focus:outline-none disabled:opacity-50"
+        placeholder="Send a follow-up to continue this task…"
+        rows={1}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={handleKeyDown}
+        disabled={busy}
+      />
+      <IconButton
+        icon={ArrowUp}
+        label="Continue task"
+        variant="primary"
+        onClick={submit}
+        disabled={busy || !value.trim()}
+      />
+    </GlassPanel>
+  );
+}
+
+/** Shown when a task pauses at "waiting_guidance" - a tool request that failed outright (no
+ * pendingExecution to show), or a confirmed execution that ran and failed/was cancelled (rendered
+ * above via the existing ExecutionConsole). Lets a human add a correction before the agent tries
+ * again - e.g. "that tool isn't installed, try httpx instead" - but the box is optional: hitting
+ * Continue empty just lets the agent retry on its own with whatever's already in the transcript. */
+function GuidanceInput({ busy, onProvideGuidance }: { busy: boolean; onProvideGuidance: (note: string) => void }) {
+  const [value, setValue] = useState("");
+
+  const submit = () => {
+    if (busy) return;
+    onProvideGuidance(value.trim());
+    setValue("");
+  };
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-start gap-1.5 text-xs text-warning">
+        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+        That didn't go as planned. Optionally tell the agent what to do differently, or just hit Continue to let it try again on its own.
+      </div>
+      <GlassPanel padding="none" className="flex items-end gap-2 p-2.5" raised>
+        <textarea
+          className="max-h-[160px] min-h-[24px] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-text placeholder:text-muted focus:outline-none disabled:opacity-50"
+          placeholder={'Optional: e.g. "that tool isn\'t installed, try httpx instead"…'}
+          rows={1}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          disabled={busy}
+        />
+        <Button variant="primary" size="sm" onClick={submit} disabled={busy}>
+          {busy ? "Continuing…" : "Continue"}
+        </Button>
+      </GlassPanel>
+    </div>
+  );
+}
+
 interface OrchestratorTaskViewProps {
   task: OrchestratorTask;
   /** Fully-formed header text, e.g. "Agent: Recon Agent" or "Step 2 — Recon Agent". */
@@ -222,6 +311,12 @@ interface OrchestratorTaskViewProps {
   error: string | null;
   onApprove: () => void;
   onReject: () => void;
+  /** Called from the waiting_guidance card (a failed tool request/execution) with an optional
+   * correction/suggestion - empty string means "just try again". */
+  onProvideGuidance: (note: string) => void;
+  /** Omit to hide the follow-up input entirely (e.g. the Planner's per-step view, where a step's
+   * task is one leg of a fixed plan rather than something to keep talking to on its own). */
+  onContinue?: (message: string) => void;
   /** Omit to hide the Cancel button entirely (e.g. when the caller renders its own). */
   onCancel?: () => void;
   /** Omit to hide the "New Task" button (e.g. the Planner shows its own "New Plan" outside). */
@@ -238,6 +333,8 @@ export function OrchestratorTaskView({
   error,
   onApprove,
   onReject,
+  onProvideGuidance,
+  onContinue,
   onCancel,
   onReset,
 }: OrchestratorTaskViewProps) {
@@ -291,6 +388,22 @@ export function OrchestratorTaskView({
           </div>
         </div>
       )}
+
+      {task.status === "waiting_guidance" && (
+        <div className="flex flex-col gap-2.5">
+          {pendingExecution && (
+            <ExecutionConsole
+              toolId={pendingExecution.toolId}
+              resolvedCommand={pendingExecution.resolvedCommand}
+              status={pendingExecution.status}
+              result={pendingExecution.result}
+            />
+          )}
+          <GuidanceInput busy={busy} onProvideGuidance={onProvideGuidance} />
+        </div>
+      )}
+
+      {onContinue && task.status === "completed" && <ContinueTaskInput busy={busy} onContinue={onContinue} />}
 
       {task.error && <p className="text-xs text-critical">{task.error}</p>}
       {error && <p className="text-xs text-critical">{error}</p>}

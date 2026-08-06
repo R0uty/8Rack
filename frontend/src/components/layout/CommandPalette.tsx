@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Cpu, MessageSquare, Search, Settings, ServerCog, Sun, Workflow } from "lucide-react";
+import { Cpu, MessageSquare, Search, Settings, ServerCog, ShieldAlert, Sun, Workflow } from "lucide-react";
 import type { AgentWithStatus } from "../../types/agent";
 import type { OllamaModel } from "../../types/ollama";
 import { iconFor } from "../../lib/icons";
@@ -32,6 +32,7 @@ const VIEW_ICON: Record<AppView, typeof MessageSquare> = {
   chat: MessageSquare,
   workbench: ServerCog,
   plans: Workflow,
+  findings: ShieldAlert,
 };
 
 /** Cmd/Ctrl+K palette - real, client-side actions only (view switching, agent/model selection,
@@ -76,7 +77,7 @@ export function CommandPalette({
     agents.forEach((agent) => {
       list.push({
         id: `agent-${agent.id}`,
-        label: `Select ${agent.name}`,
+        label: `Chat with ${agent.name}`,
         hint: agent.status === "online" ? "Agent · online" : "Agent · offline",
         icon: iconFor(agent.icon),
         keywords: `agent ${agent.name} ${agent.description} ${agent.model}`,
@@ -87,7 +88,7 @@ export function CommandPalette({
     models.forEach((model) => {
       list.push({
         id: `model-${model.name}`,
-        label: `Use model ${model.name}`,
+        label: `Set manual chat model to ${model.name}`,
         hint: "Model",
         icon: Cpu,
         keywords: `model ${model.name}`,

@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { cancelPlan, createPlan, fetchPlan, resumePlan } from "../services/plansApi";
+import { cancelPlan, createPlan, fetchPlan, provideStepGuidance, resumePlan } from "../services/plansApi";
 import { confirmExecution, rejectExecution } from "../services/toolsApi";
 import type { LiveOutputChunk } from "./useOrchestratorTask";
 import type { OrchestratorTask } from "../types/orchestrator";
@@ -113,6 +113,40 @@ export function useMultiAgentPlan() {
     }
   }, [plan, currentStepTask]);
 
+  /** Resumes the current step's task from "waiting_guidance" (a failed tool request/execution) -
+   * see useOrchestratorTask.ts#provideGuidance, one level up. */
+  const provideGuidance = useCallback(
+    async (note?: string) => {
+      if (!plan || plan.status !== "waiting_guidance") return;
+      setBusy(true);
+      setError(null);
+      setLiveOutput([]);
+      setStreamingText("");
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        const result = await provideStepGuidance(
+          plan.id,
+          note,
+          (chunk) => setStreamingText((prev) => prev + chunk),
+          controller.signal,
+        );
+        setPlan(result.plan);
+        setCurrentStepTask(result.currentStepTask);
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          setError(err instanceof Error ? err.message : "Failed to send guidance");
+        }
+      } finally {
+        abortRef.current = null;
+        setStreamingText("");
+        setBusy(false);
+      }
+    },
+    [plan],
+  );
+
   const cancel = useCallback(async () => {
     if (!plan) return;
     abortRef.current?.abort();
@@ -142,5 +176,18 @@ export function useMultiAgentPlan() {
     setBusy(false);
   }, []);
 
-  return { plan, currentStepTask, liveOutput, streamingText, busy, error, start, approve, reject, cancel, reset };
+  return {
+    plan,
+    currentStepTask,
+    liveOutput,
+    streamingText,
+    busy,
+    error,
+    start,
+    approve,
+    reject,
+    provideGuidance,
+    cancel,
+    reset,
+  };
 }

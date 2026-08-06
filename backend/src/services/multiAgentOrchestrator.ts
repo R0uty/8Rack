@@ -3,6 +3,7 @@ import { getAgent } from "./agentManager.js";
 import {
   cancelTask as cancelOrchestratorTask,
   createTask as createOrchestratorTask,
+  provideGuidance as provideOrchestratorGuidance,
   resumeTask as resumeOrchestratorTask,
 } from "./orchestrator.js";
 import type { ChunkListener, OrchestratorTask } from "./orchestrator.js";
@@ -76,6 +77,16 @@ async function continueAfterStepTask(
 
   if (task.status === "waiting_confirmation") {
     plan.status = "waiting_confirmation";
+    touch(plan);
+    return plan;
+  }
+
+  if (task.status === "waiting_guidance") {
+    // A step's tool request failed outright, or ran and failed - same pause orchestrator.ts uses
+    // for a standalone task (see provideGuidance there). The whole plan pauses here too rather
+    // than being misclassified as failed by the fallback branch below - resumed via
+    // provideStepGuidance.
+    plan.status = "waiting_guidance";
     touch(plan);
     return plan;
   }
@@ -168,6 +179,41 @@ export async function resumePlan(id: string, onChunk?: ChunkListener, signal?: A
   plan.status = "running";
   try {
     const task = await resumeOrchestratorTask(currentRun.orchestratorTaskId, onChunk, signal);
+    const result = await continueAfterStepTask(plan, task, onChunk, signal);
+    await persistPlans(plan.projectId);
+    return result;
+  } catch (err) {
+    if (err instanceof RequestCancelledError) {
+      plan.status = "cancelled";
+      touch(plan);
+    }
+    await persistPlans(plan.projectId).catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * Call once the current step's task has paused at "waiting_guidance" - a tool request that failed
+ * outright, or a confirmed execution that came back failed/cancelled (see
+ * orchestrator.ts#provideGuidance). An optional human note steers the step's agent before it tries
+ * again; omitting it just lets it retry on its own.
+ */
+export async function provideStepGuidance(
+  id: string,
+  note?: string,
+  onChunk?: ChunkListener,
+  signal?: AbortSignal,
+): Promise<MultiAgentPlan> {
+  const plan = plans.get(id);
+  if (!plan) throw new PlanNotFoundError(id);
+  if (plan.status !== "waiting_guidance") {
+    throw new InvalidPlanStateError(`Plan "${id}" is not waiting on guidance (status: ${plan.status})`);
+  }
+
+  const currentRun = plan.stepRuns[plan.currentStepIndex];
+  plan.status = "running";
+  try {
+    const task = await provideOrchestratorGuidance(currentRun.orchestratorTaskId, note, onChunk, signal);
     const result = await continueAfterStepTask(plan, task, onChunk, signal);
     await persistPlans(plan.projectId);
     return result;

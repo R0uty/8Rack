@@ -51,6 +51,20 @@ export class AgentOfflineError extends Error {
   }
 }
 
+export class AgentIdConflictError extends Error {
+  constructor(agentId: string) {
+    super(`Agent "${agentId}" already exists`);
+    this.name = "AgentIdConflictError";
+  }
+}
+
+export class InvalidAgentConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidAgentConfigError";
+  }
+}
+
 export class UnknownToolError extends Error {
   constructor(toolNames: string[]) {
     super(`Unknown tool(s): ${toolNames.join(", ")}`);
@@ -125,5 +139,31 @@ export class InvalidPlanStateError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InvalidPlanStateError";
+  }
+}
+
+export class FindingNotFoundError extends Error {
+  constructor(findingId: string) {
+    super(`Finding "${findingId}" was not found`);
+    this.name = "FindingNotFoundError";
+  }
+}
+
+export class CveLookupError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "CveLookupError";
+    this.cause = cause;
+  }
+}
+
+export class EmbeddingModelUnavailableError extends Error {
+  constructor(model: string, cause?: unknown) {
+    super(
+      `Embedding model "${model}" isn't available. Pull a model with embedding support, e.g.: ` +
+        `ollama pull ${model}`,
+    );
+    this.name = "EmbeddingModelUnavailableError";
+    this.cause = cause;
   }
 }

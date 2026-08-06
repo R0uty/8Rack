@@ -53,11 +53,13 @@ export async function createTask(
   projectId: string,
   onChunk: (content: string) => void,
   signal?: AbortSignal,
+  /** Overrides the agent's configured model for this task, same convention as the chat path. */
+  model?: string,
 ): Promise<OrchestratorTask> {
   const res = await apiFetch("/api/orchestrator/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agentId, objective, projectId }),
+    body: JSON.stringify({ agentId, objective, projectId, model }),
     signal,
   });
   return streamTask(res, onChunk, signal);
@@ -87,4 +89,39 @@ export async function resumeTask(
 
 export async function cancelTask(id: string): Promise<OrchestratorTask> {
   return unwrapTask(await apiFetch(`/api/orchestrator/tasks/${encodeURIComponent(id)}/cancel`, { method: "POST" }));
+}
+
+/** Sends a follow-up message into an already-completed task, continuing the same conversation
+ * instead of starting a brand-new task with no memory of what came before. */
+export async function continueTask(
+  id: string,
+  message: string,
+  onChunk: (content: string) => void,
+  signal?: AbortSignal,
+): Promise<OrchestratorTask> {
+  const res = await apiFetch(`/api/orchestrator/tasks/${encodeURIComponent(id)}/continue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+    signal,
+  });
+  return streamTask(res, onChunk, signal);
+}
+
+/** Resumes a task paused at "waiting_guidance" (a tool request that failed outright, or a
+ * confirmed execution that came back failed/cancelled) - an optional human note steers the agent's
+ * next attempt; omitting it just lets it try again on its own. */
+export async function provideGuidance(
+  id: string,
+  note: string | undefined,
+  onChunk: (content: string) => void,
+  signal?: AbortSignal,
+): Promise<OrchestratorTask> {
+  const res = await apiFetch(`/api/orchestrator/tasks/${encodeURIComponent(id)}/guidance`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ note }),
+    signal,
+  });
+  return streamTask(res, onChunk, signal);
 }

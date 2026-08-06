@@ -72,6 +72,27 @@ describe("agent validity checks", () => {
     mockGetAgent.mockResolvedValue({ ...fixtureAgent, status: "offline" });
     await expect(drain("planner")).rejects.toThrow(AgentOfflineError);
   });
+
+  it("does not throw AgentOfflineError when a model override is given, even if the agent's own model is offline", async () => {
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, status: "offline" });
+    await expect(
+      drain("planner", { agentId: "planner", messages: [], model: "override-model" }),
+    ).resolves.not.toThrow();
+  });
+});
+
+describe("model override", () => {
+  it("uses the agent's configured model when no override is given", async () => {
+    await drain("planner");
+    const [{ model }] = mockStreamChat.mock.calls[0];
+    expect(model).toBe("test-model");
+  });
+
+  it("uses the request's model instead of the agent's when an override is given", async () => {
+    await drain("planner", { agentId: "planner", messages: [], model: "override-model" });
+    const [{ model }] = mockStreamChat.mock.calls[0];
+    expect(model).toBe("override-model");
+  });
 });
 
 describe("system prompt + options assembly", () => {
@@ -140,6 +161,48 @@ describe("tool resolution branch", () => {
     await expect(drain("planner", { agentId: "planner", messages: [], tools: ["ghost-tool"] })).rejects.toThrow(
       UnknownToolError,
     );
+    expect(mockStreamChatWithTools).not.toHaveBeenCalled();
+  });
+});
+
+describe("agent.tools fallback", () => {
+  beforeEach(() => {
+    mockResolveOllamaTools.mockReturnValue({
+      specs: [{ type: "function", function: { name: "search_knowledge_base", description: "", parameters: { type: "object", properties: {} } } }],
+      unknown: [],
+    });
+  });
+
+  it("activates the agent's own configured tools when the request doesn't specify any", async () => {
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, tools: ["search_knowledge_base"] });
+
+    await drain("planner");
+
+    expect(mockResolveOllamaTools).toHaveBeenCalledWith(["search_knowledge_base"]);
+    expect(mockStreamChatWithTools).toHaveBeenCalledOnce();
+    expect(mockStreamChat).not.toHaveBeenCalled();
+  });
+
+  it("lets an explicit request.tools override the agent's configured tools", async () => {
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, tools: ["search_knowledge_base"] });
+
+    await drain("planner", { agentId: "planner", messages: [], tools: ["other-tool"] });
+
+    expect(mockResolveOllamaTools).toHaveBeenCalledWith(["other-tool"]);
+  });
+
+  it("does not activate the agent's tools when toolsPreamble is set (the Orchestrator path)", async () => {
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, tools: ["search_knowledge_base"] });
+
+    await drain("planner", { agentId: "planner", messages: [], toolsPreamble: "Available tools: bash" });
+
+    expect(mockStreamChatWithTools).not.toHaveBeenCalled();
+    expect(mockStreamChat).toHaveBeenCalledOnce();
+  });
+
+  it("still calls plain streamChat when the agent has no tools configured", async () => {
+    await drain("planner");
+    expect(mockStreamChat).toHaveBeenCalledOnce();
     expect(mockStreamChatWithTools).not.toHaveBeenCalled();
   });
 });

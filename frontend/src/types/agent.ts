@@ -11,6 +11,9 @@ export interface Agent {
   color: string;
   enabled: boolean;
   tools?: string[];
+  /** Ids of exec tools (see types/execTool.ts) this agent may request via the Orchestrator.
+   * Omitted means every enabled exec tool is available (unrestricted); an empty array means none. */
+  execTools?: string[];
 }
 
 export type AgentStatus = "online" | "offline";

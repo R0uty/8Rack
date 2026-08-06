@@ -6,6 +6,7 @@ import { env } from "../config/env.js";
 import { runExecutable } from "./toolExecutor.js";
 import type { OutputChunk } from "./toolExecutor.js";
 import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
+import { ingestExecution } from "./findingsManager.js";
 import {
   ExecToolDisabledError,
   ExecToolNotFoundError,
@@ -168,6 +169,15 @@ async function runRecord(
   console.log(
     `[tools] ${record.status}: ${record.resolvedCommand} (exit ${result.exitCode}, ${result.executionTimeMs}ms)`,
   );
+
+  // Execution -> Parser -> Findings Engine -> Project Findings. A parsing failure must never
+  // break the actual tool-execution flow, hence the isolated try/catch (ingestExecution itself
+  // already never throws, but this stays defensive against future changes there).
+  try {
+    await ingestExecution(record);
+  } catch (err) {
+    console.error(`[tools] findings ingestion failed for execution "${record.id}":`, err);
+  }
 
   await persistExecutions(record.projectId);
   return record;

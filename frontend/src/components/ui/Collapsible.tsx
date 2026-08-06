@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { FOCUS_RING } from "./Button";
 
 interface CollapsibleProps {
   trigger: ReactNode;
@@ -20,7 +21,7 @@ export function Collapsible({ trigger, children, defaultOpen = false, className 
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between gap-2 text-left"
+        className={cn("flex w-full items-center justify-between gap-2 rounded-md text-left", FOCUS_RING)}
       >
         {trigger}
         <ChevronDown

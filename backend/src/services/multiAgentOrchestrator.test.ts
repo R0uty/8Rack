@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAgent } from "./agentManager.js";
-import { cancelTask, createTask, resumeTask } from "./orchestrator.js";
+import { cancelTask, createTask, provideGuidance, resumeTask } from "./orchestrator.js";
 import { InvalidPlanStateError, PlanNotFoundError } from "./errors.js";
-import { cancelPlan, createPlan, resumePlan } from "./multiAgentOrchestrator.js";
+import { cancelPlan, createPlan, provideStepGuidance, resumePlan } from "./multiAgentOrchestrator.js";
 import type { AgentWithStatus } from "../types/agent.js";
 import type { OrchestratorTask, TaskStatus } from "./orchestrator.js";
 import type { PlanStep } from "../types/orchestration.js";
@@ -13,6 +13,7 @@ vi.mock("./orchestrator.js", () => ({
   createTask: vi.fn(),
   resumeTask: vi.fn(),
   cancelTask: vi.fn(),
+  provideGuidance: vi.fn(),
 }));
 vi.mock("./projectStore.js", () => ({
   listProjectIds: vi.fn(async () => []),
@@ -24,6 +25,7 @@ const mockGetAgent = vi.mocked(getAgent);
 const mockCreateTask = vi.mocked(createTask);
 const mockResumeTask = vi.mocked(resumeTask);
 const mockCancelTask = vi.mocked(cancelTask);
+const mockProvideGuidance = vi.mocked(provideGuidance);
 
 function fixtureAgent(id: string, name: string): AgentWithStatus {
   return {
@@ -111,6 +113,19 @@ describe("createPlan", () => {
     expect(mockCreateTask).toHaveBeenCalledTimes(1);
   });
 
+  it("stops at waiting_guidance without starting the next step", async () => {
+    const pending = fixtureTask({ status: "waiting_guidance", finalResponse: undefined });
+    mockCreateTask.mockResolvedValueOnce(pending);
+
+    const plan = await createPlan("proj-1", "desc", twoSteps);
+
+    // Must not be misclassified as a plan failure by the fallback branch.
+    expect(plan.status).toBe("waiting_guidance");
+    expect(plan.error).toBeUndefined();
+    expect(plan.stepRuns).toHaveLength(1);
+    expect(mockCreateTask).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["failed", "failed"],
     ["cancelled", "cancelled"],
@@ -158,6 +173,52 @@ describe("resumePlan", () => {
     expect(resumed.status).toBe("completed");
     expect(resumed.stepRuns).toHaveLength(2);
     expect(resumed.stepRuns[1].objective).toContain("step 1 done");
+  });
+});
+
+describe("provideStepGuidance", () => {
+  it("throws PlanNotFoundError for an unknown id", async () => {
+    await expect(provideStepGuidance("nope")).rejects.toThrow(PlanNotFoundError);
+  });
+
+  it("throws InvalidPlanStateError when the plan isn't waiting on guidance", async () => {
+    const taskA = fixtureTask({ status: "completed" });
+    const taskB = fixtureTask({ status: "completed" });
+    mockCreateTask.mockResolvedValueOnce(taskA).mockResolvedValueOnce(taskB);
+    const plan = await createPlan("proj-1", "desc", twoSteps);
+
+    await expect(provideStepGuidance(plan.id)).rejects.toThrow(InvalidPlanStateError);
+  });
+
+  it("passes the note through to the step's task and automatically advances into the next step", async () => {
+    const pending = fixtureTask({ status: "waiting_guidance" });
+    mockCreateTask.mockResolvedValueOnce(pending);
+    const plan = await createPlan("proj-1", "desc", twoSteps);
+
+    const resolvedStep1 = fixtureTask({ ...pending, status: "completed", finalResponse: "step 1 done" });
+    const taskB = fixtureTask({ agentId: "agent-b", status: "completed", finalResponse: "step 2 done" });
+    mockProvideGuidance.mockResolvedValueOnce(resolvedStep1);
+    mockCreateTask.mockResolvedValueOnce(taskB);
+
+    const resumed = await provideStepGuidance(plan.id, "try httpx instead");
+
+    expect(mockProvideGuidance).toHaveBeenCalledWith(pending.id, "try httpx instead", undefined, undefined);
+    expect(resumed.status).toBe("completed");
+    expect(resumed.stepRuns).toHaveLength(2);
+    expect(resumed.stepRuns[1].objective).toContain("step 1 done");
+  });
+
+  it("can leave the plan paused again if the step's next attempt also needs guidance", async () => {
+    const pending = fixtureTask({ status: "waiting_guidance" });
+    mockCreateTask.mockResolvedValueOnce(pending);
+    const plan = await createPlan("proj-1", "desc", twoSteps);
+
+    mockProvideGuidance.mockResolvedValueOnce(fixtureTask({ ...pending, status: "waiting_guidance" }));
+
+    const resumed = await provideStepGuidance(plan.id);
+
+    expect(resumed.status).toBe("waiting_guidance");
+    expect(mockCreateTask).toHaveBeenCalledTimes(1);
   });
 });
 

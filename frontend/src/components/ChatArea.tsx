@@ -1,36 +1,23 @@
 import { useEffect, useRef } from "react";
 import { Trash2 } from "lucide-react";
 import { ChatMessageView } from "./ChatMessageView";
-import { AgentNetwork } from "./chat/AgentNetwork";
 import { Button } from "./ui";
 import type { ChatMessage } from "../types/chat";
-import type { AgentWithStatus } from "../types/agent";
 
 interface ChatAreaProps {
   messages: ChatMessage[];
   onClear: () => void;
-  agents: AgentWithStatus[];
-  selectedAgentId: string | null;
-  onSelectAgent: (agent: AgentWithStatus) => void;
 }
 
-export function ChatArea({ messages, onClear, agents, selectedAgentId, onSelectAgent }: ChatAreaProps) {
+/** One session's message transcript. The empty (no-agent, network-graph) landing state lives one
+ * level up, in the Chat view's Home tab - by the time a ChatArea is mounted, it belongs to a real
+ * open session, so an empty list here just means "nothing sent in this session yet". */
+export function ChatArea({ messages, onClear }: ChatAreaProps) {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
-
-  if (messages.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-6">
-        <AgentNetwork agents={agents} selectedAgentId={selectedAgentId} onSelectAgent={onSelectAgent} />
-        <p className="max-w-sm text-center text-sm text-muted">
-          Select an agent above or just start typing below to chat with the current model.
-        </p>
-      </div>
-    );
-  }
 
   return (
     <div className="flex h-full flex-col">
@@ -40,6 +27,7 @@ export function ChatArea({ messages, onClear, agents, selectedAgentId, onSelectA
         </Button>
       </div>
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto pb-2">
+        {messages.length === 0 && <p className="text-sm text-muted">No messages yet — say something below.</p>}
         {messages.map((message) => (
           <ChatMessageView key={message.id} message={message} />
         ))}

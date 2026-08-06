@@ -1,52 +1,64 @@
-import { Gauge, MessagesSquare, Sliders } from "lucide-react";
+import { Gauge, Radio, Sliders } from "lucide-react";
 import type { AgentWithStatus } from "../../types/agent";
+import type { SessionMeta } from "../../hooks/useSessions";
 import { iconFor } from "../../lib/icons";
 import { GlassPanel, SectionHeading, StatusDot } from "../ui";
 
 interface RightPanelProps {
-  selectedAgent: AgentWithStatus | null;
-  selectedModel: string | null;
-  messageCount: number;
+  /** The agent behind the currently focused session, if any (null on the Home tab or a manual chat). */
+  activeAgent: AgentWithStatus | null;
+  /** The focused session's actual model — may differ from activeAgent.model if overridden. */
+  activeModel: string | null;
+  /** Every open session across both views, for the "what's running" readout below. */
+  sessions: SessionMeta[];
 }
 
-/** The Chat view's context panel: real agent/model detail and a real session readout — no
- * fabricated token/GPU/memory metrics (nothing in this app tracks those). */
-export function RightPanel({ selectedAgent, selectedModel, messageCount }: RightPanelProps) {
+/** The Chat view's context panel: real agent/model detail for whichever session is currently
+ * focused, and a real readout of every session currently open across the app — no fabricated
+ * token/GPU/memory metrics. */
+export function RightPanel({ activeAgent, activeModel, sessions }: RightPanelProps) {
+  const chatCount = sessions.filter((s) => s.kind === "chat").length;
+  const taskCount = sessions.filter((s) => s.kind === "task").length;
   return (
     <div className="flex flex-col gap-4">
       <section>
-        <SectionHeading>{selectedAgent ? "Active Agent" : "Active Model"}</SectionHeading>
-        {selectedAgent ? (
-          <AgentDetailCard agent={selectedAgent} />
+        <SectionHeading>{activeAgent ? "Active Agent" : "Active Model"}</SectionHeading>
+        {activeAgent ? (
+          <AgentDetailCard agent={activeAgent} model={activeModel} />
         ) : (
           <GlassPanel padding="md">
             <div className="flex items-center gap-2 text-sm text-text">
               <Sliders size={14} className="text-muted" />
-              {selectedModel ?? "No model selected"}
+              {activeModel ?? "No model selected"}
             </div>
             <p className="mt-2 text-xs text-muted">
-              No agent selected — replies use this model directly with no system prompt.
+              No agent for this session — replies use this model directly with no system prompt.
             </p>
           </GlassPanel>
         )}
       </section>
 
       <section>
-        <SectionHeading>Session</SectionHeading>
+        <SectionHeading>Running</SectionHeading>
         <GlassPanel padding="md">
           <div className="flex items-center gap-2 text-sm text-text">
-            <MessagesSquare size={14} className="text-muted" />
-            {messageCount} message{messageCount === 1 ? "" : "s"}
+            <Radio size={14} className="text-muted" />
+            {sessions.length === 0
+              ? "No sessions open"
+              : `${chatCount} chat${chatCount === 1 ? "" : "s"}, ${taskCount} task${taskCount === 1 ? "" : "s"}`}
           </div>
-          <p className="mt-2 text-xs text-muted">Stored for this browser session only — cleared on tab close.</p>
+          <p className="mt-2 text-xs text-muted">
+            Each agent can run a chat and a task at once — open more from the network map or a session's tab.
+          </p>
         </GlassPanel>
       </section>
     </div>
   );
 }
 
-function AgentDetailCard({ agent }: { agent: AgentWithStatus }) {
+function AgentDetailCard({ agent, model }: { agent: AgentWithStatus; model: string | null }) {
   const Icon = iconFor(agent.icon);
+  const overridden = !!model && model !== agent.model;
   return (
     <GlassPanel padding="md">
       <div className="flex items-start gap-3">
@@ -66,7 +78,8 @@ function AgentDetailCard({ agent }: { agent: AgentWithStatus }) {
       </div>
 
       <div className="mt-3 space-y-1.5 border-t border-border pt-3 text-xs">
-        <Row label="Model" value={agent.model} mono />
+        <Row label="Model" value={model ?? agent.model} mono />
+        {overridden && <Row label="Agent default" value={agent.model} mono />}
         <Row label="Temperature" value={agent.temperature.toFixed(2)} />
         <Row label="Top P" value={agent.topP.toFixed(2)} />
         <Row label="Max tokens" value={agent.maxTokens > 0 ? String(agent.maxTokens) : "model default"} />

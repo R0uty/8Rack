@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchAgents, reloadAgents } from "../services/api";
-import type { AgentConfigWarning, AgentWithStatus } from "../types/agent";
+import { createAgent, deleteAgent, fetchAgents, reloadAgents, updateAgent } from "../services/api";
+import type { Agent, AgentConfigWarning, AgentWithStatus } from "../types/agent";
 
 export function useAgents() {
   const [agents, setAgents] = useState<AgentWithStatus[]>([]);
@@ -42,5 +42,34 @@ export function useAgents() {
     load();
   }, [load]);
 
-  return { agents, warnings, loading, error, refresh };
+  // create/update/remove intentionally let errors propagate to the caller (AgentEditor) instead
+  // of swallowing them into this hook's own `error` state - that state is for the list-level
+  // load/refresh, not a single in-progress edit's validation error.
+  const create = useCallback(
+    async (agent: Agent) => {
+      const created = await createAgent(agent);
+      await refresh();
+      return created;
+    },
+    [refresh],
+  );
+
+  const update = useCallback(
+    async (id: string, agent: Agent) => {
+      const updated = await updateAgent(id, agent);
+      await refresh();
+      return updated;
+    },
+    [refresh],
+  );
+
+  const remove = useCallback(
+    async (id: string) => {
+      await deleteAgent(id);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  return { agents, warnings, loading, error, refresh, create, update, remove };
 }

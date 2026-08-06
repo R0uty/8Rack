@@ -4,7 +4,7 @@ import { Markdown } from "./Markdown";
 import { ToolRegistry } from "./ToolRegistry";
 import { ProjectPanel } from "./ProjectPanel";
 import { OrchestratorTaskView, STATUS_TONE } from "./OrchestratorTaskView";
-import { Button, Collapsible, GlassPanel, StatusPill, StreamingCursor } from "./ui";
+import { Button, Collapsible, FOCUS_RING, GlassPanel, StatusPill, StreamingCursor } from "./ui";
 import { useMultiAgentPlan } from "../hooks/useMultiAgentPlan";
 import { useProjects } from "../hooks/useProjects";
 import { useTools } from "../hooks/useTools";
@@ -99,8 +99,20 @@ export function MultiAgentPlanner({ agents }: MultiAgentPlannerProps) {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools } =
     useTools(selectedProjectId);
-  const { plan, currentStepTask, liveOutput, streamingText, busy, error, start, approve, reject, cancel, reset } =
-    useMultiAgentPlan();
+  const {
+    plan,
+    currentStepTask,
+    liveOutput,
+    streamingText,
+    busy,
+    error,
+    start,
+    approve,
+    reject,
+    provideGuidance,
+    cancel,
+    reset,
+  } = useMultiAgentPlan();
 
   const [description, setDescription] = useState("");
   const [steps, setSteps] = useState<PlanStep[]>([emptyStep(), emptyStep()]);
@@ -176,7 +188,7 @@ export function MultiAgentPlanner({ agents }: MultiAgentPlannerProps) {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               disabled={busy}
-              className="resize-none rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60 disabled:opacity-50"
+              className="resize-none rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60 disabled:opacity-50"
             />
 
             <div className="flex flex-col gap-2.5">
@@ -189,7 +201,7 @@ export function MultiAgentPlanner({ agents }: MultiAgentPlannerProps) {
                     value={step.agentId}
                     onChange={(e) => updateStep(i, { agentId: e.target.value })}
                     disabled={busy}
-                    className="w-40 shrink-0 rounded-lg border border-border bg-surface-2 px-2.5 py-2 text-xs text-text outline-none focus:border-primary/60 disabled:opacity-50"
+                    className="w-40 shrink-0 rounded-lg border border-border bg-surface-2 px-2.5 py-2 text-xs text-text outline-none focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60 disabled:opacity-50"
                   >
                     <option value="">Select agent…</option>
                     {agents.map((a) => (
@@ -204,14 +216,17 @@ export function MultiAgentPlanner({ agents }: MultiAgentPlannerProps) {
                     value={step.objective}
                     onChange={(e) => updateStep(i, { objective: e.target.value })}
                     disabled={busy}
-                    className="flex-1 resize-none rounded-lg border border-border bg-surface-2 px-2.5 py-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60 disabled:opacity-50"
+                    className="flex-1 resize-none rounded-lg border border-border bg-surface-2 px-2.5 py-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60 disabled:opacity-50"
                   />
                   <button
                     type="button"
                     onClick={() => removeStep(i)}
                     disabled={busy || steps.length <= MIN_STEPS}
                     title="Remove step"
-                    className="mt-1.5 shrink-0 rounded p-1 text-muted transition-colors hover:text-critical disabled:opacity-30"
+                    className={cn(
+                      "mt-1.5 shrink-0 rounded p-1 text-muted transition-colors hover:text-critical disabled:opacity-30",
+                      FOCUS_RING,
+                    )}
                   >
                     <X size={14} />
                   </button>
@@ -274,6 +289,7 @@ export function MultiAgentPlanner({ agents }: MultiAgentPlannerProps) {
                     error={error}
                     onApprove={approve}
                     onReject={reject}
+                    onProvideGuidance={provideGuidance}
                     onCancel={cancel}
                   />
                 </StepRow>

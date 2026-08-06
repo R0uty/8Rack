@@ -1,6 +1,14 @@
 import { Router } from "express";
 import { RequestCancelledError } from "../services/errors.js";
-import { cancelTask, createTask, getTask, listTasks, resumeTask } from "../services/orchestrator.js";
+import {
+  cancelTask,
+  continueTask,
+  createTask,
+  getTask,
+  listTasks,
+  provideGuidance,
+  resumeTask,
+} from "../services/orchestrator.js";
 import { abortOnClientDisconnect } from "./streamUtils.js";
 import type { Response } from "express";
 import type { OrchestratorTask } from "../services/orchestrator.js";
@@ -11,6 +19,7 @@ interface CreateTaskBody {
   agentId?: unknown;
   objective?: unknown;
   projectId?: unknown;
+  model?: unknown;
 }
 
 /**
@@ -64,8 +73,19 @@ orchestratorRouter.post("/tasks", async (req, res, next) => {
     res.status(400).json({ error: "projectId is required", code: "INVALID_REQUEST" });
     return;
   }
+  if (body.model !== undefined && typeof body.model !== "string") {
+    res.status(400).json({ error: "model must be a string", code: "INVALID_REQUEST" });
+    return;
+  }
   await runAndStreamTask(res, next, (onChunk, signal) =>
-    createTask(body.agentId as string, body.objective as string, body.projectId as string, onChunk, signal),
+    createTask(
+      body.agentId as string,
+      body.objective as string,
+      body.projectId as string,
+      onChunk,
+      signal,
+      body.model as string | undefined,
+    ),
   );
 });
 
@@ -89,6 +109,26 @@ orchestratorRouter.get("/tasks/:id", (req, res) => {
 
 orchestratorRouter.post("/tasks/:id/resume", async (req, res, next) => {
   await runAndStreamTask(res, next, (onChunk, signal) => resumeTask(req.params.id, onChunk, signal));
+});
+
+orchestratorRouter.post("/tasks/:id/continue", async (req, res, next) => {
+  const body = req.body as { message?: unknown };
+  if (typeof body.message !== "string" || !body.message.trim()) {
+    res.status(400).json({ error: "message is required", code: "INVALID_REQUEST" });
+    return;
+  }
+  await runAndStreamTask(res, next, (onChunk, signal) => continueTask(req.params.id, body.message as string, onChunk, signal));
+});
+
+orchestratorRouter.post("/tasks/:id/guidance", async (req, res, next) => {
+  const body = req.body as { note?: unknown };
+  if (body.note !== undefined && typeof body.note !== "string") {
+    res.status(400).json({ error: "note must be a string", code: "INVALID_REQUEST" });
+    return;
+  }
+  await runAndStreamTask(res, next, (onChunk, signal) =>
+    provideGuidance(req.params.id, body.note as string | undefined, onChunk, signal),
+  );
 });
 
 orchestratorRouter.post("/tasks/:id/cancel", (req, res, next) => {

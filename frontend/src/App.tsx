@@ -1,31 +1,46 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { AppShell, CommandPalette, RightPanel, Sidebar, TopBar, type AppView } from "./components/layout";
-import { ChatArea } from "./components/ChatArea";
-import { PromptInput } from "./components/PromptInput";
+import { ChatView } from "./components/chat/ChatView";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { AgentEditor } from "./components/AgentEditor";
 import { OrchestratorWorkbench } from "./components/OrchestratorWorkbench";
 import { MultiAgentPlanner } from "./components/MultiAgentPlanner";
+import { FindingsView } from "./components/FindingsView";
 import { useModels } from "./hooks/useModels";
 import { useAgents } from "./hooks/useAgents";
-import { useChat } from "./hooks/useChat";
+import { useTools } from "./hooks/useTools";
 import { useSettings } from "./hooks/useSettings";
 import { useTheme } from "./hooks/useTheme";
+import { useSessions } from "./hooks/useSessions";
 import type { AgentWithStatus } from "./types/agent";
-import type { ChatOptions } from "./types/chat";
 
 function App() {
   const { models, loading: modelsLoading, error: modelsError, refresh: refreshModels } = useModels();
-  const { agents, warnings: agentWarnings, loading: agentsLoading, error: agentsError, refresh: refreshAgents } =
-    useAgents();
+  const {
+    agents,
+    warnings: agentWarnings,
+    loading: agentsLoading,
+    error: agentsError,
+    refresh: refreshAgents,
+    create: createAgent,
+    update: updateAgent,
+    remove: removeAgent,
+  } = useAgents();
+  // Tool list isn't project-scoped (only execution history is) - null just skips fetching
+  // executions this hook would otherwise pull in for a project-scoped Execution Console.
+  const { tools: execTools } = useTools(null);
+  // The model for the *next* manual (no-agent) chat — each agent's own session carries its own
+  // model instead, seeded from the agent's default at creation (see hooks/useSessions.ts).
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const { messages, sending, sendMessage, cancel, clear } = useChat();
   const { settings, update: updateSettings, reset: resetSettings } = useSettings();
   const { theme, toggle: toggleTheme } = useTheme();
+  const sessions = useSessions();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [prompt, setPrompt] = useState("");
   const [activeView, setActiveView] = useState<AppView>("chat");
+  // undefined = editor closed, null = create mode, an agent = edit mode.
+  const [editingAgent, setEditingAgent] = useState<AgentWithStatus | null | undefined>(undefined);
 
   useEffect(() => {
     if (!selectedModel && models.length > 0) {
@@ -45,39 +60,44 @@ function App() {
   }, []);
 
   const ollamaStatus = modelsError ? "unavailable" : modelsLoading ? "unknown" : "connected";
-  const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
 
+  const activeAgentIds = useMemo(
+    () => new Set(sessions.sessions.map((s) => s.agentId).filter((id): id is string => id !== null)),
+    [sessions.sessions],
+  );
+
+  // Clicking an agent (sidebar, network map, or command palette) always means "open/focus a chat
+  // with it" and takes you to the Chat view, even from elsewhere — there's no more single global
+  // "selected agent" the rest of the app depends on.
   const handleSelectAgent = (agent: AgentWithStatus) => {
-    if (agent.id === selectedAgentId) {
-      // Clicking the active agent again deselects it, handing model choice back to the user —
-      // otherwise the model dropdown stays locked with nothing to unlock it.
-      setSelectedAgentId(null);
-      return;
-    }
-    setSelectedAgentId(agent.id);
-    setSelectedModel(agent.model);
-    updateSettings({ temperature: agent.temperature, topP: agent.topP, maxTokens: agent.maxTokens });
+    sessions.openChatSession(agent.id, agent.model);
+    setActiveView("chat");
   };
 
-  const handleSubmit = () => {
-    if (!selectedAgentId && !selectedModel) return;
-
-    const options: ChatOptions = {
-      temperature: settings.temperature,
-      top_p: settings.topP,
-      ...(settings.maxTokens > 0 ? { num_predict: settings.maxTokens } : {}),
-      ...(settings.contextSize > 0 ? { num_ctx: settings.contextSize } : {}),
-    };
-
-    sendMessage(prompt, {
-      // When an agent is selected the backend Agent Manager supplies the model + system prompt;
-      // otherwise fall back to the manually chosen model with no system prompt.
-      ...(selectedAgentId ? { agentId: selectedAgentId } : { model: selectedModel ?? undefined }),
-      options,
-      keepAlive: settings.keepAlive,
-    });
-    setPrompt("");
+  // A task-session node on the network map lives in the Chat view but represents Workbench work —
+  // focusing it has to switch views too.
+  const handleFocusTaskSession = (sessionId: string) => {
+    sessions.setActiveTask(sessionId);
+    setActiveView("workbench");
   };
+
+  // The sidebar logo doubles as a "return to Command Center" button — the only way back to the
+  // network map from Workbench, Plans, or a chat session tab without hunting for the Home tab.
+  const handleGoHome = () => {
+    setActiveView("chat");
+    sessions.setActiveChat(null);
+  };
+
+  // What TopBar/RightPanel show as "the current agent/model" depends on which view (and which of
+  // its tabs) is focused — there's no single global selection to read anymore.
+  const activeSession =
+    activeView === "chat"
+      ? sessions.chatSessions.find((s) => s.id === sessions.activeChatId)
+      : activeView === "workbench"
+        ? sessions.taskSessions.find((s) => s.id === sessions.activeTaskId)
+        : undefined;
+  const activeSessionAgent = activeSession?.agentId ? agents.find((a) => a.id === activeSession.agentId) ?? null : null;
+  const activeSessionModel = activeSession?.model ?? (activeView === "chat" ? selectedModel : null);
 
   return (
     <>
@@ -86,28 +106,30 @@ function App() {
           <Sidebar
             activeView={activeView}
             onChangeView={setActiveView}
+            onGoHome={handleGoHome}
             models={models}
             modelsLoading={modelsLoading}
             modelsError={modelsError}
             selectedModel={selectedModel}
             onSelectModel={setSelectedModel}
             onRefreshModels={refreshModels}
-            modelLocked={!!selectedAgentId}
             agents={agents}
             agentsLoading={agentsLoading}
             agentsError={agentsError}
             agentWarnings={agentWarnings}
-            selectedAgentId={selectedAgentId}
+            activeAgentIds={activeAgentIds}
             onSelectAgent={handleSelectAgent}
             onRefreshAgents={refreshAgents}
+            onCreateAgent={() => setEditingAgent(null)}
+            onEditAgent={setEditingAgent}
             ollamaStatus={ollamaStatus}
           />
         }
         topBar={
           <TopBar
             activeView={activeView}
-            agentName={selectedAgent?.name ?? null}
-            selectedModel={selectedModel}
+            agentName={activeSessionAgent?.name ?? null}
+            selectedModel={activeSessionModel}
             theme={theme}
             onToggleTheme={toggleTheme}
             onOpenSettings={() => setSettingsOpen(true)}
@@ -115,35 +137,40 @@ function App() {
           />
         }
         center={
-          <>
-            {activeView === "chat" && (
-              <div className="flex h-full flex-col gap-4">
-                <ChatArea
-                  messages={messages}
-                  onClear={clear}
+          <AnimatePresence mode="popLayout" initial={false}>
+            <motion.div
+              key={activeView}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.12, ease: "easeOut" }}
+              className="h-full"
+            >
+              {activeView === "chat" && (
+                <ChatView
                   agents={agents}
-                  selectedAgentId={selectedAgentId}
-                  onSelectAgent={handleSelectAgent}
+                  models={models}
+                  settings={settings}
+                  manualModel={selectedModel}
+                  sessions={sessions}
+                  onFocusTaskSession={handleFocusTaskSession}
                 />
-                <PromptInput
-                  value={prompt}
-                  onChange={setPrompt}
-                  onSubmit={handleSubmit}
-                  onCancel={cancel}
-                  sending={sending}
-                  disabled={!selectedModel}
-                />
-              </div>
-            )}
-            {activeView === "workbench" && (
-              <OrchestratorWorkbench agents={agents} selectedAgentId={selectedAgentId} />
-            )}
-            {activeView === "plans" && <MultiAgentPlanner agents={agents} />}
-          </>
+              )}
+              {activeView === "workbench" && (
+                <OrchestratorWorkbench agents={agents} models={models} sessions={sessions} />
+              )}
+              {activeView === "plans" && <MultiAgentPlanner agents={agents} />}
+              {activeView === "findings" && <FindingsView />}
+            </motion.div>
+          </AnimatePresence>
         }
         rightPanel={
           activeView === "chat" ? (
-            <RightPanel selectedAgent={selectedAgent} selectedModel={selectedModel} messageCount={messages.length} />
+            <RightPanel
+              activeAgent={activeSessionAgent}
+              activeModel={activeSessionModel}
+              sessions={sessions.sessions}
+            />
           ) : undefined
         }
       />
@@ -154,6 +181,16 @@ function App() {
         onChange={updateSettings}
         onReset={resetSettings}
         onClose={() => setSettingsOpen(false)}
+      />
+
+      <AgentEditor
+        open={editingAgent !== undefined}
+        agent={editingAgent ?? null}
+        models={models}
+        execTools={execTools}
+        onSave={(id, agent) => (id ? updateAgent(id, agent) : createAgent(agent))}
+        onDelete={removeAgent}
+        onClose={() => setEditingAgent(undefined)}
       />
 
       <CommandPalette

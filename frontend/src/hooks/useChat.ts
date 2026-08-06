@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, streamChat } from "../services/api";
 import type { ChatMessage, ChatOptions } from "../types/chat";
 
-const SESSION_STORAGE_KEY = "8rack:chat-history";
 /** Aborts a request if no data has been received for this long (guards against a hung connection). */
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -12,9 +11,13 @@ function createId(): string {
   return `msg-${Date.now()}-${nextId}`;
 }
 
-function loadSessionMessages(): ChatMessage[] {
+function storageKey(sessionId: string): string {
+  return `8rack:chat-history:${sessionId}`;
+}
+
+function loadSessionMessages(sessionId: string): ChatMessage[] {
   try {
-    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    const raw = sessionStorage.getItem(storageKey(sessionId));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as ChatMessage[];
     // A reload interrupts any in-flight generation; nothing is streaming anymore.
@@ -24,8 +27,12 @@ function loadSessionMessages(): ChatMessage[] {
   }
 }
 
-export function useChat() {
-  const [messages, setMessages] = useState<ChatMessage[]>(loadSessionMessages);
+/** One agent (or manual, model-only) conversation thread - `sessionId` scopes its sessionStorage
+ * key so multiple concurrent sessions (see hooks/useSessions.ts) never collide. Every mounted
+ * ChatSessionPanel calls this with its own session id, giving it fully independent state for
+ * free (no shared/global chat state to coordinate). */
+export function useChat(sessionId: string) {
+  const [messages, setMessages] = useState<ChatMessage[]>(() => loadSessionMessages(sessionId));
   const [sending, setSending] = useState(false);
   const messagesRef = useRef<ChatMessage[]>(messages);
   const abortRef = useRef<AbortController | null>(null);
@@ -39,16 +46,18 @@ export function useChat() {
   }, []);
 
   useEffect(() => {
-    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(messages));
-  }, [messages]);
+    sessionStorage.setItem(storageKey(sessionId), JSON.stringify(messages));
+  }, [sessionId, messages]);
 
   const sendMessage = useCallback(
     async (
       content: string,
       config: {
-        /** When set, the backend Agent Manager supplies the model + systemPrompt — see api.ts#streamChat. */
+        /** When set, the backend Agent Manager supplies the systemPrompt (and, absent a `model`
+         * override, the agent's own model too) — see api.ts#streamChat. */
         agentId?: string;
-        /** Required when agentId is omitted. */
+        /** The model to use. Required when agentId is omitted; when agentId is set, this is a
+         * per-session override of the agent's own configured model. */
         model?: string;
         options?: ChatOptions;
         /** Ignored when agentId is set (the backend injects the agent's own system prompt instead). */
@@ -195,8 +204,8 @@ export function useChat() {
   const clear = useCallback(() => {
     abortRef.current?.abort();
     updateMessages(() => []);
-    sessionStorage.removeItem(SESSION_STORAGE_KEY);
-  }, [updateMessages]);
+    sessionStorage.removeItem(storageKey(sessionId));
+  }, [sessionId, updateMessages]);
 
   return { messages, sending, sendMessage, cancel, clear };
 }

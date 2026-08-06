@@ -74,6 +74,23 @@ export async function resumePlan(
   return streamPlan(res, onChunk, signal);
 }
 
+/** Resumes a plan paused at "waiting_guidance" - see orchestratorApi.ts#provideGuidance, one level
+ * up: the current step's task failed a tool request/execution and is waiting on a human note. */
+export async function provideStepGuidance(
+  id: string,
+  note: string | undefined,
+  onChunk: (content: string) => void,
+  signal?: AbortSignal,
+): Promise<PlanStreamResult> {
+  const res = await apiFetch(`/api/plans/${encodeURIComponent(id)}/guidance`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ note }),
+    signal,
+  });
+  return streamPlan(res, onChunk, signal);
+}
+
 export async function cancelPlan(id: string): Promise<MultiAgentPlan> {
   const res = await apiFetch(`/api/plans/${encodeURIComponent(id)}/cancel`, { method: "POST" });
   if (!res.ok) await throwForErrorResponse(res);

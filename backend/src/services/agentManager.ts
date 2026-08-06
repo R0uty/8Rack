@@ -1,11 +1,20 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listModels } from "./ollama.js";
+import { AgentIdConflictError, AgentNotFoundError, InvalidAgentConfigError } from "./errors.js";
 import type { Agent, AgentConfigWarning, AgentWithStatus } from "../types/agent.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENTS_DIR = path.resolve(__dirname, "../../data/agents");
+
+/** Matches the style of every existing agent id (e.g. "code-assistant") and keeps ids safe to use
+ * directly as a filename under AGENTS_DIR. */
+const AGENT_ID_PATTERN = /^[a-z0-9-]+$/;
+
+function agentFilePath(id: string): string {
+  return path.join(AGENTS_DIR, `${id}.json`);
+}
 
 function isValidAgent(value: unknown): value is Agent {
   const v = value as Partial<Agent> | null;
@@ -23,7 +32,8 @@ function isValidAgent(value: unknown): value is Agent {
     typeof v.icon === "string" &&
     typeof v.color === "string" &&
     typeof v.enabled === "boolean" &&
-    (v.tools === undefined || (Array.isArray(v.tools) && v.tools.every((t) => typeof t === "string")))
+    (v.tools === undefined || (Array.isArray(v.tools) && v.tools.every((t) => typeof t === "string"))) &&
+    (v.execTools === undefined || (Array.isArray(v.execTools) && v.execTools.every((t) => typeof t === "string")))
   );
 }
 
@@ -122,4 +132,47 @@ export async function getAgent(id: string): Promise<AgentWithStatus | undefined>
 /** Agents the admin has turned on (config `enabled: true`) — may still be offline if the model is missing. */
 export async function getEnabledAgents(): Promise<AgentWithStatus[]> {
   return (await loadAgents()).filter((a) => a.enabled);
+}
+
+function assertValidAgentConfig(agent: unknown): asserts agent is Agent {
+  if (!isValidAgent(agent)) {
+    throw new InvalidAgentConfigError("Agent config is missing or has malformed required fields");
+  }
+  if (!AGENT_ID_PATTERN.test(agent.id)) {
+    throw new InvalidAgentConfigError("Agent id must contain only lowercase letters, numbers, and hyphens");
+  }
+}
+
+/** Writes a brand-new agent config file to disk and reloads the cache. Rejects if an agent with
+ * this id already exists — use updateAgent to modify one. */
+export async function createAgent(agent: Agent): Promise<AgentWithStatus> {
+  assertValidAgentConfig(agent);
+  if (await getAgent(agent.id)) throw new AgentIdConflictError(agent.id);
+
+  await writeFile(agentFilePath(agent.id), `${JSON.stringify(agent, null, 2)}\n`, "utf-8");
+  await reloadAgents();
+  return (await getAgent(agent.id))!;
+}
+
+/** Overwrites an existing agent's config file and reloads the cache. If `agent.id` differs from
+ * `id`, this is a rename: the old file is removed and a new one written under the new id. */
+export async function updateAgent(id: string, agent: Agent): Promise<AgentWithStatus> {
+  assertValidAgentConfig(agent);
+  if (!(await getAgent(id))) throw new AgentNotFoundError(id);
+
+  if (agent.id !== id) {
+    if (await getAgent(agent.id)) throw new AgentIdConflictError(agent.id);
+    await unlink(agentFilePath(id));
+  }
+
+  await writeFile(agentFilePath(agent.id), `${JSON.stringify(agent, null, 2)}\n`, "utf-8");
+  await reloadAgents();
+  return (await getAgent(agent.id))!;
+}
+
+/** Deletes an agent's config file and reloads the cache. */
+export async function deleteAgent(id: string): Promise<void> {
+  if (!(await getAgent(id))) throw new AgentNotFoundError(id);
+  await unlink(agentFilePath(id));
+  await reloadAgents();
 }

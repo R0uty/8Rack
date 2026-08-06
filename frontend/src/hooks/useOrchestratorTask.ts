@@ -1,5 +1,11 @@
 import { useCallback, useRef, useState } from "react";
-import { cancelTask, createTask, resumeTask } from "../services/orchestratorApi";
+import {
+  cancelTask,
+  continueTask as continueTaskApi,
+  createTask,
+  provideGuidance as provideGuidanceApi,
+  resumeTask,
+} from "../services/orchestratorApi";
 import { confirmExecution, rejectExecution } from "../services/toolsApi";
 import type { OrchestratorTask } from "../types/orchestrator";
 
@@ -23,7 +29,7 @@ export function useOrchestratorTask() {
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const start = useCallback(async (agentId: string, objective: string, projectId: string) => {
+  const start = useCallback(async (agentId: string, objective: string, projectId: string, model?: string) => {
     setBusy(true);
     setError(null);
     setLiveOutput([]);
@@ -39,6 +45,7 @@ export function useOrchestratorTask() {
           projectId,
           (chunk) => setStreamingText((prev) => prev + chunk),
           controller.signal,
+          model,
         ),
       );
     } catch (err) {
@@ -113,6 +120,61 @@ export function useOrchestratorTask() {
     }
   }, [task]);
 
+  /** Sends a follow-up message into the current (completed) task instead of starting a new one -
+   * see backend/src/services/orchestrator.ts#continueTask. */
+  const continueTask = useCallback(
+    async (message: string) => {
+      if (!task || task.status !== "completed") return;
+      setBusy(true);
+      setError(null);
+      setStreamingText("");
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        setTask(await continueTaskApi(task.id, message, (chunk) => setStreamingText((prev) => prev + chunk), controller.signal));
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          setError(err instanceof Error ? err.message : "Failed to continue the task");
+        }
+      } finally {
+        abortRef.current = null;
+        setStreamingText("");
+        setBusy(false);
+      }
+    },
+    [task],
+  );
+
+  /** Resumes a task paused at "waiting_guidance" (a failed tool request/execution) - an optional
+   * note steers the agent's next attempt. See backend/src/services/orchestrator.ts#provideGuidance. */
+  const provideGuidance = useCallback(
+    async (note?: string) => {
+      if (!task || task.status !== "waiting_guidance") return;
+      setBusy(true);
+      setError(null);
+      setLiveOutput([]);
+      setStreamingText("");
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        setTask(
+          await provideGuidanceApi(task.id, note, (chunk) => setStreamingText((prev) => prev + chunk), controller.signal),
+        );
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          setError(err instanceof Error ? err.message : "Failed to send guidance");
+        }
+      } finally {
+        abortRef.current = null;
+        setStreamingText("");
+        setBusy(false);
+      }
+    },
+    [task],
+  );
+
   const cancel = useCallback(async () => {
     if (!task) return;
     abortRef.current?.abort();
@@ -136,5 +198,18 @@ export function useOrchestratorTask() {
     setBusy(false);
   }, []);
 
-  return { task, liveOutput, streamingText, busy, error, start, approve, reject, cancel, reset };
+  return {
+    task,
+    liveOutput,
+    streamingText,
+    busy,
+    error,
+    start,
+    approve,
+    reject,
+    continueTask,
+    provideGuidance,
+    cancel,
+    reset,
+  };
 }

@@ -8,10 +8,12 @@ interface SheetProps {
   onClose: () => void;
   title: string;
   children: ReactNode;
+  /** Tailwind max-width class for the panel - defaults to the original SettingsPanel width. */
+  width?: string;
 }
 
 /** Right-docked glass panel over a backdrop - replaces SettingsPanel's bespoke modal markup. */
-export function Sheet({ open, onClose, title, children }: SheetProps) {
+export function Sheet({ open, onClose, title, children, width = "max-w-sm" }: SheetProps) {
   return (
     <AnimatePresence>
       {open && (
@@ -28,7 +30,7 @@ export function Sheet({ open, onClose, title, children }: SheetProps) {
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 32, opacity: 0 }}
             transition={{ duration: 0.2, ease: "easeOut" }}
-            className="flex h-full w-full max-w-sm flex-col border-l border-border bg-surface/95 backdrop-blur-xl"
+            className={`flex h-full w-full ${width} flex-col border-l border-border bg-surface/95 backdrop-blur-xl`}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-border px-5 py-4">

@@ -1,12 +1,17 @@
 import type { NextFunction, Request, Response } from "express";
 import {
   AgentDisabledError,
+  AgentIdConflictError,
   AgentNotFoundError,
   AgentOfflineError,
+  CveLookupError,
+  EmbeddingModelUnavailableError,
   ExecutableUnavailableError,
   ExecToolDisabledError,
   ExecToolNotFoundError,
   ExecutionNotFoundError,
+  FindingNotFoundError,
+  InvalidAgentConfigError,
   InvalidPlanStateError,
   InvalidTaskStateError,
   InvalidToolArgumentsError,
@@ -58,6 +63,14 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(503).json({ error: err.message, code: "AGENT_OFFLINE" });
     return;
   }
+  if (err instanceof AgentIdConflictError) {
+    res.status(409).json({ error: err.message, code: "AGENT_ID_CONFLICT" });
+    return;
+  }
+  if (err instanceof InvalidAgentConfigError) {
+    res.status(400).json({ error: err.message, code: "INVALID_AGENT_CONFIG" });
+    return;
+  }
   if (err instanceof UnknownToolError) {
     res.status(400).json({ error: err.message, code: "INVALID_REQUEST" });
     return;
@@ -100,6 +113,18 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof InvalidPlanStateError) {
     res.status(409).json({ error: err.message, code: "INVALID_PLAN_STATE" });
+    return;
+  }
+  if (err instanceof EmbeddingModelUnavailableError) {
+    res.status(503).json({ error: err.message, code: "EMBEDDING_MODEL_UNAVAILABLE" });
+    return;
+  }
+  if (err instanceof FindingNotFoundError) {
+    res.status(404).json({ error: err.message, code: "FINDING_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof CveLookupError) {
+    res.status(502).json({ error: err.message, code: "CVE_LOOKUP_FAILED" });
     return;
   }
 

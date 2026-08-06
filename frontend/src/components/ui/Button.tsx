@@ -9,6 +9,9 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   size?: Size;
   icon?: LucideIcon;
+  /** Applied to just the icon, e.g. "animate-spin" while a refresh/reindex action is in flight —
+   * matches the spin treatment every IconButton refresh control already uses. */
+  iconClassName?: string;
   children?: ReactNode;
 }
 
@@ -25,19 +28,32 @@ const SIZE: Record<Size, string> = {
   md: "text-sm px-3.5 py-2 gap-2",
 };
 
-export function Button({ variant = "secondary", size = "md", icon: Icon, children, className, ...rest }: ButtonProps) {
+/** Shared keyboard-focus ring - browsers only apply `:focus-visible` for keyboard/programmatic
+ * focus, not mouse clicks, so this doesn't add a ring around every click. */
+export const FOCUS_RING = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60";
+
+export function Button({
+  variant = "secondary",
+  size = "md",
+  icon: Icon,
+  iconClassName,
+  children,
+  className,
+  ...rest
+}: ButtonProps) {
   return (
     <button
       type="button"
       className={cn(
         "inline-flex items-center justify-center rounded-lg transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed",
+        FOCUS_RING,
         VARIANT[variant],
         SIZE[size],
         className,
       )}
       {...rest}
     >
-      {Icon && <Icon size={size === "sm" ? 14 : 16} strokeWidth={2} />}
+      {Icon && <Icon size={size === "sm" ? 14 : 16} strokeWidth={2} className={iconClassName} />}
       {children}
     </button>
   );
@@ -72,6 +88,7 @@ export function IconButton({
       title={label}
       className={cn(
         "inline-flex items-center justify-center rounded-lg transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed",
+        FOCUS_RING,
         ICON_BOX[size],
         active ? "bg-primary-dim text-primary" : VARIANT[variant],
         className,

@@ -8,6 +8,7 @@ export interface OrchestratorMessage {
 export type TaskStatus =
   | "running"
   | "waiting_confirmation"
+  | "waiting_guidance"
   | "completed"
   | "failed"
   | "cancelled"

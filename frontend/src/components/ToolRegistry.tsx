@@ -1,6 +1,6 @@
 import type { ExecToolWithStatus, ExecutionRecord, ExecutionStatus } from "../types/execTool";
 import { iconFor, ToolFallbackIcon } from "../lib/icons";
-import { GlassPanel, IconButton, SectionHeading, StatusPill, type Tone } from "./ui";
+import { GlassPanel, IconButton, SectionHeading, SkeletonRows, StatusPill, type Tone } from "./ui";
 import { RefreshCw } from "lucide-react";
 
 interface ToolRegistryProps {
@@ -44,6 +44,8 @@ export function ToolRegistry({ tools, executions, loading, error, onRefresh }: T
       </SectionHeading>
 
       {error && <p className="mb-2 text-xs text-critical">{error}</p>}
+      {loading && tools.length === 0 && <SkeletonRows count={5} />}
+      {!error && !loading && tools.length === 0 && <p className="text-xs text-muted">No tools registered</p>}
 
       <div className="flex flex-col gap-2">
         {tools.map((tool) => {

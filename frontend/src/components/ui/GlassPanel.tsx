@@ -1,5 +1,6 @@
 import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
 import { cn } from "../../lib/cn";
+import { FOCUS_RING } from "./Button";
 
 interface GlassPanelProps extends ComponentPropsWithoutRef<"div"> {
   as?: ElementType;
@@ -33,7 +34,10 @@ export function GlassPanel({
         "rounded-panel border border-border backdrop-blur-xl transition-all duration-200",
         raised ? "bg-card-hover" : "bg-card/70",
         interactive &&
-          "cursor-pointer hover:border-border-strong hover:bg-card-hover hover:-translate-y-0.5 hover:shadow-[0_8px_30px_rgb(0,0,0,0.25)]",
+          cn(
+            "cursor-pointer hover:border-border-strong hover:bg-card-hover hover:-translate-y-0.5 hover:shadow-[0_8px_30px_rgb(0,0,0,0.25)]",
+            FOCUS_RING,
+          ),
         PADDING[padding],
         className,
       )}

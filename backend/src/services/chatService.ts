@@ -9,11 +9,16 @@ export interface AgentChatRequest {
   messages: ChatMessage[];
   /** Per-request overrides layered on top of the agent's own temperature/topP/maxTokens. */
   options?: ChatOptions;
+  /** Overrides the agent's own configured `tools` for this request - omit to activate whatever
+   * tools the agent's config already lists (see the toolsPreamble caveat below). */
   tools?: string[];
   keepAlive?: string;
   /** Appended after the agent's own systemPrompt — used by the Orchestrator to describe available
    * exec tools and the JSON request format, without the agent's own config needing to know about it. */
   toolsPreamble?: string;
+  /** Overrides the agent's configured model for this request — the agent's own model stays its
+   * default (nothing here mutates the agent config), this is purely a per-request choice. */
+  model?: string;
 }
 
 /**
@@ -29,7 +34,11 @@ export async function* streamAgentChat(
   const agent = await getAgent(request.agentId);
   if (!agent) throw new AgentNotFoundError(request.agentId);
   if (!agent.enabled) throw new AgentDisabledError(agent.id);
-  if (agent.status === "offline") throw new AgentOfflineError(agent.id, agent.model);
+  // The offline gate only applies to the agent's own configured model — a request overriding to a
+  // different model shouldn't be blocked by the *default* model being unavailable. Ollama itself
+  // still errors normally if the overridden model turns out not to be installed either, same as
+  // the model-only (no agent) chat path already relies on.
+  if (!request.model && agent.status === "offline") throw new AgentOfflineError(agent.id, agent.model);
 
   const systemPrompt = request.toolsPreamble
     ? `${agent.systemPrompt}\n\n${request.toolsPreamble}`
@@ -44,14 +53,24 @@ export async function* streamAgentChat(
   };
 
   const chatRequest = {
-    model: agent.model,
+    model: request.model ?? agent.model,
     messages,
     options,
     keep_alive: request.keepAlive,
   };
 
-  if (request.tools?.length) {
-    const { specs, unknown } = resolveOllamaTools(request.tools);
+  // Falls back to the agent's own configured tools when the request doesn't specify any, so
+  // selecting an agent with `tools` set activates them automatically instead of requiring the
+  // caller to look them up and pass them through every time. Only when toolsPreamble is absent,
+  // though - that field is toolsPreamble's own tell for "this call came from the Orchestrator"
+  // (see its own doc comment above), which speaks a completely separate plain-text tool-request
+  // convention and never uses Ollama's native tool_calls mechanism - activating both at once on
+  // the same request would risk the model replying in whichever format it prefers instead of the
+  // one the Orchestrator actually parses.
+  const tools = request.tools ?? (request.toolsPreamble ? undefined : agent.tools);
+
+  if (tools?.length) {
+    const { specs, unknown } = resolveOllamaTools(tools);
     if (unknown.length) throw new UnknownToolError(unknown);
     yield* streamChatWithTools({ ...chatRequest, tools: specs }, signal);
   } else {

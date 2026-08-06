@@ -54,7 +54,7 @@ export function SettingsPanel({ open, settings, onChange, onReset, onClose }: Se
           step={1}
           value={settings.maxTokens}
           onChange={(e) => onChange({ maxTokens: Number(e.target.value) })}
-          className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none focus:border-primary/60"
+          className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60"
         />
       </Field>
 
@@ -65,7 +65,7 @@ export function SettingsPanel({ open, settings, onChange, onReset, onClose }: Se
           step={1}
           value={settings.contextSize}
           onChange={(e) => onChange({ contextSize: Number(e.target.value) })}
-          className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none focus:border-primary/60"
+          className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60"
         />
       </Field>
 
@@ -75,7 +75,7 @@ export function SettingsPanel({ open, settings, onChange, onReset, onClose }: Se
           value={settings.keepAlive}
           placeholder="5m"
           onChange={(e) => onChange({ keepAlive: e.target.value })}
-          className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60"
+          className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60"
         />
       </Field>
 
