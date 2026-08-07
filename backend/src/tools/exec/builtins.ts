@@ -4,7 +4,13 @@ import type { ExecTool } from "../../types/execTool.js";
  * The built-in tool roster. `allowedArguments` is intentionally left unset for all of these —
  * with `requiresConfirmation: true` on every tool, the human reviewing the resolved command
  * before approving it is the primary safety control for this phase. Path-shaped arguments are
- * still checked against the workspace root regardless (see toolManager.ts#validateArguments).
+ * still checked against the workspace root regardless (see toolManager.ts#validateArguments) —
+ * but that check inspects each argv element as its own path, so it can't see inside a `bash -c`/
+ * `python3 -c` script string: `arguments: ["-c", "cat ~/.ssh/id_rsa"]` isn't a path-shaped
+ * argument at all, so it sails through untouched. `bash`/`python`'s own descriptions below call
+ * this out explicitly so a reviewer doesn't over-trust the "confined to workspace" framing that
+ * genuinely does apply to the filesystem tools just above them — for these two, the resolved
+ * command shown in the confirm card *is* the entire safety review.
  * Tightening specific tools with an allowlist later is a config-only change, not a code change.
  */
 export const builtinExecTools: ExecTool[] = [
@@ -94,7 +100,10 @@ export const builtinExecTools: ExecTool[] = [
   {
     id: "bash",
     name: "Bash",
-    description: "Runs a shell command within the workspace (e.g. arguments: [\"-c\", \"whoami\"]).",
+    description:
+      "Runs a shell command (e.g. arguments: [\"-c\", \"whoami\"]). NOT confined to the workspace " +
+      "root - the script string isn't checked for path containment, so it can read/write anywhere " +
+      "this process can. Review the exact resolved command before approving.",
     category: "exec",
     executable: "bash",
     defaultArguments: [],
@@ -107,7 +116,10 @@ export const builtinExecTools: ExecTool[] = [
   {
     id: "python",
     name: "Python",
-    description: "Runs Python within the workspace (e.g. arguments: [\"-c\", \"print(1+1)\"]).",
+    description:
+      "Runs Python (e.g. arguments: [\"-c\", \"print(1+1)\"]). NOT confined to the workspace root " +
+      "- the script string isn't checked for path containment, so it can read/write anywhere this " +
+      "process can. Review the exact resolved command before approving.",
     category: "exec",
     executable: "python3",
     defaultArguments: [],

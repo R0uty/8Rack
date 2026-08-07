@@ -15,6 +15,7 @@ import {
   ExecutableUnavailableError,
   ExecutionNotFoundError,
   InvalidToolArgumentsError,
+  PrivilegedCommandError,
 } from "./errors.js";
 import type { ExecTool } from "../types/execTool.js";
 
@@ -85,6 +86,30 @@ describe("requestExecution validation", () => {
     await expect(
       requestExecution({ tool: "unresolvable-tool", arguments: [], projectId: "p" }),
     ).rejects.toThrow(ExecutableUnavailableError);
+  });
+
+  it("rejects a command that invokes sudo, since tools run non-interactively with no TTY", async () => {
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["-c", "sudo pacman -S katana"], projectId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+  });
+
+  it("rejects a command that invokes su/doas/pkexec", async () => {
+    await expect(requestExecution({ tool: "test-tool", arguments: ["su", "-c", "whoami"], projectId: "p" })).rejects.toThrow(
+      PrivilegedCommandError,
+    );
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["doas pacman -S katana"], projectId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+  });
+
+  it("does not false-positive on words that merely contain 'su'", async () => {
+    const record = await requestExecution({
+      tool: "test-tool",
+      arguments: ["supervisorctl status"],
+      projectId: "p",
+    });
+    expect(record.status).toBe("pending_confirmation");
   });
 });
 

@@ -6,6 +6,11 @@ import type { Finding, FindingSeverity } from "../types/finding";
 interface FindingsTableProps {
   findings: Finding[];
   onSelectFinding: (finding: Finding) => void;
+  /** Checkbox selection for report generation (see ReportsPanel.tsx) - ids, not full Finding
+   * objects, so selection survives a `findings` refresh untouched. */
+  selectedIds: Set<string>;
+  onToggleSelect: (id: string) => void;
+  onToggleSelectAll: (ids: string[]) => void;
 }
 
 /** Only 5 Tone values exist (ui/StatusPill.tsx) for 5 severities - a clean 1:1 fit except
@@ -26,16 +31,28 @@ function typeLabel(type: string): string {
 
 const HEADERS = ["Severity", "Type", "Title", "Target", "Tool", "Confidence", "Created", "Updated"];
 
-export function FindingsTable({ findings, onSelectFinding }: FindingsTableProps) {
+export function FindingsTable({ findings, onSelectFinding, selectedIds, onToggleSelect, onToggleSelectAll }: FindingsTableProps) {
   if (findings.length === 0) {
     return <p className="text-xs text-muted">No findings match the current filters.</p>;
   }
 
+  const visibleIds = findings.map((f) => f.id);
+  const allVisibleSelected = visibleIds.every((id) => selectedIds.has(id));
+
   return (
     <div className="overflow-x-auto rounded-panel border border-border">
-      <table className="w-full min-w-[720px] border-collapse text-left text-xs">
+      <table className="w-full min-w-[760px] border-collapse text-left text-xs">
         <thead>
           <tr className="border-b border-border bg-surface-2 text-[11px] uppercase tracking-wide text-muted">
+            <th className="w-8 px-3 py-2">
+              <input
+                type="checkbox"
+                checked={allVisibleSelected}
+                onChange={() => onToggleSelectAll(visibleIds)}
+                aria-label={allVisibleSelected ? "Deselect all visible findings" : "Select all visible findings"}
+                className="cursor-pointer accent-primary"
+              />
+            </th>
             {HEADERS.map((h) => (
               <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                 {h}
@@ -50,6 +67,15 @@ export function FindingsTable({ findings, onSelectFinding }: FindingsTableProps)
               onClick={() => onSelectFinding(f)}
               className={cn("cursor-pointer transition-colors hover:bg-card", f.status === "dismissed" && "opacity-50")}
             >
+              <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(f.id)}
+                  onChange={() => onToggleSelect(f.id)}
+                  aria-label={`Select finding "${f.title}"`}
+                  className="cursor-pointer accent-primary"
+                />
+              </td>
               <td className="whitespace-nowrap px-3 py-2">
                 <StatusPill tone={SEVERITY_TONE[f.severity]} pulse={f.severity === "critical"} className="px-2 py-0.5">
                   {f.severity}

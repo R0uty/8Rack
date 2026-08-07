@@ -7,6 +7,12 @@ const BACKEND_ROOT = path.resolve(__dirname, "../..");
 
 export const env = {
   port: Number(process.env.PORT ?? 3001),
+  /** Defaults to loopback-only - this app has no auth by design (see CLAUDE.md), so binding wider
+   * than localhost would expose every tool-execution/scan/orchestrator endpoint to anything else
+   * on the same network. CORS_ORIGIN only restricts browser cross-origin fetches, not a raw
+   * request from another device, so it can't substitute for this. Set HOST explicitly (e.g. "0.0.0.0")
+   * to opt into LAN access. */
+  host: process.env.HOST ?? "127.0.0.1",
   ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434",
   corsOrigin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
   /** Exec tools (filesystem, bash, python, git, etc.) are confined to this directory. Also the

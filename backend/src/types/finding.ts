@@ -16,7 +16,6 @@ export type FindingType =
   | "information"
   | "cve";
 
-/** Same vocabulary as the (unused) types/scanner.ts stub - kept aligned deliberately. */
 export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
 
 export type FindingStatus = "discovered" | "updated" | "verified" | "dismissed";

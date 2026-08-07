@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import { AppShell, CommandPalette, RightPanel, Sidebar, TopBar, type AppView } from "./components/layout";
+import { cn } from "./lib/cn";
 import { ChatView } from "./components/chat/ChatView";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { AgentEditor } from "./components/AgentEditor";
@@ -39,6 +39,19 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [activeView, setActiveView] = useState<AppView>("chat");
+  // Every view a user has ever switched to stays mounted forever after (see the `center` prop
+  // below) - chat/task sessions live inside ChatView/OrchestratorWorkbench as plain React state
+  // (useChat/useOrchestratorTask), most of it never persisted anywhere, so unmounting either view
+  // on a nav switch would silently kill an in-flight stream or reset a task back to "Starting…".
+  // Same "mount once, toggle visibility" pattern SessionTabs already uses for session tabs within
+  // a view, just applied one level up. Views are lazily added on first visit rather than all
+  // mounted upfront, so switching to a view you've never opened doesn't fire its data fetches for
+  // nothing.
+  const [visitedViews, setVisitedViews] = useState<Set<AppView>>(() => new Set(["chat"]));
+  const changeView = (view: AppView) => {
+    setActiveView(view);
+    setVisitedViews((prev) => (prev.has(view) ? prev : new Set(prev).add(view)));
+  };
   // undefined = editor closed, null = create mode, an agent = edit mode.
   const [editingAgent, setEditingAgent] = useState<AgentWithStatus | null | undefined>(undefined);
 
@@ -47,6 +60,18 @@ function App() {
       setSelectedModel(models[0].name);
     }
   }, [models, selectedModel]);
+
+  // Deleting an agent otherwise left its session(s) dangling in sessionStorage forever (a closed
+  // chat session in particular has no other eviction path - see hooks/useSessions.ts). Gated on
+  // `!agentsLoading` so this never runs against the transient empty `agents` list before the very
+  // first fetch resolves, which would wrongly prune every session on initial load.
+  useEffect(() => {
+    if (agentsLoading) return;
+    sessions.pruneOrphanedSessions(new Set(agents.map((a) => a.id)));
+    // sessions.pruneOrphanedSessions is a stable useCallback (empty deps) - only agents/agentsLoading
+    // actually drive this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, agentsLoading]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -71,20 +96,20 @@ function App() {
   // "selected agent" the rest of the app depends on.
   const handleSelectAgent = (agent: AgentWithStatus) => {
     sessions.openChatSession(agent.id, agent.model);
-    setActiveView("chat");
+    changeView("chat");
   };
 
   // A task-session node on the network map lives in the Chat view but represents Workbench work —
   // focusing it has to switch views too.
   const handleFocusTaskSession = (sessionId: string) => {
     sessions.setActiveTask(sessionId);
-    setActiveView("workbench");
+    changeView("workbench");
   };
 
   // The sidebar logo doubles as a "return to Command Center" button — the only way back to the
   // network map from Workbench, Plans, or a chat session tab without hunting for the Home tab.
   const handleGoHome = () => {
-    setActiveView("chat");
+    changeView("chat");
     sessions.setActiveChat(null);
   };
 
@@ -105,7 +130,7 @@ function App() {
         sidebar={
           <Sidebar
             activeView={activeView}
-            onChangeView={setActiveView}
+            onChangeView={changeView}
             onGoHome={handleGoHome}
             models={models}
             modelsLoading={modelsLoading}
@@ -137,16 +162,9 @@ function App() {
           />
         }
         center={
-          <AnimatePresence mode="popLayout" initial={false}>
-            <motion.div
-              key={activeView}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.12, ease: "easeOut" }}
-              className="h-full"
-            >
-              {activeView === "chat" && (
+          <>
+            {visitedViews.has("chat") && (
+              <div className={cn("h-full", activeView !== "chat" && "hidden")}>
                 <ChatView
                   agents={agents}
                   models={models}
@@ -155,14 +173,24 @@ function App() {
                   sessions={sessions}
                   onFocusTaskSession={handleFocusTaskSession}
                 />
-              )}
-              {activeView === "workbench" && (
+              </div>
+            )}
+            {visitedViews.has("workbench") && (
+              <div className={cn("h-full", activeView !== "workbench" && "hidden")}>
                 <OrchestratorWorkbench agents={agents} models={models} sessions={sessions} />
-              )}
-              {activeView === "plans" && <MultiAgentPlanner agents={agents} />}
-              {activeView === "findings" && <FindingsView />}
-            </motion.div>
-          </AnimatePresence>
+              </div>
+            )}
+            {visitedViews.has("plans") && (
+              <div className={cn("h-full", activeView !== "plans" && "hidden")}>
+                <MultiAgentPlanner agents={agents} />
+              </div>
+            )}
+            {visitedViews.has("findings") && (
+              <div className={cn("h-full", activeView !== "findings" && "hidden")}>
+                <FindingsView />
+              </div>
+            )}
+          </>
         }
         rightPanel={
           activeView === "chat" ? (
@@ -196,7 +224,7 @@ function App() {
       <CommandPalette
         open={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
-        onChangeView={setActiveView}
+        onChangeView={changeView}
         agents={agents}
         onSelectAgent={handleSelectAgent}
         models={models}

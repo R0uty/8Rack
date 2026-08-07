@@ -1644,3 +1644,479 @@ for a plain-text answer instead brought the task to `completed`. Repeated the ex
 in-browser through the real Workbench UI: the warning banner, the failed tool's output, the
 guidance box, and recovery to `Completed` (at which point the existing continue-task follow-up box
 correctly took over) all rendered and behaved exactly as designed.
+
+## Security scanners (Scan Profiles)
+
+`types/scanner.ts`/`extensions/scannerRegistry.ts` were a placeholder stub (`Scanner.scan(target)
+=> ScanResult`, never implemented) from the original Task 11 extension points. By the time this
+was picked up, the Tool Execution Framework + Findings Engine already covered most of what a
+"scanner" would do - real recon tools (nmap/httpx/ffuf/katana/nuclei/subfinder/amass/whois/dig) run
+through `toolManager.ts` and their output is auto-parsed into structured Findings. What was still
+missing, and what the user actually wanted: a one-click way to chain several of those tools against
+a target as a single named "scan", without hand-typing each tool/target combination one at a time
+in the Workbench.
+
+**Design decisions (confirmed with the user before building):**
+- **Deterministic, not agent-driven.** A `ScanProfile` (`backend/src/scanners/builtins.ts`) is a
+  fixed, human-authored list of `{toolId, arguments}` steps with a `{target}` placeholder - no LLM
+  chooses the tools or arguments at runtime. This ruled out the alternative of an "agent-driven scan
+  mode" and is why a profile's steps can safely skip the Orchestrator's per-tool-call approval.
+- **One confirmation for the whole chain, not one per step.** Every `ExecTool` still requires human
+  confirmation before running (`toolManager.ts`) - but for a profile, the human already reviewed and
+  approved the *exact* resolved command for every step via a preview (`POST /scans/preview`) before
+  clicking "Confirm & Run All". `scanRunner.ts#createScanRun` auto-confirms each step's
+  `ExecutionRecord` the instant it's requested (see the code comment there for why this differs from
+  the Orchestrator, where an LLM picks tools/arguments live and each one needs its own approval).
+- **A step failing doesn't abort the scan.** Real recon often has some tools missing/erroring while
+  others still add value (proven live below), so `createScanRun` keeps going through the remaining
+  steps and reports the overall run as `"completed"` with individual step statuses
+  (`completed`/`failed`/`skipped`) - only an explicit cancel skips the rest.
+
+**Backend**: `types/scanner.ts` rewritten in place (`ScanProfile`/`ScanProfileStep`/`ScanStepRun`/
+`ScanRun`/`ScanPreview`) - same "supersede the placeholder" pattern as multi-agent orchestration
+replacing `extensions/orchestrator.ts`. `extensions/scannerRegistry.ts` is now a profile registry
+(`registerScanProfile`/`getScanProfile`/`listScanProfiles`), populated at startup from
+`scanners/builtins.ts`'s four profiles (Quick Recon, Subdomain Discovery, Web App Scan, Full Port
+Scan). `services/scanRunner.ts` is the core: `previewScan` resolves a profile's commands against a
+target with zero side effects (for the confirm UI); `createScanRun` runs every step sequentially
+through the existing `requestExecution`/`confirmExecution` pipeline (so workspace path containment,
+executable-availability checks, and Execution → Parser → Findings ingestion all apply unchanged),
+streaming `{type:"scan"|"step"|"output"}` events to an optional callback; `cancelScanRun` flags the
+run to stop scheduling further steps and aborts whichever step is currently in flight via the same
+`cancelExecution` used elsewhere. Persistence mirrors every other project-scoped history
+(`scans.json` per project via `projectStore.ts`, hydrated at startup by `loadScansFromDisk`).
+`routes/scanners.ts`: flat `GET /api/scanners` (profile roster) plus project-scoped
+`GET/POST /api/projects/:projectId/scans[...]` - `POST /` streams NDJSON progress for the whole run
+in one request (mirrors `routes/orchestrator.ts`'s `runAndStreamTask`/`routes/tools.ts`'s
+confirm-execution stream), with a client disconnect cancelling the scan the same way it cancels a
+single tool execution or an orchestrator task. New error classes (`ScanProfileNotFoundError`/
+`ScanRunNotFoundError`/`ScanTargetRequiredError`/`InvalidScanStateError`) wired into
+`errorHandler.ts`. The still-unimplemented `plugin.ts`/`report.ts`/`pluginRegistry.ts` placeholders
+that referenced the old `Scanner`/`ScanFinding` types were updated to the new `ScanProfile` shape
+(`report.ts` now points at the real `Finding` type from `types/finding.ts` instead, since that's
+what a report would actually draw from) so the rewrite didn't leave the codebase in a
+non-typechecking state. 11 new backend tests (`scanRunner.test.ts`, 220 total) covering preview
+resolution, sequential execution, per-step failure isolation, and cancellation (aborting the
+in-flight step and skipping the rest).
+
+**Frontend**: `types/scanner.ts` mirror, `services/scannersApi.ts` (`fetchScanProfiles`,
+`previewScan`, `createScan` NDJSON stream, `fetchScans`, `cancelScan`), `hooks/useScans.ts`
+(project-scoped, same shape as `useTools.ts`/`useOrchestratorTask.ts` - tracks `profiles`/`scans`/
+`run`/`liveOutput`/`preview`, exposes `runPreview`/`clearPreview`/`runScan`/`cancel`/`reset`). A
+step's live event stream doesn't carry an explicit array index, so `runScan`'s event handler tracks
+position with a simple pointer (`nextStepIndexRef`) that advances once a step's *terminal* event
+arrives (running → no advance, completed/failed/skipped → advance) - robust even for a cancelled
+scan where later steps go straight to `skipped` with no preceding `running` event. New
+`components/ScannerPanel.tsx` (profile + target picker → inline preview/confirm card, matching
+`ProjectPanel`'s established "no native `confirm()`, do it inline" convention → live step list +
+output pane while running → a "Recent Scans" history strip), added into `OrchestratorWorkbench.tsx`'s
+Home tab between `ProjectPanel` and the New Task form. 12 new frontend hook tests
+(`useScans.test.ts`, 182 total across the frontend suite).
+
+**A real bug caught by live verification, not tests**: the first draft of `scanners/builtins.ts` had
+each profile step repeat `"-silent"` for httpx/katana/nuclei/subfinder, e.g.
+`{ toolId: "httpx", arguments: ["-silent", "-u", "{target}"] }` - but those tools' own `ExecTool`
+entries in `tools/exec/builtins.ts` already bake `-silent` into `defaultArguments`, and
+`toolManager.ts#buildResolvedCommand` concatenates `defaultArguments + arguments`, so the resolved
+command doubled up as `httpx -silent -silent -u example.com`. Caught immediately via a live
+`POST /scans/preview` curl against the running dev backend before ever reaching the browser; fixed
+by dropping the redundant flag from every profile step (steps only add what a tool's own defaults
+don't already cover).
+
+**Verified live** against the real running app (curl + in-browser through the actual Workbench UI,
+targeting `example.com` - a real, safe, universally-authorized test domain, not a live scope target):
+previewed and ran the Quick Recon profile end-to-end - `dig`/`whois` completed with real output,
+`httpx` failed (`Exited with code 2`) because the `httpx` binary installed on this dev machine isn't
+ProjectDiscovery's httpx and doesn't recognize `-silent`/`-u` the same way - an environment mismatch
+unrelated to this feature, and useful proof that per-step failure isolation works: the scan still
+reached `completed` with steps 1-2 shown as `completed` and step 3 as `failed` with its stderr
+visible. Separately ran Full Port Scan (`nmap`) against `127.0.0.1` and cancelled it mid-flight via
+`POST /scans/:id/cancel` while its stream was still open - the running `nmap` step flipped to
+`skipped` (its subprocess actually aborted, not just stopped being watched), the still-pending
+`httpx` step was skipped without ever starting, and the run settled as `cancelled` through the same
+open NDJSON connection. In-browser: created a throwaway project, picked Quick Recon, confirmed the
+preview's resolved commands (correctly `httpx -silent -u example.com`, no duplicate flag), watched
+the same partial-failure result render live with per-step status pills and the failed step's output,
+and saw it land in the Recent Scans history strip. `npm run typecheck`/`npm run build` (backend) and
+`npx tsc -b`/`npm run lint`/`npm run build` (frontend) all clean.
+
+### What's next
+
+`extensions/scannerRegistry.ts` only holds the four built-in profiles - there's no API to create a
+custom profile yet (would need a small CRUD surface + frontend editor, same shape as the Agent
+Editor). Scan run history has no search/bookmark treatment the way `ExecutionHistoryPanel` does for
+raw tool executions. Findings ingestion happens automatically per step already (each step's
+`ExecutionRecord` goes through the same `ingestExecution` pipeline any manually-run tool does) - a
+scan-level "N findings discovered" summary on the `ScanRun` itself would be a nice follow-up but
+wasn't part of what was asked.
+
+## Persistent top-level views (nav-switch state loss)
+
+User-reported: "sessions, chats and task should persist inside tabs when switching all of them."
+`SessionTabs`/`ChatSessionPanel`/`TaskSessionPanel` already keep every open session mounted and
+just toggle a `hidden` class when you switch between tabs *within* the Chat or Workbench view (see
+"Per-agent model override + parallel agent sessions" above) - but one level up, `App.tsx`'s
+top-level nav switch (Chat/Workbench/Plans/Findings) did the opposite: `center` conditionally
+rendered only the active view (`activeView === "chat" && <ChatView/>`, etc.) inside a single
+`motion.div key={activeView}`. Changing `activeView` gave that `motion.div` a new `key`, which React
+treats as "this is a different element" - the old view (and everything inside it) gets fully
+unmounted, a fresh one mounts in its place.
+
+That's fatal for exactly the state this session-tab work was built to keep alive:
+- `useOrchestratorTask`'s `task`/`liveOutput`/`streamingText` (inside every open `TaskSessionPanel`
+  and `ChatTaskPanel`) is plain `useState` with **no persistence at all** - confirmed by
+  `ChatTaskPanel.tsx`'s own `restore()` call, added specifically because a page *reload* wipes this
+  state even though the backend task and `session.taskId` both survive. Unmounting on a plain nav
+  switch hits the exact same wipe, except there was no `restore()` path for a `TaskSessionPanel`
+  wired up for it (its auto-start effect's `session.started` guard, sessionStorage-backed, would
+  have silently stayed `true` and just never called `start()` again - the task would come back as a
+  permanently blank "Starting…" tab, not even a duplicate task).
+- Any in-flight `useChat` stream got orphaned: `sendMessage`'s `updateMessages`/`setSending` calls
+  are closures over the *old* component instance's state setters. Once that instance unmounts,
+  those calls become no-ops on a dead component - the sessionStorage-persisting `useEffect` never
+  fires again either (its component is gone), so the rest of a streaming reply was silently lost,
+  not just visually hidden.
+
+**Fix**: `App.tsx` now tracks `visitedViews` (a `Set<AppView>`, seeded with `"chat"`) alongside
+`activeView`. A view is added to the set the first time you navigate to it (via a new `changeView`
+wrapper used everywhere `setActiveView` used to be called directly - `Sidebar`, `CommandPalette`,
+`handleSelectAgent`, `handleFocusTaskSession`, `handleGoHome`) and, once in the set, stays mounted
+for the rest of the session - `center` now renders `visitedViews.has("chat") && <div className={cn("h-full", activeView !== "chat" && "hidden")}><ChatView .../></div>` (and the same for
+workbench/plans/findings) instead of the old conditional-render-inside-a-keyed-`motion.div`.
+Lazy-mount-on-first-visit rather than mounting all four upfront, so opening the app doesn't
+immediately fire every view's data fetches (`useProjects`, `useFindings`, `useMultiAgentPlan`, RAG
+status) for views you may never open.
+
+**Deliberate tradeoff**: this drops the `AnimatePresence`/`framer-motion` fade-and-slide transition
+between top-level views entirely (`framer-motion`/`AnimatePresence` imports removed from
+`App.tsx`) - keeping it would have meant either accepting the state loss it was built on top of, or
+re-architecting it into an absolutely-positioned opacity-crossfade stack, which is real added
+complexity for a purely cosmetic effect the user didn't ask to keep. The result matches the
+zero-animation `hidden`-class toggle every other tab switch in this app already uses
+(`SessionTabs`, `TaskSessionPanel`, `ChatSessionPanel`) - consistent, not a regression in kind, just
+one level higher up than before.
+
+**Verified live** against the real running app: started a Recon Agent task in Workbench (objective:
+list the workspace directory via `list_directory`), approved it up to the tool-call step so it sat
+at `waiting_confirmation` with a live Approve/Reject card, then navigated Workbench → Chat →
+Findings → Workbench. The confirm card - objective text, the assistant's `list_directory([])` tool
+call bubble, the pending-confirmation execution card, Approve/Reject buttons - was still there
+exactly as left, no "Starting…" flash and no duplicate task. Approved it from there and confirmed
+the task completed normally (tool output rendered, final assistant summary, follow-up input became
+available) - proving the fix doesn't just preserve stale UI, the live `useOrchestratorTask` instance
+genuinely kept running underneath the whole time. `npx tsc -b`, `npm run lint`, `npm test` (182
+passing), and `npm run build` all clean throughout.
+
+## Full-project audit
+
+User asked for a whole-project audit with findings written to `TODO.md` "if necessary" - it was.
+Three parallel reviews (backend security, backend architecture/correctness, frontend
+correctness/lifecycle) plus manual spot-checks (repo hygiene, `git ls-files` secret scan, `npm
+audit`/`npm outdated` both workspaces, doc-accuracy cross-checks). Full findings list with
+severity and fix suggestions lives in `TODO.md`'s "Audit findings (2026-08-07)" section - not
+duplicated here to avoid the two files drifting apart.
+
+**Headline finding**: `projectId` is accepted as a raw string everywhere it reaches a filesystem
+path (`projectStore.ts#projectDir`, used by every project-scoped service) with only a
+non-empty-string check at the route layer, never a shape check - `path.join` doesn't sanitize `..`
+segments, so a crafted `projectId` can write/delete files outside `backend/data/projects/`
+entirely (confirmed via a standalone `path.join` computation, no filesystem actually touched - no
+exploit was run against the live backend). Not fixed yet, deliberately - flagged as the audit's one
+High item pending the user's go-ahead on scope, since the fix touches every project-scoped
+route/service (`toolManager.ts`, `orchestrator.ts`, `multiAgentOrchestrator.ts`,
+`findingsManager.ts`, `scanRunner.ts`, `projectManager.ts`), not a one-line patch.
+
+**Fixed inline during the audit** (cheap, unambiguous, no scope decision needed): a "231 total"
+backend-test-count arithmetic error introduced in this session's own Security-scanners
+`DEVELOPMENT.md`/`TODO.md` entries (actual was 220, corrected in both files), and `CLAUDE.md`'s
+"There are no automated tests yet" line (stale since before the very first Vitest suite existed).
+`CLAUDE.md`'s broader "Architecture" section - the `backend/src/` directory tree and
+extension-point description - is still the original Task-11 scaffold and doesn't mention anything
+built since (Tool Execution Framework, Orchestrator, Projects, RAG, Findings Engine, Security
+Scanners, Multi-agent plans); left as a flagged `TODO.md` item rather than rewritten inline since
+it's a substantial rewrite of the user's own governing instructions file, not a quick fact-patch.
+
+Everything else (Medium/Low severity: a nav-switch-adjacent chat-context-loss bug in the
+still-in-progress tool-enabled-chat feature, a persistence write-race + silent-corruption pair in
+`projectStore.ts`, an unguarded startup-hydration window, dead `extensions/` files, test coverage
+gaps, README/CLAUDE.md staleness) is documented in `TODO.md` with file:line-level detail, not
+fixed - none of it is actively exploited-by-design the way the projectId issue is, and fixing all
+of it in one pass would have gone well beyond "audit."
+
+## Report generation
+
+The last unbuilt item from the original Task 11 extension-point list (`types/report.ts`,
+`extensions/reportGenerator.ts`) - also one of the audit's own "confirmed dead code" findings
+above, resolved as a side effect of actually building it, same as the Scanner stub before it.
+
+**Design (confirmed with the user first)**: reports are generated from a **multi-finding
+selection** (checkbox-select rows in the Findings table, "Generate Report from N selected"), not
+one finding at a time - matching the `ReportInput`/`Report` type's existing shape
+(`findings: Finding[]` in, structured `sections: ReportSection[]` out) rather than the simpler
+single-finding "Explain with AI" pattern already in `FindingDetails.tsx`. Reports are **persisted
+history**, not ephemeral - `reports.json` per project, same write-through pattern as executions/
+tasks/plans/scans, with a list/view/delete UI, not just a one-off streamed panel.
+
+**Backend**: `types/report.ts` rewritten in place (`Report` gained `projectId`/`findingIds`/
+`agentId`/`model`/`markdown`, `createdAt` switched from an ISO string to a `number` to match every
+other entity in the app). `extensions/reportGenerator.ts` - confirmed zero importers anywhere -
+was deleted outright rather than kept as a wrapper, same as `extensions/orchestrator.ts` was
+deleted when the real Orchestrator landed. `services/reportManager.ts` is the real thing: one
+agent call via `chatService.ts#streamAgentChat` (no tool loop - a report is a one-shot writeup, not
+an Orchestrator task) against the **Report Writer** agent (`backend/data/agents/report-writer.json`
+- reused directly, same as `FindingDetails.tsx`'s "Explain with AI" reuses the Vulnerability
+Validator agent rather than adding a dedicated one). The prompt embeds every selected finding's
+type/severity/target/tool/confidence/description/evidence and asks for Markdown with an
+"## Executive Summary" then one "## Finding: ..." section per finding, each covering Impact/
+Reproduction/Remediation as `###` subsections. `splitSections()` parses the response on `## `
+headings into `ReportSection[]` - deliberately lenient (falls back to one whole-document section
+if the model skips/reflows the requested headings) rather than requiring strict structure, same
+philosophy as `orchestrator.ts#parseToolRequest`'s fence-stripping fallback: local 7B models don't
+always follow formatting instructions exactly, and losing content because of that would be worse
+than an occasionally-flat report. `routes/reports.ts`: project-scoped
+`GET/POST/DELETE /api/projects/:projectId/reports[...]`, `POST /` streams NDJSON
+(`{type:"chunk"|"report"|"error"}` - the same shape as `routes/orchestrator.ts`'s
+`runAndStreamTask`, since this is a single generation, not a multi-step process like a scan). New
+error classes `ReportNotFoundError`/`NoFindingsSelectedError`, wired into `errorHandler.ts`.
+10 new backend tests (`reportManager.test.ts`, 230 total).
+
+**Frontend**: `types/report.ts` mirror, `services/reportsApi.ts` (`fetchReports`, `createReport`
+NDJSON stream, `deleteReport`), `hooks/useReports.ts` (project-scoped, same shape as
+`useScans.ts` - `generate`/`remove`, `streamingText` for the live-writing UX). `FindingsTable.tsx`
+gained a checkbox column (per-row + a header "select all visible" checkbox, `stopPropagation`'d so
+checking a row doesn't also open its details drawer) - `selectedIds` is a `Set<string>` of ids, not
+full `Finding` objects, so a selection survives a `findings` refresh untouched. `FindingsView.tsx`
+gained a 4th view mode ("Reports", alongside Table/Timeline/Graph) and, in Table mode, an inline
+"Generate Report" bar that appears once at least one finding is checked - a title input + Generate
+button, live-streaming the agent's reply (`Markdown`-rendered, same `StreamingCursor` treatment as
+chat/task streaming) while it writes, then clearing the selection and switching to the Reports tab
+once it lands. New `ReportsPanel.tsx` is purely presentational (takes `reports`/`loading`/`error`/
+`onDelete` as props from `FindingsView`'s single owned `useReports()` call, same "one owner, props
+down" convention `OrchestratorWorkbench.tsx` already uses for `ToolRegistry`/
+`ExecutionHistoryPanel` over one `useTools()`) - a list (title, finding count, relative time),
+click-to-open a full-width (`max-w-3xl`) `Sheet` rendering the complete Markdown via the existing
+`Markdown` component (code blocks, headings, everything `ChatMessageView` already gets), an Export-
+to-`.md` download (same `Blob`/`createObjectURL` technique as `ExecutionConsole`'s output export),
+and the established two-step inline delete (`confirmDeleteId` state, no native `confirm()`) from
+`ProjectPanel.tsx`. 21 new frontend tests (10 `useReports.test.ts` + 5 new `FindingsTable.test.tsx`
+selection cases + updates to its existing tests for the new required props, 195 total).
+
+**Verified live** against the real running app, with a real local model (`qwen2.5-coder:7b`, the
+Report Writer agent's configured model) - not a mock: created a throwaway project, added two real
+findings via `POST /api/projects/:id/findings` (a critical SQL-injection finding and a low missing-
+CSP-header finding, both with genuine evidence text), then generated a report from both via curl
+(`POST /projects/:id/reports`) - the agent produced a properly structured document (Executive
+Summary + one section per finding, each with real Impact/Reproduction Steps/Remediation content
+grounded in the evidence given, no fabrication observed) that `splitSections()` correctly parsed
+into 3 sections. Repeated the exact flow in-browser through the real Findings UI: selected both
+findings via checkboxes (including the header "select all"), typed a title, watched the report
+stream live into the inline bar, landed automatically on the Reports tab, opened the full document
+in the wide Sheet (headings/code blocks/syntax highlighting all rendering correctly), and exercised
+the two-step delete (confirm card appeared, Delete removed it from the list). `npm run typecheck`/
+`npm run build` (backend) and `npx tsc -b`/`npm run lint`/`npm run build` (frontend) all clean
+throughout; cleaned up the throwaway project afterward via the DELETE endpoint.
+
+## Fixed: projectId path-traversal
+
+The audit's one High-severity finding: `projectId` reached a real filesystem path
+(`services/projectStore.ts#projectDir(id) = path.join(PROJECTS_DIR, id)`) with only a
+non-empty-string check anywhere above it, and `path.join` doesn't sanitize `..` segments - a
+crafted id like `"../../../../tmp/x"` could write/delete files well outside
+`backend/data/projects/`.
+
+**Where to fix it**: every project-scoped service (`toolManager.ts`, `orchestrator.ts`,
+`multiAgentOrchestrator.ts`, `findingsManager.ts`, `scanRunner.ts`, `reportManager.ts`) only ever
+touches disk through `projectStore.ts`'s `readProjectJson`/`writeProjectJson`, and those - plus
+`projectManager.ts`'s own `readProjectMeta`/`writeProjectMeta`/`deleteProject` - all funnel through
+`projectDir(id)` itself. That makes `projectDir` the one real chokepoint: validating there (a
+`PROJECT_ID_PATTERN` UUID regex, same shape as `agentManager.ts`'s existing `AGENT_ID_PATTERN`
+check for agent ids) closes the hole for every current caller *and* every future one, without
+needing a scattered `assertValidProjectId()` call added to each route/service by hand (the
+original audit's suggested fix) - nothing new can forget to add a check that already lives inside
+the only function capable of producing the path.
+
+**The one subtlety**: `readProjectJson` and `projectManager.ts#readProjectMeta` both wrap their
+`readFile` in a `try { ... } catch { return [] / undefined }` - a deliberate "no data yet" fallback
+for a missing file. `projectDir(id)` was originally called *inside* that try block in both, so a
+rejected id would have been silently swallowed by the same catch and returned as an ordinary empty
+result - the traversal would still have been blocked (the read/write never happens), but the
+caller would have no way to tell "this id is malformed" apart from "this project legitimately has
+no data yet", which is exactly the kind of ambiguity the audit's separate silent-corruption finding
+(`readProjectJson`'s catch-all) already flagged as risky. Fixed by resolving `projectDir(id)`
+*before* the try block in both functions, so a rejection propagates as a real `InvalidProjectIdError`
+(400 `INVALID_PROJECT_ID`) instead of masquerading as empty state. `writeProjectJson` and
+`projectManager.ts#writeProjectMeta` already called `projectDir` outside any try/catch, so they
+needed no change.
+
+5 new regression tests in `projectManager.test.ts` (235 total) - the existing test file already
+exercised `projectStore.ts`'s real functions (via the shared `fakeFs` double under
+`node:fs/promises`, not a fully-mocked `projectStore.js`), so this also meant swapping its
+placeholder ids ("nope", "proj", "older", "newer") for UUID-shaped ones to keep testing the
+*intended* "not found" behavior distinctly from the new "rejected outright" behavior - every other
+service's test file mocks `projectStore.js` wholesale and never exercises the real `projectDir`, so
+none of them needed touching.
+
+**Verified live** against the real running backend, not just tests: replayed the audit's own PoC
+payload (`projectId: "../../../../tmp/8rack-poc"`) against `POST /api/orchestrator/tasks` and got a
+clean `{"error":"\"../../../../tmp/8rack-poc\" is not a valid project id"}` instead of a task ever
+starting - confirmed via `ls` that no directory was created anywhere under `/tmp` or
+`backend/data/projects/`. Repeated against `/api/tools/request` (clean 400, same message) and
+`/api/projects/:id/scans` (the actual scan-creation route, which persists - `/scans/preview` was
+also tried and correctly returns 200 regardless of the id, but that's expected: `previewScan()` is
+a pure computation and never receives `projectId` at all, so there was never anything for it to
+traverse with). A normal project (real UUID) still creates, round-trips, and deletes exactly as
+before. `npm run typecheck`, `npm run build`, and `npm test` (235 passing) all clean.
+
+## Fixed: the six Medium audit findings
+
+All six Medium-severity items from the earlier full-project audit, fixed in one pass at the user's
+request (the seven Low-severity items and the Plugin system remain open - see `TODO.md`).
+
+**Bind to `127.0.0.1` by default.** `app.listen(env.port, ...)` had no host argument, so Node
+defaulted to `0.0.0.0` - every tool-execution/scan/orchestrator endpoint reachable from anything
+else on the same network, in an app with no auth by design. New `env.host` (defaults to
+`127.0.0.1`, override via `HOST`) is now passed explicitly: `app.listen(env.port, env.host, ...)`.
+Verified against the real running dev server via `ss -ltnp` - it previously showed `*:3001`
+(`0.0.0.0`, observed earlier in this same session before this fix existed), and now shows
+`127.0.0.1:3001` exclusively - and the frontend's Vite proxy (which targets `localhost:3001`) still
+resolves and works, since `localhost` resolves to loopback either way.
+
+**Workspace-containment caveat on `bash`/`python`.** `toolManager.ts`'s path-containment check
+inspects each argv element as its own path - it has no way to see "inside" a `bash -c "<script>"`/
+`python3 -c "<code>"` string, so `arguments: ["-c", "cat ~/.ssh/id_rsa"]` was never flagged, even
+though it plainly reads outside the workspace. This was always true by design (human confirmation
+is the real gate for these two tools, not the containment check), just never stated anywhere a
+reviewer would see it. Both tools' `description` in `tools/exec/builtins.ts` now say so explicitly
+("NOT confined to the workspace root... Review the exact resolved command before approving"), and
+the module's own doc comment above the roster explains why. No UI change needed - tool descriptions
+already surface in the Tool Registry and wherever a tool is referenced, which is exactly where this
+caveat needs to land.
+
+**Serialized per-project-file writes.** `projectStore.ts#writeProjectJson` did a bare
+`writeFile` snapshot with no ordering guarantee - two overlapping writes to the same
+project+file (e.g. two `persistExecutions` calls firing close together) could have their
+underlying disk writes complete out of call order, permanently reverting the file to a stale
+snapshot with nothing to indicate it happened. New `enqueueWrite`/`writeQueues` (keyed per
+`"{projectId}:{filename}"`, not just per project, so e.g. `executions.json` and `tasks.json`
+writes for the same project don't block each other) chains writes through a `Promise` per key via
+`previous.then(task, task)` - the `task, task` (not just `task`) matters: it means a failed write
+still lets the *next* queued write run, so one bad write can't permanently wedge a project's
+history. 3 new tests: a deliberately-delayed "older" write proven to still block a "newer" one's
+actual disk write until the older one settles (not just "eventually both succeed" - the test
+asserts the mock's call count stays at 1 while the first write is deliberately held open),
+independent files not blocking each other, and a failed write not wedging the next one.
+
+**Corrupted JSON logs a warning instead of vanishing silently.** `readProjectJson`
+(`projectStore.ts`) and `readProjectMeta` (`projectManager.ts`) both wrapped `readFile` +
+`JSON.parse` in one `try/catch`, so a file that exists but fails to parse (e.g. from a crash
+mid-`writeFile`, before the write-queue fix above existed) looked byte-for-byte identical to a
+project with no history yet - `[]`/`undefined`, zero indication anything was wrong. Both now
+resolve `readFile` and `JSON.parse` in separate try blocks: a missing file stays silent (the common,
+expected case), but a parse failure on a file that does exist gets a `console.warn` naming the
+project id and filename before falling back to the same empty result. 2 new tests confirming the
+warning fires only for actually-invalid JSON, not for a plain missing file.
+
+**Guarded startup hydration.** `index.ts`'s `app.listen(env.port, env.host, async () => {...})`
+callback ran `loadAgents`/`loadExecutionsFromDisk`/.../`loadIndexFromDisk` with no `try/catch`
+around any of it, *after* the port was already accepting connections - a thrown error partway
+through was an unhandled rejection that silently aborted every step after it (e.g. the RAG index
+quietly never loading, with no log saying why). The whole body is now wrapped in try/catch with a
+`console.error` naming what may not have loaded and pointing at "restart to retry" - deliberately
+not crashing the process, since no route actually depends on this hydration completing (each
+service just reads its own in-memory state, which starts empty regardless of whether hydration
+succeeds or fails). Didn't add the "gate requests behind a 503 until ready" half of the original
+suggestion - a real architectural addition (readiness middleware) disproportionate to what a
+`try/catch` already fixes (the actual bug: silent, total failure with no trace). Verified live: the
+dev server picked up the change and restarted cleanly, `/health` and the frontend's `/api/*` proxy
+both kept working.
+
+**Notice when enabling tools mid-chat.** The audit's original framing assumed the prior plain-chat
+messages "stay visible above" once you pick a project - re-reading `ChatSessionPanel.tsx` while
+fixing this showed that's not true: picking a project switches the render from
+`<ChatArea/><PromptInput/>` to `<ChatTaskPanel/>` entirely, so the old messages don't just lose
+context, they disappear from view completely (still safe in `useChat`'s sessionStorage, just not
+rendered). Given that, seeding the new `OrchestratorTask` from `useChat`'s message history wasn't
+really the more "honest" fix either - the two message shapes don't convert losslessly and the user
+still wouldn't see their own history in the new task-oriented view. Went with the notice option
+instead: `ChatSessionPanel.tsx` now shows an amber `AlertTriangle` banner (matching
+`OrchestratorTaskView.tsx`'s existing warning-banner styling) above `ChatTaskPanel` whenever
+`useChat`'s `messages` is non-empty, spelling out exactly what's true - this is a fresh
+tool-enabled thread, the N earlier messages aren't shown here and aren't seen by the agent, and how
+to get back to them (switch Project back to "No project"). 4 new tests
+(`ChatSessionPanel.test.tsx` - didn't exist before this fix) covering all four combinations of
+project-set/unset × messages-present/absent, plus singular/plural phrasing. Verified live
+end-to-end: sent a plain message to General Assistant, picked a project, saw the exact notice text
+with the correct message count and agent name, switched back to "No project" and confirmed the
+original messages were still there untouched.
+
+**Verified together**: `npm run typecheck`/`npm run build` (backend), `npx tsc -b`/`npm run lint`/
+`npm run build` (frontend), `npm test` both sides (240 backend, 199 frontend) all clean.
+
+## Fixed: the seven Low audit findings
+
+The last batch from the full-project audit - with this, every finding across all three severities
+(High/Medium/Low) is resolved; only the Plugin system remains open from the audit's adjacent
+findings (see `TODO.md`'s "Later" section).
+
+**Scan target flag-injection guard.** `scanRunner.ts#requireTarget` now rejects any target starting
+with `-` (new `InvalidScanTargetError`, 400 `INVALID_REQUEST`) before `previewScan`/`createScanRun`
+do anything else with it. Not a real command-injection risk to begin with (argv-based `spawn`, no
+shell) - genuinely just cheap hardening. Verified live: `POST /scans/preview` with target
+`-oG=/tmp/evil` against a real project returned a clean 400 with an explanatory message.
+
+**Prune sessions on agent deletion.** New `hooks/useSessions.ts#pruneOrphanedSessions(validAgentIds)`
+drops any session (including a closed-but-retained chat session - the one case with no other
+eviction path) whose `agentId` isn't in the given set; manual/no-agent sessions (`agentId === null`)
+are never touched. Wired from a new `App.tsx` effect that runs whenever `agents` changes - gated on
+`!agentsLoading`, since pruning against the transient empty list before the very first `useAgents()`
+fetch resolves would otherwise wipe out every agent-backed session on initial page load.
+
+**Abort in-flight requests on unmount.** Both `useChat.ts` and `useOrchestratorTask.ts` gained a
+one-line unmount-cleanup effect (`return () => abortRef.current?.abort()`). Worth double-checking
+this actually fires when it matters: closing a session tab does genuinely unmount the owning
+`ChatSessionPanel`/`TaskSessionPanel` (and thus this hook instance) for real - `closeSession`
+either filters the session out of `taskSessions` entirely, or (for a chat session) flips
+`closed: true`, which removes it from the `chatSessions` array the `.map()` in `ChatView.tsx`
+renders from - neither is the same as the `hidden`-CSS-class technique used for merely-inactive
+(but still open) tabs, which stays mounted. Confirmed with a test asserting the abort signal is
+still unset right up until `unmount()`, then set immediately after.
+
+**`ollama.ts` test coverage.** New `ollama.test.ts`, 29 tests, the last file in `services/` with
+zero coverage. A fake streaming `Response` (`streamResponse()`) built from raw byte-string chunks
+lets tests control exactly how NDJSON lines land across `reader.read()` calls - one test
+deliberately splits a single line's bytes across two reads to exercise `streamChat`'s own
+buffering, another omits the trailing newline on the final chunk to exercise the post-loop flush.
+Every error mapping is covered (`OllamaModelNotFoundError` for a 404 naming the model,
+`OllamaConnectionError`/`RequestCancelledError` for the two ways the initial `fetch()` can fail,
+`RequestCancelledError` again for a stream aborted mid-read, `EmbeddingModelUnavailableError`'s two
+trigger phrases). `streamChatWithTools` is tested by driving real multi-round HTTP responses
+through the mocked `fetch` (not by trying to mock `streamChat` from outside - ESM modules don't let
+a test intercept another export's *internal* call to a sibling export in the same file, so this is
+the only way to actually exercise the round-trip logic) - native `tool_calls`, the
+tag-noncompliant fallback parser recovering a bare JSON tool-call from plain content, an unknown
+tool name producing an error tool-result instead of throwing, and the `MAX_TOOL_ROUNDS` cap
+actually stopping a model that requests a tool forever at exactly 4 rounds. Needed a
+`vi.clearAllMocks()` in `beforeEach` after the first pass showed a real cross-test leak - the
+shared `fixtureTool.execute` mock's call history was accumulating across tests, so a later test
+asserting "the tool was never called" saw calls left over from a completely different, earlier
+test. `services/projectStore.ts`'s half of this same finding was already closed as a side effect of
+the Medium-severity persistence fixes earlier in this audit, not repeated here.
+
+**README/CLAUDE.md staleness.** `README.md`'s Features list gained Security Scanners, the Findings
+Engine + CVE lookup, and Report generation (all shipped after the README was last touched), plus
+two Configuration-table rows (`HOST`, `NVD_API_KEY`) that were genuine gaps from earlier fixes in
+this same audit, not just pre-existing staleness. `CLAUDE.md`'s "Architecture" section - flagged as
+the single most-misleading doc for a future session, since it's auto-loaded context - got a full
+rewrite of both directory trees plus a new services-file reference table, and three new short prose
+sections: "Two tool-calling mechanisms" (native Ollama `tool_calls` via the empty `toolRegistry.ts`
+vs. the Orchestrator's own plain-text JSON convention driving the real Tool Execution Framework -
+genuinely easy to conflate, since both exist and both are named "tools"), "Projects" (the
+`projectId`/`projectStore.ts#projectDir` convention nearly everything is keyed on, with a pointer to
+the path-traversal fix), and a correction to the "Agents" section's stale claim that `Agent.tools`
+"isn't read anywhere yet" - it, and the newer `Agent.execTools`, both are. Deliberately kept as a
+map with pointers into `DEVELOPMENT.md`'s much more detailed per-feature sections, not a duplicate
+of them.
+
+**Verified together**: `npm run typecheck`/`npm run build` (backend), `npx tsc -b`/`npm run lint`/
+`npm run build` (frontend), `npm test` both sides (271 backend, 204 frontend) all clean throughout;
+the scan-target fix additionally verified live via curl against the real running backend.

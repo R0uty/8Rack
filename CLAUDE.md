@@ -41,43 +41,91 @@ cd frontend && npm run lint       # oxlint
 cd frontend && npm run build      # tsc -b && vite build
 ```
 
-There are no automated tests yet (see `TODO.md`) — verification has been manual: `curl` against
-the backend, browser automation against the frontend.
+Automated tests exist on both sides: `cd backend && npm test` (Vitest, service-level unit tests)
+and `cd frontend && npm test` (Vitest + React Testing Library). Verification for a given change is
+still routinely rounded out with manual `curl` against the backend and browser automation against
+the frontend — see `DEVELOPMENT.md` for what's been verified live vs. by tests alone.
 
 Ollama must be running separately (`ollama serve`, default `http://localhost:11434`) — this
 project only wraps it, it doesn't manage its lifecycle.
 
 ## Architecture
 
-The frontend never talks to Ollama directly. Everything goes through the backend, which is the
-intended integration seam for future features (tools, RAG, scanners) — the frontend just calls
-`/api/*` and stays unaware of Ollama's existence.
+The frontend never talks to Ollama directly — everything goes through the backend, which just
+calls `/api/*` and stays unaware of Ollama's existence. Every route/feature below is fully built
+(not a placeholder) unless explicitly marked otherwise; `DEVELOPMENT.md` has a dedicated section
+per feature with the full design rationale and what was verified — this section is just the map.
 
 ```
 backend/src/
-├── config/env.ts     PORT, OLLAMA_BASE_URL, CORS_ORIGIN (from .env)
-├── routes/           models.ts (GET /api/models), chat.ts (POST /api/chat), agents.ts (GET /api/agents)
-├── services/         ollama.ts (Ollama REST client), agents.ts (loads data/agents/*.json), errors.ts
-├── middleware/        errorHandler.ts — maps domain errors to HTTP status + JSON body
-├── types/             Agent, OllamaModel, ChatRequest/ChatResponseChunk, plus extension-point
-│                       types (tool.ts, orchestration.ts, rag.ts, scanner.ts, report.ts, plugin.ts)
-└── extensions/         toolRegistry, retrievalRegistry, scannerRegistry, pluginRegistry,
-                        orchestrator, reportGenerator — placeholder interfaces/registries for
-                        future agentic features; not imported by index.ts, not exposed over HTTP
+├── config/env.ts      PORT, HOST (default 127.0.0.1 - no auth on this app, see below),
+│                       OLLAMA_BASE_URL, CORS_ORIGIN, WORKSPACE_ROOT, orchestrator loop-prevention
+│                       caps, EMBEDDING_MODEL, NVD_API_KEY (all from .env)
+├── routes/             one file per concern: models, chat, agents, tools, orchestrator, projects,
+│                       findings, plans (multi-agent), rag, scanners, reports
+├── services/           the real logic - see the list below
+├── middleware/         errorHandler.ts - maps every domain Error subclass (services/errors.ts) to
+│                       an HTTP status + JSON body; every route's catch/next(err) funnels here
+├── types/              domain types - Agent, OllamaModel, ChatRequest/ChatResponseChunk, ExecTool,
+│                       Finding, Project, ScanProfile/ScanRun, Report, RagSearchResult, plus the two
+│                       extension-point types that are still genuinely unbuilt (tool.ts, plugin.ts -
+│                       see "Later" in TODO.md)
+├── extensions/         toolRegistry.ts (wired into the native Ollama tool-calling path, but zero
+│                       tools registered - see "Two tool-calling mechanisms" below) and
+│                       scannerRegistry.ts (real - holds the built-in Scan Profiles) are live;
+│                       retrievalRegistry.ts/pluginRegistry.ts are confirmed dead code (audited, no
+│                       importers anywhere) kept around for the still-unbuilt Plugin system
+├── tools/exec/builtins.ts   the ~20 built-in ExecTools (nmap, ffuf, nuclei, httpx, bash, python,
+│                       filesystem ops, ...) - every one requires human confirmation before running
+├── scanners/builtins.ts     the 4 built-in Scan Profiles (fixed chains of ExecTool steps - Quick
+│                       Recon, Subdomain Discovery, Web App Scan, Full Port Scan)
+└── parsers/            one parser per recon tool (nmap/httpx/ffuf/katana/nuclei/subfinder/dig/
+                        whois), turning raw tool output into structured Findings
+```
 
-backend/data/agents/*.json   One JSON file per agent (name, model, temperature, systemPrompt,
-                              description, optional tools[]). Loaded fresh from disk on every
-                              GET /api/agents call — not cached at boot — so editing a file takes
-                              effect immediately without restarting the server.
+Key files under `backend/src/services/`:
 
+| File | Owns |
+| --- | --- |
+| `ollama.ts` | The only place that talks to Ollama's REST API - chat streaming, embeddings, native tool-calling (`streamChatWithTools`) |
+| `agentManager.ts` / `chatService.ts` | Loads `backend/data/agents/*.json` live (not cached), assembles a chat request from an agent's config |
+| `toolManager.ts` / `toolExecutor.ts` | Human-confirmation-gated OS process execution, workspace-sandboxed, per-project execution history |
+| `orchestrator.ts` / `multiAgentOrchestrator.ts` | The autonomous tool-calling loop - single-agent task, or a chained multi-agent plan |
+| `projectManager.ts` / `projectStore.ts` | The project-scoping primitive everything else below is keyed on - see "Projects" below |
+| `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated, graph-correlated findings) + on-demand NVD CVE correlation |
+| `ragIndex.ts` | The knowledge-base indexer/search over `WORKSPACE_ROOT` |
+| `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
+| `reportManager.ts` | Report generation - one Report Writer agent call over a set of selected findings |
+
+```
+backend/data/
+├── agents/*.json          One file per agent (name, model, temperature, systemPrompt, description,
+│                           optional tools[]/execTools[]). Loaded fresh from disk on every
+│                           GET /api/agents call - not cached at boot - so editing a file takes
+│                           effect immediately, no restart needed.
+├── projects/<id>/*.json   Per-project history (executions/tasks/plans/findings/scans/reports.json),
+│                           write-through on every mutation. Gitignored - may contain sensitive
+│                           target/scope info.
+└── rag/index.json         The RAG knowledge-base index. Gitignored.
+```
+
+```
 frontend/src/
-├── components/        Header, AgentSidebar, AgentList, ModelSelector, ChatArea,
-│                       ChatMessageView, Markdown, PromptInput, StatusBar, SettingsPanel
-├── hooks/              useModels, useAgents, useChat, useSettings — each owns fetching/state for
-│                       its domain; App.tsx composes them and wires cross-cutting behavior
-│                       (e.g. selecting an agent sets both model and temperature)
-├── services/api.ts     fetch wrapper: fetchModels, fetchAgents, streamChat (NDJSON reader)
-└── types/              mirrors of the backend types (ollama.ts, agent.ts, chat.ts, settings.ts)
+├── components/         One top-level component per nav view - ChatView (+ChatSessionPanel/
+│                        ChatTaskPanel), OrchestratorWorkbench (+ScannerPanel), MultiAgentPlanner,
+│                        FindingsView (+ReportsPanel/FindingDetails/FindingsTable/...). components/
+│                        layout/ (AppShell, Sidebar, SessionTabs, CommandPalette) and components/ui/
+│                        (GlassPanel, Button, Sheet, StatusPill, ...) are the shared primitives
+│                        every view is built from.
+├── hooks/               One hook per domain - useModels, useAgents, useChat, useOrchestratorTask,
+│                        useTools, useProjects, useFindings, useScans, useReports,
+│                        useMultiAgentPlan, useSessions, useRag, useSettings, useTheme,
+│                        useBookmarks - each owns its own fetching/state; App.tsx composes them and
+│                        wires cross-cutting behavior (e.g. picking an agent seeds model/temperature).
+├── services/            One `*Api.ts` file per domain, all built on `services/httpClient.ts`
+│                        (`apiFetch`/`readNdjsonStream`/`throwForErrorResponse` - the shared
+│                        NDJSON-stream-reading and error-unwrapping logic every domain reuses).
+└── types/               Mirrors of the backend types.
 ```
 
 ### Streaming protocol
@@ -103,12 +151,58 @@ time to load on constrained hardware).
 
 ### Agents
 
-Selecting an agent (`AgentList` -> `App.tsx#handleSelectAgent`) sets the active model, seeds the
-temperature setting, and — on the next message — injects the agent's `systemPrompt` as a system
+Selecting an agent (sidebar or Command Center) opens/focuses a chat session for it (see "Projects"
+below - sessions, not one global selection) and seeds that session's model/temperature from the
+agent's config; on the next message the backend injects the agent's `systemPrompt` as a system
 message prepended to the request history. The system prompt is never added to the visible chat
-transcript; it's re-injected fresh on every request from the currently selected agent, not stored
-as a message. `Agent.tools?: string[]` exists as the intended connection point to the future tool
-registry but isn't read anywhere yet.
+transcript; it's re-injected fresh on every request, not stored as a message.
+`Agent.tools?: string[]` (native Ollama tool-calling) and `Agent.execTools?: string[]` (an
+allowlist into the Tool Execution Framework's ExecTools, enforced in `orchestrator.ts` both in the
+tools preamble shown to the model and again at request time) are both real and read - see "Two
+tool-calling mechanisms" below for why there are two separate fields.
+
+### Two tool-calling mechanisms - don't conflate them
+
+There are genuinely two independent tool-calling paths in this codebase, and they don't talk to
+each other:
+
+1. **Native Ollama tool-calling** (`services/ollama.ts#streamChatWithTools`, `extensions/
+   toolRegistry.ts`, `Agent.tools`) - Ollama's own `tool_calls` wire format. `toolRegistry.ts` is
+   wired into this path but has **zero tools registered**, so it's functionally inert right now -
+   the plumbing exists for whenever something gets registered.
+2. **The Orchestrator's plain-text tool-request convention** (`services/orchestrator.ts#buildToolsPreamble`/
+   `parseToolRequest`, `Agent.execTools`) - a separate JSON-in-plain-text convention the Orchestrator
+   itself parses out of the model's reply (`{"tool": "...", "arguments": [...]}`), used to drive the
+   real Tool Execution Framework (`toolManager.ts`'s ~20 ExecTools). This is the path that's
+   actually reachable from the UI (Workbench, tool-enabled chat).
+
+`chatService.ts#streamAgentChat` only activates native `tools` when `toolsPreamble` is absent
+(the Orchestrator's own tell that a request came from it) - see the comment there for why activating
+both on the same request would be actively harmful (the model could reply in whichever format it
+prefers instead of the one actually being parsed).
+
+### Projects
+
+Nearly everything project-scoped (tool execution history, Orchestrator tasks, multi-agent plans,
+findings, scan runs, reports) is keyed by a `projectId` and persisted to
+`backend/data/projects/<id>/*.json` via `services/projectStore.ts`, hydrated back into each
+service's in-memory `Map` at startup. `projectStore.ts#projectDir(id)` is the one real chokepoint
+every one of those files' paths funnels through - it rejects anything that isn't UUID-shaped before
+ever building a path, which is the fix for a real path-traversal finding (see `DEVELOPMENT.md`'s
+"Fixed: projectId path-traversal" section) - if you add a new project-scoped store, route it through
+`readProjectJson`/`writeProjectJson`, not a hand-rolled path.
+
+Plain chat (`useChat.ts`, one global `sessionStorage` thread per agent) is deliberately **not**
+project-scoped - see `DEVELOPMENT.md`'s "Projects" section for why, and the still-open
+"Project-scoped chat" item in `TODO.md`. A chat session can opt *into* project-scoping mid-
+conversation by picking a project (`ChatSessionPanel.tsx`'s Project selector), which switches that
+session over to `ChatTaskPanel.tsx` - backed by a real project-scoped `OrchestratorTask`, not
+`useChat` - starting a fresh thread with no memory of the prior plain-chat messages (an explicit
+in-UI notice says so; see `DEVELOPMENT.md`'s Medium-audit-findings section for why this couldn't
+be a lossless conversion instead). The frontend's own session concept (`hooks/useSessions.ts` -
+which agent/task tabs are open, independent of any one project) is a different, unrelated meaning
+of "session" from the backend's project-scoped history - don't conflate the two when reading
+either codebase.
 
 ### Settings vs. session storage
 

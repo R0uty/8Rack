@@ -136,6 +136,52 @@ describe("useSessions", () => {
     expect(result.current.activeChatId).toBeNull();
   });
 
+  it("closing a chat session hides it, but reopening the same agent resumes it (same id, not a duplicate)", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let id!: string;
+    act(() => {
+      id = result.current.openChatSession("recon", "model-a");
+    });
+    act(() => result.current.setSessionModel(id, "model-custom"));
+    act(() => result.current.closeSession(id));
+
+    expect(result.current.chatSessions).toHaveLength(0);
+    expect(result.current.activeChatId).toBeNull();
+
+    let reopenedId!: string;
+    act(() => {
+      reopenedId = result.current.openChatSession("recon", "model-a");
+    });
+
+    expect(reopenedId).toBe(id);
+    expect(result.current.chatSessions).toHaveLength(1);
+    // The session's own state (e.g. a per-session model override) survives the close/reopen too,
+    // since it was only ever hidden, not recreated.
+    expect(result.current.chatSessions[0].model).toBe("model-custom");
+    expect(result.current.activeChatId).toBe(id);
+  });
+
+  it("closing a task session fully discards it - reopening the agent starts a distinct new one", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let id!: string;
+    act(() => {
+      id = result.current.openTaskSession("recon", "model-a", "proj-1", "run nmap");
+    });
+    act(() => result.current.closeSession(id));
+
+    expect(result.current.taskSessions).toHaveLength(0);
+
+    let secondId!: string;
+    act(() => {
+      secondId = result.current.openTaskSession("recon", "model-a", "proj-1", "run nmap again");
+    });
+
+    expect(secondId).not.toBe(id);
+    expect(result.current.taskSessions).toHaveLength(1);
+  });
+
   it("markTaskStarted() flags only the targeted session", () => {
     const { result } = renderHook(() => useSessions());
 
@@ -163,6 +209,35 @@ describe("useSessions", () => {
     expect(result.current.chatSessions[0].model).toBe("model-b");
   });
 
+  it("setSessionProject() opts a chat session into tool use, and can clear it back out", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let id!: string;
+    act(() => {
+      id = result.current.openChatSession("recon", "model-a");
+    });
+    expect(result.current.chatSessions[0].projectId).toBeUndefined();
+
+    act(() => result.current.setSessionProject(id, "proj-1"));
+    expect(result.current.chatSessions[0].projectId).toBe("proj-1");
+
+    act(() => result.current.setSessionProject(id, undefined));
+    expect(result.current.chatSessions[0].projectId).toBeUndefined();
+  });
+
+  it("setSessionTaskId() records which backend task backs a chat session", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let id!: string;
+    act(() => {
+      id = result.current.openChatSession("recon", "model-a");
+    });
+    expect(result.current.chatSessions[0].taskId).toBeUndefined();
+
+    act(() => result.current.setSessionTaskId(id, "task-1"));
+    expect(result.current.chatSessions[0].taskId).toBe("task-1");
+  });
+
   it("reportStatus() records a tone per session id and is a no-op when unchanged", () => {
     const { result } = renderHook(() => useSessions());
 
@@ -175,6 +250,58 @@ describe("useSessions", () => {
 
     act(() => result.current.reportStatus("s1", "critical"));
     expect(result.current.statuses).toEqual({ s1: "critical" });
+  });
+
+  it("pruneOrphanedSessions() drops sessions whose agent no longer exists", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let chatId!: string, manualId!: string;
+    act(() => {
+      chatId = result.current.openChatSession("recon", "model-a");
+      result.current.openTaskSession("planner", "model-a", "proj-1", "go");
+      manualId = result.current.openChatSession(null, "model-a");
+    });
+
+    act(() => result.current.pruneOrphanedSessions(new Set(["recon"])));
+
+    expect(result.current.chatSessions.map((s) => s.id).sort()).toEqual([chatId, manualId].sort());
+    expect(result.current.taskSessions).toHaveLength(0);
+    // Manual (no-agent) sessions are never pruned, regardless of validAgentIds.
+    expect(result.current.sessions.some((s) => s.id === manualId)).toBe(true);
+  });
+
+  it("pruneOrphanedSessions() also drops a closed-but-retained chat session for a deleted agent", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let id!: string;
+    act(() => {
+      id = result.current.openChatSession("recon", "model-a");
+    });
+    act(() => result.current.closeSession(id));
+    expect(result.current.chatSessions).toHaveLength(0); // hidden, but still retained internally
+
+    act(() => result.current.pruneOrphanedSessions(new Set()));
+
+    // Reopening "recon" now creates a genuinely new session instead of resuming the pruned one.
+    let reopenedId!: string;
+    act(() => {
+      reopenedId = result.current.openChatSession("recon", "model-a");
+    });
+    expect(reopenedId).not.toBe(id);
+  });
+
+  it("pruneOrphanedSessions() keeps everything when every agent is still valid", () => {
+    const { result } = renderHook(() => useSessions());
+
+    act(() => {
+      result.current.openChatSession("recon", "model-a");
+      result.current.openTaskSession("planner", "model-a", "proj-1", "go");
+    });
+
+    act(() => result.current.pruneOrphanedSessions(new Set(["recon", "planner"])));
+
+    expect(result.current.chatSessions).toHaveLength(1);
+    expect(result.current.taskSessions).toHaveLength(1);
   });
 
   it("persists sessions to sessionStorage on every change", () => {

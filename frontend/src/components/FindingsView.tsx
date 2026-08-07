@@ -1,21 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { Search, Sparkles, X } from "lucide-react";
 import { ProjectPanel } from "./ProjectPanel";
 import { FindingsTable } from "./FindingsTable";
 import { FindingsTimeline } from "./FindingsTimeline";
 import { FindingsGraphView } from "./FindingsGraphView";
 import { FindingDetails } from "./FindingDetails";
-import { Button, GlassPanel, SkeletonRows } from "./ui";
+import { ReportsPanel } from "./ReportsPanel";
+import { Markdown } from "./Markdown";
+import { Button, GlassPanel, SkeletonRows, StreamingCursor } from "./ui";
 import { useProjects } from "../hooks/useProjects";
 import { useFindings } from "../hooks/useFindings";
+import { useReports } from "../hooks/useReports";
 import type { Finding, FindingSeverity } from "../types/finding";
 import type { Project } from "../types/project";
 
-type ViewMode = "table" | "timeline" | "graph";
+type ViewMode = "table" | "timeline" | "graph" | "reports";
 const VIEW_MODES: { mode: ViewMode; label: string }[] = [
   { mode: "table", label: "Table" },
   { mode: "timeline", label: "Timeline" },
   { mode: "graph", label: "Graph" },
+  { mode: "reports", label: "Reports" },
 ];
 
 const SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
@@ -43,6 +47,8 @@ export function FindingsView() {
   } = useProjects();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const { findings, loading, error, update, refresh: refreshFindings } = useFindings(selectedProjectId);
+  const { reports, loading: reportsLoading, generating, streamingText, error: reportError, generate, remove: removeReport } =
+    useReports(selectedProjectId);
 
   const [query, setQuery] = useState("");
   const [severity, setSeverity] = useState("");
@@ -52,12 +58,47 @@ export function FindingsView() {
   const [tag, setTag] = useState("");
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("table");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [reportTitle, setReportTitle] = useState("");
 
   useEffect(() => {
     if (selectedProjectId && !projectsLoading && !projects.some((p) => p.id === selectedProjectId)) {
       setSelectedProjectId(null);
     }
   }, [projects, projectsLoading, selectedProjectId]);
+
+  // A finding selection made for one project's report shouldn't silently carry over once you
+  // switch to another.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [selectedProjectId]);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = (ids: string[]) => {
+    setSelectedIds((prev) => {
+      const allSelected = ids.every((id) => prev.has(id));
+      if (allSelected) return new Set([...prev].filter((id) => !ids.includes(id)));
+      return new Set([...prev, ...ids]);
+    });
+  };
+
+  const handleGenerateReport = async () => {
+    if (!reportTitle.trim() || selectedIds.size === 0 || generating) return;
+    const report = await generate(reportTitle.trim(), [...selectedIds]);
+    if (report) {
+      setSelectedIds(new Set());
+      setReportTitle("");
+      setViewMode("reports");
+    }
+  };
 
   const types = useMemo(() => [...new Set(findings.map((f) => f.type))].sort(), [findings]);
   const tools = useMemo(() => [...new Set(findings.map((f) => f.tool))].sort(), [findings]);
@@ -122,7 +163,7 @@ export function FindingsView() {
             ))}
           </div>
 
-          {viewMode !== "graph" && (
+          {viewMode !== "graph" && viewMode !== "reports" && (
             <GlassPanel padding="md" className="flex flex-wrap items-center gap-2">
               <div className="relative flex-1 basis-56">
                 <Search size={12} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
@@ -180,14 +221,69 @@ export function FindingsView() {
             </GlassPanel>
           )}
 
-          {error && <p className="text-xs text-critical">{error}</p>}
-          {loading && findings.length === 0 && viewMode !== "graph" && <SkeletonRows count={5} />}
-          {!loading && viewMode === "table" && <FindingsTable findings={filtered} onSelectFinding={setSelectedFinding} />}
+          {viewMode === "table" && selectedIds.size > 0 && (
+            <GlassPanel padding="md" className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted">
+                  {selectedIds.size} finding{selectedIds.size === 1 ? "" : "s"} selected
+                </span>
+                <input
+                  value={reportTitle}
+                  onChange={(e) => setReportTitle(e.target.value)}
+                  placeholder="Report title, e.g. Security Assessment — example.com"
+                  disabled={generating}
+                  className="min-w-56 flex-1 rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60 disabled:opacity-50"
+                />
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={Sparkles}
+                  onClick={handleGenerateReport}
+                  disabled={!reportTitle.trim() || generating}
+                >
+                  {generating ? "Generating…" : "Generate Report"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={X}
+                  onClick={() => setSelectedIds(new Set())}
+                  disabled={generating}
+                >
+                  Clear
+                </Button>
+              </div>
+              {reportError && <p className="text-xs text-critical">{reportError}</p>}
+              {generating && streamingText && (
+                <div className="max-h-56 overflow-y-auto rounded-lg border border-border bg-surface-2 p-3">
+                  <Markdown content={streamingText} />
+                  <StreamingCursor />
+                </div>
+              )}
+            </GlassPanel>
+          )}
+
+          {error && viewMode !== "reports" && <p className="text-xs text-critical">{error}</p>}
+          {loading && findings.length === 0 && viewMode !== "graph" && viewMode !== "reports" && (
+            <SkeletonRows count={5} />
+          )}
+          {!loading && viewMode === "table" && (
+            <FindingsTable
+              findings={filtered}
+              onSelectFinding={setSelectedFinding}
+              selectedIds={selectedIds}
+              onToggleSelect={toggleSelect}
+              onToggleSelectAll={toggleSelectAll}
+            />
+          )}
           {!loading && viewMode === "timeline" && (
             <FindingsTimeline findings={filtered} onSelectFinding={setSelectedFinding} />
           )}
           {viewMode === "graph" && (
             <FindingsGraphView projectId={selectedProjectId} onSelectFindingId={handleSelectFindingId} />
+          )}
+          {viewMode === "reports" && (
+            <ReportsPanel reports={reports} loading={reportsLoading} error={reportError} onDelete={removeReport} />
           )}
         </>
       )}

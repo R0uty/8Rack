@@ -37,6 +37,14 @@ export function useChat(sessionId: string) {
   const messagesRef = useRef<ChatMessage[]>(messages);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Closing this session's tab unmounts the ChatSessionPanel that owns this hook instance for
+  // real (see hooks/useSessions.ts#closeSession) - without this, an in-flight sendMessage() just
+  // kept running orphaned in the background (its state updates landing on a dead component and
+  // silently dropped) until the idle timeout fired minutes later.
+  useEffect(() => {
+    return () => abortRef.current?.abort();
+  }, []);
+
   const updateMessages = useCallback((updater: (prev: ChatMessage[]) => ChatMessage[]) => {
     setMessages((prev) => {
       const next = updater(prev);

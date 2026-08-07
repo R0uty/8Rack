@@ -13,14 +13,23 @@ import {
   FindingNotFoundError,
   InvalidAgentConfigError,
   InvalidPlanStateError,
+  InvalidProjectIdError,
   InvalidTaskStateError,
   InvalidToolArgumentsError,
   OllamaConnectionError,
   OllamaModelNotFoundError,
   OllamaRequestError,
+  InvalidScanStateError,
+  NoFindingsSelectedError,
   PlanNotFoundError,
+  PrivilegedCommandError,
   ProjectNotFoundError,
+  ReportNotFoundError,
   RequestCancelledError,
+  ScanProfileNotFoundError,
+  ScanRunNotFoundError,
+  InvalidScanTargetError,
+  ScanTargetRequiredError,
   TaskNotFoundError,
   UnknownToolError,
 } from "../services/errors.js";
@@ -107,12 +116,20 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(404).json({ error: err.message, code: "PROJECT_NOT_FOUND" });
     return;
   }
+  if (err instanceof InvalidProjectIdError) {
+    res.status(400).json({ error: err.message, code: "INVALID_PROJECT_ID" });
+    return;
+  }
   if (err instanceof PlanNotFoundError) {
     res.status(404).json({ error: err.message, code: "PLAN_NOT_FOUND" });
     return;
   }
   if (err instanceof InvalidPlanStateError) {
     res.status(409).json({ error: err.message, code: "INVALID_PLAN_STATE" });
+    return;
+  }
+  if (err instanceof PrivilegedCommandError) {
+    res.status(400).json({ error: err.message, code: "PRIVILEGED_COMMAND_BLOCKED" });
     return;
   }
   if (err instanceof EmbeddingModelUnavailableError) {
@@ -125,6 +142,34 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof CveLookupError) {
     res.status(502).json({ error: err.message, code: "CVE_LOOKUP_FAILED" });
+    return;
+  }
+  if (err instanceof ScanProfileNotFoundError) {
+    res.status(404).json({ error: err.message, code: "SCAN_PROFILE_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof ScanRunNotFoundError) {
+    res.status(404).json({ error: err.message, code: "SCAN_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof ScanTargetRequiredError) {
+    res.status(400).json({ error: err.message, code: "INVALID_REQUEST" });
+    return;
+  }
+  if (err instanceof InvalidScanTargetError) {
+    res.status(400).json({ error: err.message, code: "INVALID_REQUEST" });
+    return;
+  }
+  if (err instanceof InvalidScanStateError) {
+    res.status(409).json({ error: err.message, code: "INVALID_SCAN_STATE" });
+    return;
+  }
+  if (err instanceof ReportNotFoundError) {
+    res.status(404).json({ error: err.message, code: "REPORT_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof NoFindingsSelectedError) {
+    res.status(400).json({ error: err.message, code: "INVALID_REQUEST" });
     return;
   }
 

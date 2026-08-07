@@ -56,6 +56,26 @@ describe("useChat", () => {
     expect(assistant.streaming).toBe(false);
   });
 
+  it("aborts an in-flight sendMessage when the hook unmounts", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const pending = deferred<void>();
+    mockStreamChat.mockImplementation(async (_payload, _onEvent, signal) => {
+      capturedSignal = signal;
+      return pending.promise;
+    });
+
+    const { result, unmount } = renderHook(() => useChat("session-1"));
+    act(() => {
+      void result.current.sendMessage("hello", { model: "test-model" });
+    });
+
+    expect(capturedSignal?.aborted).toBe(false);
+    unmount();
+    expect(capturedSignal?.aborted).toBe(true);
+
+    pending.resolve();
+  });
+
   it("does nothing for blank content", async () => {
     const { result } = renderHook(() => useChat("session-1"));
     await act(async () => {

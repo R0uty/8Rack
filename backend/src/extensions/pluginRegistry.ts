@@ -1,13 +1,13 @@
 import type { Plugin, PluginContext } from "../types/plugin.js";
 import { registerTool } from "./toolRegistry.js";
-import { registerScanner } from "./scannerRegistry.js";
+import { registerScanProfile } from "./scannerRegistry.js";
 import { registerRetrievalSource } from "./retrievalRegistry.js";
 
 const plugins = new Map<string, Plugin>();
 
 const context: PluginContext = {
   registerTool,
-  registerScanner,
+  registerScanProfile,
   registerRetrievalSource,
 };
 

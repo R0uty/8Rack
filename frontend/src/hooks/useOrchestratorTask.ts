@@ -1,8 +1,9 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelTask,
   continueTask as continueTaskApi,
   createTask,
+  fetchTask,
   provideGuidance as provideGuidanceApi,
   resumeTask,
 } from "../services/orchestratorApi";
@@ -28,6 +29,14 @@ export function useOrchestratorTask() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Closing this session's tab unmounts the owning TaskSessionPanel/ChatTaskPanel for real (see
+  // hooks/useSessions.ts#closeSession) - without this, an in-flight start()/approve()/etc. call
+  // just kept running orphaned in the background (its state updates landing on a dead component
+  // and silently dropped) until the task's own time cap fired, possibly minutes later.
+  useEffect(() => {
+    return () => abortRef.current?.abort();
+  }, []);
 
   const start = useCallback(async (agentId: string, objective: string, projectId: string, model?: string) => {
     setBusy(true);
@@ -189,6 +198,23 @@ export function useOrchestratorTask() {
     }
   }, [task]);
 
+  /** Refetches an already-existing task by id and adopts it as the current one - unlike every
+   * other action here, this doesn't advance the task, it just rehydrates local state from the
+   * backend's persisted copy. For when this hook's own state (task/liveOutput/streamingText -
+   * none of it persisted, see useChat.ts's sessionStorage for the contrast) was wiped by a
+   * remount (e.g. a page reload) but the backend task itself is still very much alive. */
+  const restore = useCallback(async (taskId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setTask(await fetchTask(taskId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load the task");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
   const reset = useCallback(() => {
     abortRef.current?.abort();
     setTask(null);
@@ -210,6 +236,7 @@ export function useOrchestratorTask() {
     continueTask,
     provideGuidance,
     cancel,
+    restore,
     reset,
   };
 }

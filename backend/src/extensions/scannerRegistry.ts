@@ -1,15 +1,15 @@
-import type { Scanner } from "../types/scanner.js";
+import type { ScanProfile } from "../types/scanner.js";
 
-const scanners = new Map<string, Scanner>();
+const profiles = new Map<string, ScanProfile>();
 
-export function registerScanner(scanner: Scanner): void {
-  scanners.set(scanner.id, scanner);
+export function registerScanProfile(profile: ScanProfile): void {
+  profiles.set(profile.id, profile);
 }
 
-export function getScanner(id: string): Scanner | undefined {
-  return scanners.get(id);
+export function getScanProfile(id: string): ScanProfile | undefined {
+  return profiles.get(id);
 }
 
-export function listScanners(): Pick<Scanner, "id" | "name" | "description">[] {
-  return [...scanners.values()].map(({ id, name, description }) => ({ id, name, description }));
+export function listScanProfiles(): ScanProfile[] {
+  return [...profiles.values()];
 }

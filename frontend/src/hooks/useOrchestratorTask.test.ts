@@ -40,7 +40,37 @@ function fixtureTask(overrides: Partial<OrchestratorTask> = {}): OrchestratorTas
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe("useOrchestratorTask", () => {
+  it("aborts an in-flight start() when the hook unmounts", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const pending = deferred<OrchestratorTask>();
+    mockCreateTask.mockImplementation(async (_agentId, _objective, _projectId, _onChunk, signal) => {
+      capturedSignal = signal;
+      return pending.promise;
+    });
+
+    // start() isn't awaited here on purpose - the assertion is about the in-flight request, not
+    // its eventual settlement (which pending.resolve() below lets happen harmlessly afterward).
+    const { result, unmount } = renderHook(() => useOrchestratorTask());
+    act(() => {
+      void result.current.start("recon", "scan", "proj-1");
+    });
+
+    expect(capturedSignal?.aborted).toBe(false);
+    unmount();
+    expect(capturedSignal?.aborted).toBe(true);
+
+    pending.resolve(fixtureTask());
+  });
+
   it("start() streams chunks into streamingText while in flight, then settles into task", async () => {
     let onChunkRef!: (c: string) => void;
     mockCreateTask.mockImplementation(async (_agentId, _objective, _projectId, onChunk) => {

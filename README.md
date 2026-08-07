@@ -13,9 +13,9 @@
 
 8Rack wraps a local Ollama instance with a full AI-agent workstation: purpose-built agents, real
 tool execution (nmap, ffuf, nuclei, bash, and more) gated behind human confirmation, an autonomous
-tool-calling orchestrator, multi-agent plans, project-scoped history, and a knowledge base over
-your own workspace — all running on your machine, with no accounts, no database, and no cloud
-storage.
+tool-calling orchestrator, multi-agent plans, chained scan profiles, an automatic findings/CVE
+engine, AI-generated reports, project-scoped history, and a knowledge base over your own
+workspace — all running on your machine, with no accounts, no database, and no cloud storage.
 
 ## Features
 
@@ -32,8 +32,19 @@ storage.
   e.g. one running `nmap` and another running `ffuf`) can run concurrently.
 - **Multi-agent plans** — chain several agents into one ordered plan, where each agent's output
   feeds into the next step's context (e.g. Recon Agent → Report Writer).
-- **Projects** — scope tool executions and Orchestrator tasks to a named project (target/program),
-  with history that survives a backend restart.
+- **Security Scanners (Scan Profiles)** — chain several recon tools into one named, repeatable scan
+  (Quick Recon, Subdomain Discovery, Web App Scan, Full Port Scan) — preview every resolved command,
+  confirm once, and the whole chain runs with live per-step progress; a step failing doesn't abort
+  the rest.
+- **Findings Engine** — tool output is automatically parsed into structured, deduplicated findings
+  and correlated into a project-wide graph (target → port → service/tech → vulnerability). Includes
+  an on-demand **CVE lookup** against the public NVD database for any technology finding, and
+  AI-powered "explain this finding" triage.
+- **Report generation** — select a set of findings and generate one polished Markdown report
+  (executive summary + per-finding impact/reproduction/remediation) via the Report Writer agent,
+  with history, an in-app viewer, and Markdown export.
+- **Projects** — scope tool executions, Orchestrator tasks, scans, findings, and reports to a named
+  project (target/program), with history that survives a backend restart.
 - **Knowledge base (RAG)** — index your own workspace codebase locally via an Ollama embedding
   model; agents can search it as a read-only tool.
 - **A premium, keyboard-friendly UI** — dark/light theme, an animated agent network view, live
@@ -109,12 +120,14 @@ All backend configuration is via `backend/.env` (see `backend/.env.example`):
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3001` | Backend port |
+| `HOST` | `127.0.0.1` | Interface the backend binds to — loopback-only by default since there's no auth on this app; only widen it (e.g. `0.0.0.0`) if you deliberately want LAN access |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Where Ollama is running |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed frontend origin |
 | `WORKSPACE_ROOT` | `backend/workspace` | Root that filesystem exec tools and the knowledge base are confined to |
 | `MAX_ORCHESTRATOR_TOOL_CALLS` | `10` | Orchestrator loop-prevention cap |
 | `MAX_ORCHESTRATOR_TASK_TIME_MS` | `600000` | Orchestrator loop-prevention cap |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Model used to embed the knowledge base — pull it first: `ollama pull nomic-embed-text` |
+| `NVD_API_KEY` | _(unset)_ | Optional key for CVE lookups against the NVD database — raises the rate limit from 5 req/30s to 50 req/30s; lookups work fine unauthenticated if left unset |
 
 ## Testing
 

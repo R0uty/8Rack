@@ -3,6 +3,160 @@
 All 11 tasks from the original build plan are done (see `DEVELOPMENT.md` for the full history).
 This is the actionable list for what's next.
 
+## Audit findings (2026-08-07)
+
+Full-project audit (backend security, backend architecture/correctness, frontend correctness) -
+three parallel reviews plus manual spot-checks, all findings below were verified by reading the
+actual current code (or, for the path-traversal item, a pure computation with no filesystem
+touched - no exploit was actually run against the live backend). Every finding across all three
+severities has since been fixed, each in its own follow-up pass (High first, then all six Medium,
+then all seven Low) - see each item's own note for what changed and DEVELOPMENT.md for the full
+write-up of each pass. Only the Plugin system (see "Later" below) remains genuinely open.
+
+### High
+
+- [x] **`projectId` is never format-validated anywhere it reaches a filesystem path — real
+      path-traversal / arbitrary file write & delete.** Fixed at the single chokepoint every
+      project-scoped filesystem path actually funnels through:
+      `services/projectStore.ts#projectDir(id)` now rejects anything that isn't UUID-shaped
+      (`PROJECT_ID_PATTERN`, mirroring `agentManager.ts`'s existing `AGENT_ID_PATTERN` check)
+      before ever building a path, throwing a new `InvalidProjectIdError` (400
+      `INVALID_PROJECT_ID`). Every service (`toolManager.ts`, `orchestrator.ts`,
+      `multiAgentOrchestrator.ts`, `findingsManager.ts`, `scanRunner.ts`, `reportManager.ts`) only
+      ever reaches disk via `projectDir`/`readProjectJson`/`writeProjectJson`, or
+      `projectManager.ts`'s own direct `projectDir()` calls - fixing it in that one place covers
+      all of them without touching each individually, and can't be forgotten for a future one.
+      `readProjectJson`/`projectManager.ts#readProjectMeta` were also restructured to resolve
+      `projectDir(id)` *outside* their `catch { return [] / undefined }` blocks, so a rejected id
+      surfaces as a real error instead of silently looking identical to "no data yet". 5 new
+      regression tests in `projectManager.test.ts` (235 total) - malformed ids and literal
+      `"../../../../tmp/pwn"`-style traversal attempts on `getProject`/`updateProject`/
+      `deleteProject`/`readProjectJson`/`writeProjectJson`, asserting nothing was created on disk.
+      Verified live against the real running backend (not just tests): the exact
+      `projectId: "../../../../tmp/8rack-poc"` payload from the original audit now gets rejected
+      with a clean 400 before any directory is created (confirmed via `ls` - no leaked directory
+      anywhere), reproduced against `/api/orchestrator/tasks`, `/api/tools/request`, and
+      `/api/projects/:id/scans`; a normal project (real UUID) still creates/round-trips correctly.
+      See DEVELOPMENT.md's "Fixed: projectId path-traversal" section.
+
+### Medium
+
+- [x] Backend binds to all interfaces (`app.listen(env.port, ...)` in `index.ts` with no host
+      argument defaults to `0.0.0.0`), not just localhost. Fixed: `env.host` (new, defaults to
+      `127.0.0.1`, overridable via `HOST`) is now passed to `app.listen(env.port, env.host, ...)`.
+      Verified live via `ss -ltnp` - the real running backend now shows `LISTEN 127.0.0.1:3001`,
+      not `0.0.0.0:3001`; the frontend's Vite proxy (`localhost:3001`) still resolves and works
+      correctly. `.env.example` documents the new `HOST` var and the tradeoff of changing it.
+- [x] The workspace path-containment check (`toolManager.ts#isPathContained`/`looksLikePath`) is
+      effectively theater for `bash -c "<script>"`/`python3 -c "<code>"`. Fixed: both tools'
+      descriptions (`tools/exec/builtins.ts`) now say explicitly "NOT confined to the workspace
+      root - the script string isn't checked for path containment... Review the exact resolved
+      command before approving", and the module's own doc comment explains why. This is exactly
+      what's shown in the Tool Registry and every Approve/Reject confirm card already, so the
+      caveat reaches a reviewer at the point it matters without any new UI.
+- [x] Chat sessions can opt into tool use mid-conversation but doing so silently starts a
+      brand-new `OrchestratorTask` with no prior context. Fixed with the "explicit notice" option
+      (not history-seeding - `useChat`'s messages and an `OrchestratorTask`'s are different shapes
+      with no clean lossless conversion): `ChatSessionPanel.tsx` now shows an amber notice above
+      `ChatTaskPanel` whenever the session has prior plain-chat messages, explicitly stating they
+      aren't shown here and aren't seen by the agent, and how to see them again (switch Project
+      back to "No project"). Turns out the prior messages weren't even still visible "above" as
+      the original finding assumed - picking a project fully replaces the chat body with
+      `ChatTaskPanel`, so this notice is the only place that fact was surfaced at all. 4 new
+      frontend tests (`ChatSessionPanel.test.tsx`), verified live in-browser (sent a plain message,
+      enabled tools, saw the exact notice with the correct count/agent name, switched back and
+      confirmed the original messages were still there).
+- [x] Concurrent writes to the same project's JSON history files can race. Fixed: a small
+      per-`{projectId}:{filename}` write queue in `projectStore.ts` (`enqueueWrite`) serializes
+      `writeProjectJson` calls so overlapping writes can never complete out of call order - a
+      failed write doesn't wedge the queue (`.then(task, task)`, not just `.then(task)`), and
+      different files for the same project don't needlessly block each other. 3 new tests proving
+      out-of-order completion is prevented (a deliberately-delayed first write still lands before a
+      second one is allowed to actually write), that a failed write doesn't block the next one, and
+      that unrelated files stay independent.
+- [x] Corrupted/truncated project JSON is silently treated as "no data" with zero logging. Fixed:
+      `readProjectJson` (`projectStore.ts`) and `readProjectMeta` (`projectManager.ts`) now
+      distinguish a missing file (silent, expected) from a file that exists but fails `JSON.parse`
+      (`console.warn` naming the project id and filename, still returns the same graceful
+      empty/undefined fallback). 2 new tests asserting the warning fires for invalid JSON and stays
+      silent for a plain missing file.
+- [x] Startup hydration ran after the HTTP port was already accepting connections with no
+      `try/catch`, so a thrown error was an unhandled rejection that silently aborted the rest of
+      startup. Fixed: the whole hydration body in `index.ts`'s `app.listen(...)` callback is now
+      wrapped in try/catch with a clear `console.error` naming what may not have loaded, without
+      crashing the process (none of the routes strictly depend on hydration completing - they just
+      read from each service's in-memory state, which starts empty either way). The "gate requests
+      behind a 503 until ready" half of the original suggestion was deliberately skipped as a
+      bigger architectural change than this pass warranted. Verified live: server restarted
+      cleanly, `/health` and the frontend proxy both still work.
+
+      See DEVELOPMENT.md's "Fixed: the six Medium audit findings" section for all six.
+
+### Low
+
+- [x] No flag-injection guard on a scan's `target` (`scanRunner.ts#substituteTarget`). Fixed:
+      `requireTarget` now rejects any target starting with `-` (new `InvalidScanTargetError`, 400
+      `INVALID_REQUEST`), checked before either `previewScan` or `createScanRun` do anything else.
+      2 new backend tests; verified live via curl (`POST /scans/preview` with target
+      `-oG=/tmp/evil` → clean 400 with an explanatory message, nothing created).
+- [x] Deleting an agent never pruned that agent's session entries in `hooks/useSessions.ts`. Fixed:
+      new `pruneOrphanedSessions(validAgentIds)` (drops any session, including a closed-but-retained
+      chat session, whose `agentId` isn't in the given set - manual/no-agent sessions are always
+      kept), called from a new `App.tsx` effect whenever `agents` changes, gated on
+      `!agentsLoading` so the transient empty list before the first fetch resolves can't wrongly
+      prune everything on initial load. 3 new frontend tests.
+- [x] Closing a chat/task session tab mid-request didn't cancel the in-flight fetch. Fixed: both
+      `useChat.ts` and `useOrchestratorTask.ts` now have an unmount-cleanup effect
+      (`return () => abortRef.current?.abort()`) - confirmed this actually matters (these hooks'
+      owning panels really do unmount for real on close, not just get CSS-hidden like inactive
+      tabs - see `hooks/useSessions.ts#closeSession`). 2 new tests (one per hook) proving the abort
+      signal fires exactly on unmount, not before.
+- [x] Confirmed dead code with zero live importers: ~~`extensions/reportGenerator.ts`~~,
+      `extensions/retrievalRegistry.ts`, `extensions/pluginRegistry.ts`, and the types that exist
+      only to support them (`types/plugin.ts` - `types/report.ts` no longer applies, see below).
+      Different from `extensions/toolRegistry.ts`/`types/tool.ts`, which *are* wired into a live
+      path (`ollama.ts` → `routes/chat.ts`) even though functionally inert (zero tools registered) -
+      already documented as intentional. `extensions/reportGenerator.ts` is resolved: deleted
+      outright (not wired up) when Report generation was built for real - see below and
+      DEVELOPMENT.md's "Report generation" section. `retrievalRegistry.ts`/`pluginRegistry.ts`/
+      `types/plugin.ts` are still the real "written once, never connected, never revisited"
+      leftovers - either wire them up when the Plugin system (see "Later" below) actually gets
+      built, or delete them now.
+- [x] Test coverage gaps: `services/ollama.ts` had no `.test.ts` at all despite being genuinely
+      complex (the Ollama REST client + native tool-calling round trip). Fixed: new
+      `ollama.test.ts`, 29 tests - NDJSON parsing/buffering (including a line deliberately split
+      across two reads, and a final line with no trailing newline), every error mapping
+      (`OllamaModelNotFoundError`/`OllamaConnectionError`/`RequestCancelledError`/
+      `EmbeddingModelUnavailableError`/plain `OllamaRequestError`), `resolveOllamaTools`, and the
+      full `streamChatWithTools` round trip (native `tool_calls`, the tag-noncompliant fallback
+      parser, an unregistered-tool error result, the `MAX_TOOL_ROUNDS` cap actually stopping at 4).
+      `services/projectStore.ts`'s own gap was already closed as a side effect of the projectId/
+      write-queue/corrupted-JSON Medium-severity fixes earlier in this audit (`projectManager.test.ts`
+      now exercises its real `readProjectJson`/`writeProjectJson`/`listProjectIds` via the shared
+      `fakeFs` double, not a mocked-away `projectStore.js`).
+- [x] `README.md`'s feature list predated the Findings Engine, CVE lookup, Security Scanners, and
+      Report generation. Fixed: added all four to the Features list, plus the missing `HOST` and
+      `NVD_API_KEY` rows in the Configuration table (both real gaps from earlier fixes in this
+      audit that hadn't made it into the README at the time).
+- [x] `CLAUDE.md`'s "Architecture" section was still the original Task-11 scaffold. Fixed: full
+      rewrite of both directory trees (backend `src/`/`data/`, frontend `src/`) to reflect the
+      current real structure, a new services-file reference table, and three new short prose
+      sections a future session most needs oriented on fast - "Two tool-calling mechanisms" (native
+      Ollama `tool_calls` vs. the Orchestrator's own plain-text convention - genuinely easy to
+      conflate), "Projects" (the `projectId`/`projectStore.ts` convention nearly everything is keyed
+      on, including a pointer to the path-traversal fix), and a correction to the stale "Agents"
+      section's claim that `Agent.tools` "isn't read anywhere yet" (it, and `Agent.execTools`, both
+      are). Deliberately keeps this file as a map with pointers, not a duplicate of
+      `DEVELOPMENT.md`'s much more detailed per-feature sections.
+
+### Already fixed during this audit (cheap, unambiguous doc-accuracy errors)
+
+- [x] `DEVELOPMENT.md`/`TODO.md` claimed "231 total" backend tests after the Security scanners
+      work landed - actual was 220 (a plain arithmetic slip, not a stale historical entry). Both
+      corrected to 220.
+- [x] `CLAUDE.md` said "There are no automated tests yet" - stale from before the very first test
+      suite was added. Corrected to describe the real `npm test` setup on both sides.
+
 ## Next up
 
 - [x] Wire up one real `Tool` end-to-end through Ollama's native tool-calling API, surfaced via
@@ -264,6 +418,22 @@ This is the actionable list for what's next.
       request, and live that two concurrent chat sessions and a background Workbench task all stay
       correctly isolated. 6 new backend tests (105 total). See DEVELOPMENT.md's "Per-agent model
       override + parallel agent sessions" section.
+- [x] Fixed: switching the top-level nav (Chat/Workbench/Plans/Findings) fully unmounted whichever
+      view you left - `App.tsx` conditionally rendered only the active view inside a
+      `motion.div key={activeView}`, so e.g. leaving Workbench destroyed every open
+      `TaskSessionPanel`'s `useOrchestratorTask` state (task/liveOutput/streamingText - plain React
+      state, no persistence) and orphaned any in-flight `useChat` stream in Chat (its `setState`
+      calls landed on a dead component, silently losing the rest of a streaming reply). Done:
+      each view now mounts once on first visit and stays mounted forever after, toggled via a
+      `hidden` CSS class instead of conditional render + remount - the same "mount once, hide via
+      CSS" pattern `SessionTabs`/`TaskSessionPanel`/`ChatSessionPanel` already use for session tabs
+      within a view, just applied one level up. Dropped the `AnimatePresence`/`framer-motion`
+      view-switch fade in favor of correctness (matches the zero-animation tab-switch already used
+      everywhere else in the app). Verified live: started a Recon Agent task, approved it to
+      `waiting_confirmation`, switched Workbench → Chat → Findings → Workbench, and the exact same
+      confirm card (objective, tool-call bubble, Approve/Reject) was still there byte-for-byte -
+      previously this would have reset to a blank "Starting…"/New Task view. See DEVELOPMENT.md's
+      "Persistent top-level views (nav-switch state loss)" section.
 
 ## Later (once a real tool is wired up)
 
@@ -280,8 +450,42 @@ This is the actionable list for what's next.
       embedding model isn't pulled yet. Full end-to-end verification (a real folder + a real
       agent retrieving real code) is still blocked on the user providing a `WORKSPACE_ROOT` path
       and pulling an embedding model. See DEVELOPMENT.md's "RAG over a workspace codebase" section.
-- [ ] Security scanners (`types/scanner.ts`, `extensions/scannerRegistry.ts`)
-- [ ] Report generation (`types/report.ts`, `extensions/reportGenerator.ts`)
+- [x] Security scanners (`types/scanner.ts`, `extensions/scannerRegistry.ts`). Done: "Scan
+      Profiles" - a deterministic (non-agent) chained tool run, not the original in-process
+      `Scanner.scan()` stub. Pick a target + a preset profile (Quick Recon, Subdomain Discovery,
+      Web App Scan, Full Port Scan - `backend/src/scanners/builtins.ts`), preview every step's
+      resolved command, then "Confirm & Run All" chains them sequentially through the existing
+      `toolManager.ts` execution pipeline (`services/scanRunner.ts`) - one human confirmation for
+      the whole profile up front (not per step, since a profile's tools/arguments are fixed, not
+      chosen live by an LLM), Execution → Parser → Findings ingestion applies unchanged, and a
+      failing step doesn't abort the rest. `GET /api/scanners` + project-scoped
+      `GET/POST /api/projects/:projectId/scans[...]` (the create route streams NDJSON progress for
+      the whole run). Frontend: `ScannerPanel.tsx` in the Workbench Home tab (profile+target picker
+      → inline preview/confirm → live step progress/output → scan history). 11 new backend tests
+      (220 total), 12 new frontend hook tests (182 total). Verified live via curl (a real Quick
+      Recon run against `example.com` with one step genuinely failing and the scan still completing
+      - proving failure isolation - plus a `nmap` Full Port Scan cancelled mid-flight) and
+      in-browser through the real Workbench UI. See DEVELOPMENT.md's "Security scanners (Scan
+      Profiles)" section, including a real duplicate-flag bug caught by live preview testing before
+      it ever reached the browser.
+- [x] Report generation. Done: generate a report from a **multi-finding selection** (checkbox-
+      select rows in the Findings table, "Generate Report from N selected") - one agent call
+      (Report Writer, `backend/data/agents/report-writer.json`) via `services/reportManager.ts`
+      writes a single Markdown document (Executive Summary + one section per finding with Impact/
+      Reproduction/Remediation), split into `ReportSection[]` by a lenient `## `-heading parser.
+      Persisted per-project (`reports.json`, same pattern as executions/tasks/plans/scans) with a
+      new "Reports" tab in Findings (list → full-document `Sheet` view → export to `.md` → two-step
+      delete). `extensions/reportGenerator.ts` (confirmed dead in this session's audit above) was
+      deleted outright, superseded by `services/reportManager.ts` - same "delete the stub, build
+      the real thing in services/" pattern as `extensions/orchestrator.ts`. New project-scoped
+      `GET/POST/DELETE /api/projects/:projectId/reports[...]`, `POST /` streams NDJSON
+      (`chunk`/`report`/`error`) for a live-writing UX. 10 new backend tests (230 total), 21 new
+      frontend tests (10 `useReports.test.ts` + FindingsTable selection coverage, 195 total).
+      Verified live with a real local model (`qwen2.5-coder:7b`): two real findings (a critical
+      SQLi + a low missing-CSP-header, both with genuine evidence) → a correctly-structured report
+      grounded in that evidence, no fabrication observed - via curl and again in-browser end to end
+      (select → title → stream → land on Reports tab → open full document → export → delete). See
+      DEVELOPMENT.md's "Report generation" section.
 - [ ] Plugin system (`types/plugin.ts`, `extensions/pluginRegistry.ts`)
 - [x] Multi-agent orchestration. Done: a user-authored, ordered plan of `{agent, objective}` steps
       (≥2) runs sequentially, where each step is a *full* single-agent Orchestrator task

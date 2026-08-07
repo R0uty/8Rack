@@ -8,10 +8,23 @@ import type { Project } from "../types/project.js";
 const PROJECT_FILE = "project.json";
 
 async function readProjectMeta(id: string): Promise<Project | undefined> {
+  // projectDir(id) is resolved outside the try/catch below so an InvalidProjectIdError propagates
+  // as a real error instead of looking identical to "no project.json here yet" - see
+  // projectStore.ts#readProjectJson for the same reasoning.
+  const dir = projectDir(id);
+  let raw: string;
   try {
-    const raw = await readFile(path.join(projectDir(id), PROJECT_FILE), "utf-8");
-    return JSON.parse(raw) as Project;
+    raw = await readFile(path.join(dir, PROJECT_FILE), "utf-8");
   } catch {
+    return undefined;
+  }
+  try {
+    return JSON.parse(raw) as Project;
+  } catch (err) {
+    // Same distinction as projectStore.ts#readProjectJson - a project.json that exists but fails
+    // to parse means something went wrong, worth a log even though it still resolves to "not
+    // found" from here (a project with no readable metadata isn't usable either way).
+    console.warn(`[projectManager] project.json for "${id}" contains invalid JSON - treating as not found.`, err);
     return undefined;
   }
 }

@@ -13,6 +13,7 @@ import {
   ExecutableUnavailableError,
   ExecutionNotFoundError,
   InvalidToolArgumentsError,
+  PrivilegedCommandError,
 } from "./errors.js";
 import type {
   ExecTool,
@@ -90,6 +91,22 @@ function validateArguments(tool: ExecTool, args: string[]): void {
 
 function buildResolvedCommand(tool: ExecTool, args: string[]): string {
   return [tool.executable, ...tool.defaultArguments, ...args].join(" ");
+}
+
+/** Matches sudo/su/doas/pkexec as a whole word, wherever it appears in the resolved command —
+ * covers both a tool whose own executable is one of these and a shell tool (bash -c "...") that
+ * invokes one inside its command string. */
+const PRIVILEGED_COMMAND_RE = /\b(sudo|doas|pkexec|su)\b/;
+
+/** Every process is spawned via toolExecutor without a TTY or a way to answer a password prompt
+ * (see runExecutable in toolExecutor.ts), so a privileged command can never succeed here — it
+ * would just hang until its timeout. Rejecting upfront avoids burning that timeout and gives the
+ * agent an actionable reason instead of an inscrutable "a terminal is required" stderr it might
+ * otherwise retry against. */
+function assertNotPrivileged(resolvedCommand: string): void {
+  if (PRIVILEGED_COMMAND_RE.test(resolvedCommand)) {
+    throw new PrivilegedCommandError(resolvedCommand);
+  }
 }
 
 /** Caps history per project (not globally) — each project's execution log is independent. */
@@ -204,12 +221,15 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
     throw new ExecutableUnavailableError(tool.id, tool.executable);
   }
 
+  const resolvedCommand = buildResolvedCommand(tool, body.arguments);
+  assertNotPrivileged(resolvedCommand);
+
   const record: ExecutionRecord = {
     id: randomUUID(),
     projectId: body.projectId,
     toolId: tool.id,
     arguments: body.arguments,
-    resolvedCommand: buildResolvedCommand(tool, body.arguments),
+    resolvedCommand,
     cwd: env.workspaceRoot,
     status: "pending_confirmation",
     createdAt: Date.now(),

@@ -3,6 +3,7 @@ import type { AgentWithStatus } from "../../types/agent";
 import type { OllamaModel } from "../../types/ollama";
 import type { Settings } from "../../types/settings";
 import type { SessionMeta, UseSessions } from "../../hooks/useSessions";
+import { useProjects } from "../../hooks/useProjects";
 import { AgentNetwork } from "./AgentNetwork";
 import { ChatSessionPanel } from "./ChatSessionPanel";
 import { SessionTabs } from "../layout/SessionTabs";
@@ -33,8 +34,13 @@ export function ChatView({ agents, models, settings, manualModel, sessions, onFo
     closeSession,
     setActiveChat,
     setSessionModel,
+    setSessionProject,
+    setSessionTaskId,
     reportStatus,
   } = sessions;
+  // Owned once here (rather than inside each ChatSessionPanel) so every open tab shares the same
+  // fetched list instead of re-requesting it independently - matches OrchestratorWorkbench.tsx.
+  const { projects } = useProjects();
 
   const handleSelectSession = (session: SessionMeta) => {
     if (session.kind === "chat") setActiveChat(session.id);
@@ -82,7 +88,11 @@ export function ChatView({ agents, models, settings, manualModel, sessions, onFo
               settings={settings}
               models={models}
               agentDefaultModel={agents.find((a) => a.id === session.agentId)?.model}
+              agentName={agents.find((a) => a.id === session.agentId)?.name ?? "Agent"}
+              projects={projects}
               onChangeModel={setSessionModel}
+              onChangeProject={setSessionProject}
+              onChangeTaskId={setSessionTaskId}
               reportStatus={reportStatus}
             />
           </div>

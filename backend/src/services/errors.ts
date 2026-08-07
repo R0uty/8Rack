@@ -107,6 +107,18 @@ export class ExecutableUnavailableError extends Error {
   }
 }
 
+export class PrivilegedCommandError extends Error {
+  constructor(command: string) {
+    super(
+      `Command "${command}" invokes a privilege-escalation tool (sudo/su/doas/pkexec). Tools run ` +
+        "non-interactively with no TTY, so a password prompt cannot be answered and this would only " +
+        "hang until it times out. Ask the user to run the privileged command themselves in their own " +
+        "terminal, or find an approach that doesn't require root.",
+    );
+    this.name = "PrivilegedCommandError";
+  }
+}
+
 export class TaskNotFoundError extends Error {
   constructor(taskId: string) {
     super(`Task "${taskId}" was not found`);
@@ -125,6 +137,13 @@ export class ProjectNotFoundError extends Error {
   constructor(projectId: string) {
     super(`Project "${projectId}" was not found`);
     this.name = "ProjectNotFoundError";
+  }
+}
+
+export class InvalidProjectIdError extends Error {
+  constructor(projectId: string) {
+    super(`"${projectId}" is not a valid project id`);
+    this.name = "InvalidProjectIdError";
   }
 }
 
@@ -154,6 +173,58 @@ export class CveLookupError extends Error {
     super(message);
     this.name = "CveLookupError";
     this.cause = cause;
+  }
+}
+
+export class ReportNotFoundError extends Error {
+  constructor(reportId: string) {
+    super(`Report "${reportId}" was not found`);
+    this.name = "ReportNotFoundError";
+  }
+}
+
+export class NoFindingsSelectedError extends Error {
+  constructor() {
+    super("Select at least one finding to generate a report from");
+    this.name = "NoFindingsSelectedError";
+  }
+}
+
+export class ScanProfileNotFoundError extends Error {
+  constructor(profileId: string) {
+    super(`Scan profile "${profileId}" was not found`);
+    this.name = "ScanProfileNotFoundError";
+  }
+}
+
+export class ScanRunNotFoundError extends Error {
+  constructor(scanId: string) {
+    super(`Scan "${scanId}" was not found`);
+    this.name = "ScanRunNotFoundError";
+  }
+}
+
+export class ScanTargetRequiredError extends Error {
+  constructor() {
+    super("target is required");
+    this.name = "ScanTargetRequiredError";
+  }
+}
+
+export class InvalidScanTargetError extends Error {
+  constructor(target: string) {
+    super(
+      `Target "${target}" isn't valid - it can't start with "-", since a scan tool's own argument ` +
+        "parser could interpret it as a flag instead of the intended target.",
+    );
+    this.name = "InvalidScanTargetError";
+  }
+}
+
+export class InvalidScanStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidScanStateError";
   }
 }
 

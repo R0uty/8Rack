@@ -3,6 +3,7 @@ import { LayoutGrid } from "lucide-react";
 import { ToolRegistry } from "./ToolRegistry";
 import { ProjectPanel } from "./ProjectPanel";
 import { KnowledgeBasePanel } from "./KnowledgeBasePanel";
+import { ScannerPanel } from "./ScannerPanel";
 import { ExecutionHistoryPanel } from "./ExecutionHistoryPanel";
 import { TaskSessionPanel } from "./workbench/TaskSessionPanel";
 import { SessionTabs } from "./layout";
@@ -113,6 +114,8 @@ export function OrchestratorWorkbench({ agents, models, sessions }: Orchestrator
                 onDelete={removeProject}
                 onRefresh={refreshProjects}
               />
+
+              <ScannerPanel projectId={selectedProjectId} />
 
               <GlassPanel padding="lg" className="flex flex-col gap-3">
                 <h2 className="text-sm font-semibold text-text">New Task</h2>

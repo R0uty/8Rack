@@ -1,12 +1,12 @@
 /** Extension point for future plugin loading. Not implemented yet. */
 
 import type { Tool } from "./tool.js";
-import type { Scanner } from "./scanner.js";
+import type { ScanProfile } from "./scanner.js";
 import type { RetrievalSource } from "./rag.js";
 
 export interface PluginContext {
   registerTool: (tool: Tool) => void;
-  registerScanner: (scanner: Scanner) => void;
+  registerScanProfile: (profile: ScanProfile) => void;
   registerRetrievalSource: (source: RetrievalSource) => void;
 }
 
