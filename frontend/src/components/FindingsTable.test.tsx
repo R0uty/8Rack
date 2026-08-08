@@ -18,11 +18,13 @@ function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
     target: "example.com",
     value: "80/tcp",
     metadata: {},
-    evidence: "",
+    evidence: [],
     tags: [],
-    status: "discovered",
+    status: "potential",
     history: [],
     sourceCount: 1,
+    executionIds: [],
+    relatedAgents: [],
     firstSeenAt: 0,
     lastSeenAt: 0,
     createdAt: Date.now(),
@@ -76,8 +78,8 @@ describe("FindingsTable", () => {
     expect(onSelectFinding).toHaveBeenCalledWith(finding);
   });
 
-  it("dims dismissed findings", () => {
-    renderTable({ findings: [fixtureFinding({ status: "dismissed" })] });
+  it("dims false-positive findings", () => {
+    renderTable({ findings: [fixtureFinding({ status: "false_positive" })] });
     const row = screen.getByText("Port 80/tcp open").closest("tr");
     expect(row?.className).toContain("opacity-50");
   });

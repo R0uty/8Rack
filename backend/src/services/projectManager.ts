@@ -46,19 +46,31 @@ export async function getProject(id: string): Promise<Project | undefined> {
   return readProjectMeta(id);
 }
 
-export async function createProject(name: string, notes: string): Promise<Project> {
-  const project: Project = { id: randomUUID(), name, notes, createdAt: Date.now() };
+/** Mission fields, layered onto the required name/notes at creation time - see types/project.ts. */
+export type MissionFields = Pick<Project, "description" | "scope" | "outOfScope" | "rules" | "startDate" | "status">;
+
+export async function createProject(name: string, notes: string, mission: Partial<MissionFields> = {}): Promise<Project> {
+  const project: Project = { id: randomUUID(), name, notes, createdAt: Date.now(), ...mission };
   await writeProjectMeta(project);
   return project;
 }
 
-export async function updateProject(id: string, patch: { name?: string; notes?: string }): Promise<Project> {
+export async function updateProject(
+  id: string,
+  patch: Partial<Omit<Project, "id" | "createdAt">>,
+): Promise<Project> {
   const existing = await readProjectMeta(id);
   if (!existing) throw new ProjectNotFoundError(id);
   const updated: Project = {
     ...existing,
     ...(patch.name !== undefined ? { name: patch.name } : {}),
     ...(patch.notes !== undefined ? { notes: patch.notes } : {}),
+    ...(patch.description !== undefined ? { description: patch.description } : {}),
+    ...(patch.scope !== undefined ? { scope: patch.scope } : {}),
+    ...(patch.outOfScope !== undefined ? { outOfScope: patch.outOfScope } : {}),
+    ...(patch.rules !== undefined ? { rules: patch.rules } : {}),
+    ...(patch.startDate !== undefined ? { startDate: patch.startDate } : {}),
+    ...(patch.status !== undefined ? { status: patch.status } : {}),
   };
   await writeProjectMeta(updated);
   return updated;

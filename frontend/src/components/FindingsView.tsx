@@ -6,19 +6,25 @@ import { FindingsTimeline } from "./FindingsTimeline";
 import { FindingsGraphView } from "./FindingsGraphView";
 import { FindingDetails } from "./FindingDetails";
 import { ReportsPanel } from "./ReportsPanel";
+import { AssetsView } from "./AssetsView";
+import { ActivityFeed } from "./ActivityFeed";
 import { Markdown } from "./Markdown";
 import { Button, GlassPanel, SkeletonRows, StreamingCursor } from "./ui";
 import { useProjects } from "../hooks/useProjects";
 import { useFindings } from "../hooks/useFindings";
 import { useReports } from "../hooks/useReports";
+import { useActivity } from "../hooks/useActivity";
+import { useAgents } from "../hooks/useAgents";
 import type { Finding, FindingSeverity } from "../types/finding";
 import type { Project } from "../types/project";
 
-type ViewMode = "table" | "timeline" | "graph" | "reports";
+type ViewMode = "table" | "timeline" | "graph" | "assets" | "activity" | "reports";
 const VIEW_MODES: { mode: ViewMode; label: string }[] = [
   { mode: "table", label: "Table" },
   { mode: "timeline", label: "Timeline" },
   { mode: "graph", label: "Graph" },
+  { mode: "assets", label: "Assets" },
+  { mode: "activity", label: "Activity" },
   { mode: "reports", label: "Reports" },
 ];
 
@@ -43,12 +49,20 @@ export function FindingsView() {
     error: projectsError,
     refresh: refreshProjects,
     create: createProject,
+    update: updateProject,
     remove: removeProject,
   } = useProjects();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const { findings, loading, error, update, refresh: refreshFindings } = useFindings(selectedProjectId);
   const { reports, loading: reportsLoading, generating, streamingText, error: reportError, generate, remove: removeReport } =
     useReports(selectedProjectId);
+  const {
+    executions: activityExecutions,
+    tasks: activityTasks,
+    loading: activityLoading,
+    error: activityError,
+  } = useActivity(selectedProjectId);
+  const { agents } = useAgents();
 
   const [query, setQuery] = useState("");
   const [severity, setSeverity] = useState("");
@@ -56,6 +70,8 @@ export function FindingsView() {
   const [tool, setTool] = useState("");
   const [target, setTarget] = useState("");
   const [tag, setTag] = useState("");
+  const [minConfidence, setMinConfidence] = useState("");
+  const [agentFilter, setAgentFilter] = useState("");
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("table");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -104,9 +120,18 @@ export function FindingsView() {
   const tools = useMemo(() => [...new Set(findings.map((f) => f.tool))].sort(), [findings]);
   const targets = useMemo(() => [...new Set(findings.map((f) => f.target))].sort(), [findings]);
   const tags = useMemo(() => [...new Set(findings.flatMap((f) => f.tags))].sort(), [findings]);
+  // An "agent" here is anything that touched the finding as an agent - either the finding's own
+  // `tool` (when agent-sourced) or an entry in `relatedAgents` (e.g. a validator that re-confirmed
+  // a scanner-sourced finding) - distinct from `tools`, which also includes non-agent tool ids.
+  const agentOptions = useMemo(
+    () =>
+      [...new Set(findings.flatMap((f) => [...(f.source === "agent" ? [f.tool] : []), ...f.relatedAgents]))].sort(),
+    [findings],
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const minConf = minConfidence ? Number(minConfidence) : undefined;
     return findings.filter(
       (f) =>
         (!severity || f.severity === severity) &&
@@ -114,9 +139,11 @@ export function FindingsView() {
         (!tool || f.tool === tool) &&
         (!target || f.target === target) &&
         (!tag || f.tags.includes(tag)) &&
+        (minConf === undefined || f.confidence >= minConf) &&
+        (!agentFilter || f.tool === agentFilter || f.relatedAgents.includes(agentFilter)) &&
         matchesQuery(f, q),
     );
-  }, [findings, query, severity, type, tool, target, tag]);
+  }, [findings, query, severity, type, tool, target, tag, minConfidence, agentFilter]);
 
   const handleSelectProject = (project: Project) => {
     setSelectedProjectId((current) => (current === project.id ? null : project.id));
@@ -142,6 +169,7 @@ export function FindingsView() {
         selectedProjectId={selectedProjectId}
         onSelect={handleSelectProject}
         onCreate={createProject}
+        onUpdate={updateProject}
         onDelete={removeProject}
         onRefresh={refreshProjects}
       />
@@ -163,7 +191,7 @@ export function FindingsView() {
             ))}
           </div>
 
-          {viewMode !== "graph" && viewMode !== "reports" && (
+          {(viewMode === "table" || viewMode === "timeline") && (
             <GlassPanel padding="md" className="flex flex-wrap items-center gap-2">
               <div className="relative flex-1 basis-56">
                 <Search size={12} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
@@ -218,6 +246,22 @@ export function FindingsView() {
                   ))}
                 </select>
               )}
+              <select value={minConfidence} onChange={(e) => setMinConfidence(e.target.value)} className={SELECT_CLASS}>
+                <option value="">Any confidence</option>
+                <option value="0.5">≥ 50%</option>
+                <option value="0.7">≥ 70%</option>
+                <option value="0.9">≥ 90%</option>
+              </select>
+              {agentOptions.length > 0 && (
+                <select value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)} className={SELECT_CLASS}>
+                  <option value="">All agents</option>
+                  {agentOptions.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+              )}
             </GlassPanel>
           )}
 
@@ -263,8 +307,10 @@ export function FindingsView() {
             </GlassPanel>
           )}
 
-          {error && viewMode !== "reports" && <p className="text-xs text-critical">{error}</p>}
-          {loading && findings.length === 0 && viewMode !== "graph" && viewMode !== "reports" && (
+          {error && (viewMode === "table" || viewMode === "timeline" || viewMode === "assets") && (
+            <p className="text-xs text-critical">{error}</p>
+          )}
+          {loading && findings.length === 0 && (viewMode === "table" || viewMode === "timeline" || viewMode === "assets") && (
             <SkeletonRows count={5} />
           )}
           {!loading && viewMode === "table" && (
@@ -281,6 +327,16 @@ export function FindingsView() {
           )}
           {viewMode === "graph" && (
             <FindingsGraphView projectId={selectedProjectId} onSelectFindingId={handleSelectFindingId} />
+          )}
+          {!loading && viewMode === "assets" && <AssetsView findings={findings} />}
+          {viewMode === "activity" && (
+            <ActivityFeed
+              executions={activityExecutions}
+              tasks={activityTasks}
+              agents={agents}
+              loading={activityLoading}
+              error={activityError}
+            />
           )}
           {viewMode === "reports" && (
             <ReportsPanel reports={reports} loading={reportsLoading} error={reportError} onDelete={removeReport} />

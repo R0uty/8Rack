@@ -20,6 +20,10 @@ backend/data/projects/*
 backend/data/rag/*
 !backend/data/rag/.gitkeep
 
+# Tool Registry enable/disable overrides - runtime state, not shipped config
+backend/data/tools/*
+!backend/data/tools/.gitkeep
+
 # start.sh's own tracked dev-server PIDs - runtime state, not shipped
 .backend.pid
 .frontend.pid

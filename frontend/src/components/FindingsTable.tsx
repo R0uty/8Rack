@@ -1,4 +1,5 @@
 import { StatusPill, type Tone } from "./ui";
+import { STATUS_TONE, STATUS_VERB } from "./FindingsTimeline";
 import { relativeTime } from "../lib/relativeTime";
 import { cn } from "../lib/cn";
 import type { Finding, FindingSeverity } from "../types/finding";
@@ -29,7 +30,7 @@ function typeLabel(type: string): string {
   return type.replace(/_/g, " ");
 }
 
-const HEADERS = ["Severity", "Type", "Title", "Target", "Tool", "Confidence", "Created", "Updated"];
+const HEADERS = ["Severity", "Status", "Type", "Title", "Target", "Tool", "Confidence", "Created", "Updated"];
 
 export function FindingsTable({ findings, onSelectFinding, selectedIds, onToggleSelect, onToggleSelectAll }: FindingsTableProps) {
   if (findings.length === 0) {
@@ -65,7 +66,10 @@ export function FindingsTable({ findings, onSelectFinding, selectedIds, onToggle
             <tr
               key={f.id}
               onClick={() => onSelectFinding(f)}
-              className={cn("cursor-pointer transition-colors hover:bg-card", f.status === "dismissed" && "opacity-50")}
+              className={cn(
+                "cursor-pointer transition-colors hover:bg-card",
+                (f.status === "false_positive" || f.status === "duplicate") && "opacity-50",
+              )}
             >
               <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                 <input
@@ -79,6 +83,11 @@ export function FindingsTable({ findings, onSelectFinding, selectedIds, onToggle
               <td className="whitespace-nowrap px-3 py-2">
                 <StatusPill tone={SEVERITY_TONE[f.severity]} pulse={f.severity === "critical"} className="px-2 py-0.5">
                   {f.severity}
+                </StatusPill>
+              </td>
+              <td className="whitespace-nowrap px-3 py-2">
+                <StatusPill tone={STATUS_TONE[f.status]} dot={false} className="px-2 py-0.5">
+                  {STATUS_VERB[f.status]}
                 </StatusPill>
               </td>
               <td className="whitespace-nowrap px-3 py-2 capitalize text-muted">{typeLabel(f.type)}</td>

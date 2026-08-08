@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { SessionMeta } from "../../hooks/useSessions";
 import type { AgentWithStatus } from "../../types/agent";
+import type { Project } from "../../types/project";
 import { iconFor } from "../../lib/icons";
 import { cn } from "../../lib/cn";
 import { FOCUS_RING, StatusDot, type Tone } from "../ui";
@@ -14,6 +15,9 @@ interface SessionTabsProps {
   onSelect: (id: string | null) => void;
   onClose: (id: string) => void;
   agents: AgentWithStatus[];
+  /** Only needed by ChatView (task sessions disambiguate via initialObjective instead - see the
+   * label logic below), so optional rather than threading it through OrchestratorWorkbench too. */
+  projects?: Project[];
   statuses: Record<string, Tone>;
   homeIcon: LucideIcon;
   homeLabel: string;
@@ -28,6 +32,7 @@ export function SessionTabs({
   onSelect,
   onClose,
   agents,
+  projects = [],
   statuses,
   homeIcon: HomeIcon,
   homeLabel,
@@ -55,12 +60,18 @@ export function SessionTabs({
           const Icon = agent ? iconFor(agent.icon) : HomeIcon;
           const color = agent?.color ?? "var(--color-muted)";
           const agentLabel = agent?.name ?? "Manual chat";
+          const project = session.projectId ? projects.find((p) => p.id === session.projectId) : undefined;
           // Task sessions no longer dedup one-per-agent (see hooks/useSessions.ts), so two tabs can
-          // share an agent name - fold in the objective so they're distinguishable at a glance; the
-          // full text still shows via the title tooltip below since the tab itself truncates.
-          const label = session.kind === "task" && session.initialObjective
-            ? `${agentLabel}: ${session.initialObjective}`
-            : agentLabel;
+          // share an agent name - fold in the objective so they're distinguishable at a glance.
+          // Chat sessions dedup per (agent, project) instead, so a project name does the same job
+          // there. Either way, the full text still shows via the title tooltip below since the tab
+          // itself truncates.
+          const label =
+            session.kind === "task" && session.initialObjective
+              ? `${agentLabel}: ${session.initialObjective}`
+              : session.kind === "chat" && project
+                ? `${agentLabel} · ${project.name}`
+                : agentLabel;
           const active = session.id === activeId;
           const tone = statuses[session.id];
 

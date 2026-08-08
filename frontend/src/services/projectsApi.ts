@@ -16,16 +16,20 @@ export async function fetchProjects(): Promise<Project[]> {
   return data.projects;
 }
 
-export async function createProject(name: string, notes: string): Promise<Project> {
+export async function createProject(
+  name: string,
+  notes: string,
+  mission: Partial<Omit<Project, "id" | "name" | "notes" | "createdAt">> = {},
+): Promise<Project> {
   const res = await apiFetch("/api/projects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, notes }),
+    body: JSON.stringify({ name, notes, ...mission }),
   });
   return unwrapProject(res);
 }
 
-export async function updateProject(id: string, patch: { name?: string; notes?: string }): Promise<Project> {
+export async function updateProject(id: string, patch: Partial<Omit<Project, "id" | "createdAt">>): Promise<Project> {
   const res = await apiFetch(`/api/projects/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },

@@ -30,11 +30,13 @@ function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
     target: "example.com",
     value: "80/tcp",
     metadata: {},
-    evidence: "",
+    evidence: [],
     tags: [],
-    status: "discovered",
+    status: "potential",
     history: [],
     sourceCount: 1,
+    executionIds: [],
+    relatedAgents: [],
     firstSeenAt: 0,
     lastSeenAt: 0,
     createdAt: 0,
@@ -102,15 +104,15 @@ describe("useFindings", () => {
 
   it("update() and remove() call the API then refresh", async () => {
     mockFetchFindings.mockResolvedValue([]);
-    mockUpdateFinding.mockResolvedValue(fixtureFinding({ status: "verified" }));
+    mockUpdateFinding.mockResolvedValue(fixtureFinding({ status: "confirmed" }));
     mockDeleteFinding.mockResolvedValue(undefined);
     const { result } = renderHook(() => useFindings("proj-1"));
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     await act(async () => {
-      await result.current.update("finding-1", { status: "verified" });
+      await result.current.update("finding-1", { status: "confirmed" });
     });
-    expect(mockUpdateFinding).toHaveBeenCalledWith("finding-1", { status: "verified" });
+    expect(mockUpdateFinding).toHaveBeenCalledWith("finding-1", { status: "confirmed" });
 
     await act(async () => {
       await result.current.remove("finding-1");

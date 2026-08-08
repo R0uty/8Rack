@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { FolderKanban, Plus, RefreshCw, X } from "lucide-react";
+import { FolderKanban, Pencil, Plus, RefreshCw, X } from "lucide-react";
 import type { Project } from "../types/project";
+import { MissionEditor } from "./MissionEditor";
 import { Button, FOCUS_RING, GlassPanel, IconButton, SectionHeading, Skeleton } from "./ui";
 import { cn } from "../lib/cn";
 
@@ -11,6 +12,7 @@ interface ProjectPanelProps {
   selectedProjectId: string | null;
   onSelect: (project: Project) => void;
   onCreate: (name: string, notes: string) => Promise<unknown>;
+  onUpdate: (id: string, patch: Partial<Omit<Project, "id" | "createdAt">>) => Promise<unknown>;
   onDelete: (id: string) => Promise<unknown>;
   onRefresh: () => void;
   /** True while a task is active (non-terminal) - switching or deleting the project mid-task would
@@ -25,6 +27,7 @@ export function ProjectPanel({
   selectedProjectId,
   onSelect,
   onCreate,
+  onUpdate,
   onDelete,
   onRefresh,
   disabled = false,
@@ -37,6 +40,7 @@ export function ProjectPanel({
   // Two-step delete (arm, then confirm) instead of a native confirm() dialog - keeps this
   // in-page and scriptable rather than blocking on a browser-native modal.
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
 
   const handleCreate = async () => {
     if (!name.trim() || busy) return;
@@ -149,12 +153,23 @@ export function ProjectPanel({
             }
 
             return (
+              // Rendered as a role="button" div, not an actual <button>, because the Edit/Delete
+              // controls below are themselves <button>s - a <button> nested inside a <button> is
+              // invalid HTML and throws a React hydration error. onKeyDown restores the Enter/Space
+              // activation a native button would have given for free.
               <GlassPanel
                 key={project.id}
-                as="button"
+                role="button"
+                tabIndex={disabled ? -1 : 0}
                 interactive
                 padding="md"
                 onClick={() => onSelect(project)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSelect(project);
+                  }
+                }}
                 aria-disabled={disabled}
                 title={active ? "Click to deselect" : project.notes || project.name}
                 className={cn("group relative text-left", active && "border-primary/50 bg-card-hover", disabled && "pointer-events-none opacity-60")}
@@ -162,9 +177,31 @@ export function ProjectPanel({
                 <div className="flex items-start gap-2">
                   <FolderKanban size={14} className={cn("mt-0.5 shrink-0", active ? "text-primary" : "text-muted")} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-text">{project.name}</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate text-sm font-medium text-text">{project.name}</span>
+                      {project.status && (
+                        <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted">
+                          {project.status}
+                        </span>
+                      )}
+                    </div>
                     {project.notes && <div className="mt-0.5 truncate text-xs text-muted">{project.notes}</div>}
                   </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditingProject(project);
+                    }}
+                    disabled={disabled}
+                    title="Edit mission details"
+                    className={cn(
+                      "shrink-0 rounded p-0.5 text-muted opacity-0 transition-opacity hover:text-text group-hover:opacity-100 focus-visible:opacity-100",
+                      FOCUS_RING,
+                    )}
+                  >
+                    <Pencil size={13} />
+                  </button>
                   <button
                     type="button"
                     onClick={(e) => {
@@ -186,6 +223,8 @@ export function ProjectPanel({
           })}
         </div>
       )}
+
+      <MissionEditor open={editingProject !== null} project={editingProject} onSave={onUpdate} onClose={() => setEditingProject(null)} />
     </section>
   );
 }

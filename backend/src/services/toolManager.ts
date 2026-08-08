@@ -1,18 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { env } from "../config/env.js";
 import { runExecutable } from "./toolExecutor.js";
 import type { OutputChunk } from "./toolExecutor.js";
 import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
 import { ingestExecution } from "./findingsManager.js";
+import { getProject } from "./projectManager.js";
+import { checkScope } from "./scopeMatcher.js";
 import {
   ExecToolDisabledError,
   ExecToolNotFoundError,
   ExecutableUnavailableError,
   ExecutionNotFoundError,
   InvalidToolArgumentsError,
+  OutOfScopeError,
   PrivilegedCommandError,
 } from "./errors.js";
 import type {
@@ -33,6 +39,11 @@ const pendingStdin = new Map<string, string>();
 const MAX_HISTORY = 200;
 const EXECUTIONS_FILE = "executions.json";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+/** Not project-scoped (tools are global, unlike executions) - one shared file, not under
+ * data/projects/, so it doesn't go through projectStore.ts's per-project helpers. */
+const TOOL_OVERRIDES_FILE = path.resolve(__dirname, "../../data/tools/overrides.json");
+
 export function registerExecTool(tool: ExecTool): void {
   tools.set(tool.id, tool);
 }
@@ -45,17 +56,120 @@ export function listExecTools(): ExecTool[] {
   return [...tools.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function resolveExecutablePath(executable: string): string | undefined {
-  if (path.isAbsolute(executable)) return existsSync(executable) ? executable : undefined;
-  const result = spawnSync("which", [executable], { encoding: "utf-8" });
-  return result.status === 0 ? result.stdout.trim() : undefined;
+/** Persists every registered tool's current `enabled` value as a flat {toolId: boolean} map -
+ * simpler than a sparse diff against the builtin defaults, and the file is tiny either way. */
+async function persistToolOverrides(): Promise<void> {
+  const overrides: Record<string, boolean> = {};
+  for (const tool of tools.values()) overrides[tool.id] = tool.enabled;
+  await mkdir(path.dirname(TOOL_OVERRIDES_FILE), { recursive: true });
+  await writeFile(TOOL_OVERRIDES_FILE, `${JSON.stringify(overrides, null, 2)}\n`, "utf-8");
 }
 
-/** Checks every registered tool's executable against PATH — mirrors agentManager's model-availability check. */
+/** Applies any previously saved enable/disable overrides on top of the just-registered builtin
+ * tools. Call once at startup, after every registerExecTool() call. Missing file (nothing toggled
+ * yet) or malformed JSON are both treated as "no overrides" rather than a startup failure. */
+export async function loadToolOverridesFromDisk(): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readFile(TOOL_OVERRIDES_FILE, "utf-8");
+  } catch {
+    return;
+  }
+  let overrides: unknown;
+  try {
+    overrides = JSON.parse(raw);
+  } catch {
+    console.warn(`[tools] ignoring malformed overrides file at ${TOOL_OVERRIDES_FILE}`);
+    return;
+  }
+  if (!overrides || typeof overrides !== "object") return;
+  for (const [id, enabled] of Object.entries(overrides as Record<string, unknown>)) {
+    if (typeof enabled !== "boolean") continue;
+    const tool = tools.get(id);
+    if (tool) tool.enabled = enabled;
+  }
+}
+
+/** Runtime enable/disable toggle for a registered tool - persisted so it survives a restart. */
+export async function setToolEnabled(id: string, enabled: boolean): Promise<ExecTool> {
+  const tool = tools.get(id);
+  if (!tool) throw new ExecToolNotFoundError(id);
+  tool.enabled = enabled;
+  await persistToolOverrides();
+  return tool;
+}
+
+/** Every existing binary that `executable` could refer to: an absolute path is just itself; a bare
+ * name expands to all its PATH matches (`which -a`) plus a few common user-local bin dirs a Go /
+ * ProjectDiscovery install lands in (~/.local/bin, ~/go/bin). Those extras matter because a service
+ * launched outside a login shell - e.g. from an IDE - often has a narrower PATH that omits them, so
+ * the genuine binary can be installed and working yet invisible to a plain `which`. */
+function executableCandidates(executable: string): string[] {
+  if (path.isAbsolute(executable)) return existsSync(executable) ? [executable] : [];
+  const which = spawnSync("which", ["-a", executable], { encoding: "utf-8" });
+  const onPath =
+    which.status === 0 ? which.stdout.split("\n").map((l) => l.trim()).filter(Boolean) : [];
+  const userBins = [".local/bin", "go/bin", ".local/go/bin"].map((d) => path.join(homedir(), d, executable));
+  return [...new Set([...onPath, ...userBins])].filter((p) => existsSync(p));
+}
+
+/** Resolves a tool to the absolute path of its genuine binary. Without an identitySignature that's
+ * simply the first candidate that exists (preserving the old first-on-PATH behaviour); with one, the
+ * first candidate whose version output matches - so e.g. ProjectDiscovery httpx in ~/.local/bin is
+ * chosen even when python-httpx sits earlier on PATH. Undefined when nothing qualifies. */
+function resolveToolExecutable(tool: ExecTool): string | undefined {
+  const candidates = executableCandidates(tool.executable);
+  if (!tool.identitySignature) return candidates[0];
+  return candidates.find((candidate) => matchesIdentity(tool, probeVersionOutput(tool, candidate)));
+}
+
+const VERSION_PROBE_TIMEOUT_MS = 3000;
+
+/** Runs `<executable> <tool.versionFlag>` and returns its combined stdout+stderr with ANSI colour
+ * codes stripped, or "" when there's no versionFlag / it errors. Best-effort - a nonzero exit or
+ * timeout just yields whatever text came back (often still identifying), see ExecTool.versionFlag's
+ * doc comment on why some tools (whois, nslookup) never get a flag here at all. */
+function probeVersionOutput(tool: ExecTool, resolvedPath: string): string {
+  if (!tool.versionFlag) return "";
+  const result = spawnSync(resolvedPath, [tool.versionFlag], {
+    encoding: "utf-8",
+    timeout: VERSION_PROBE_TIMEOUT_MS,
+    input: "",
+  });
+  // eslint-disable-next-line no-control-regex
+  return `${result.stdout || ""}\n${result.stderr || ""}`.replace(/\[[0-9;]*m/g, "");
+}
+
+/** A human-readable version from a probe: the first semver-ish token if present (so multi-line
+ * banners like ProjectDiscovery's collapse to just "v1.10.0"), else the first non-empty line. */
+function versionFromProbe(output: string): string | undefined {
+  const semver = output.match(/v?\d+\.\d+(?:\.\d+)?[\w.-]*/)?.[0];
+  if (semver) return semver;
+  return output
+    .split("\n")
+    .map((l) => l.trim())
+    .find(Boolean);
+}
+
+/** True unless the tool declares an identitySignature its resolved binary's version output fails to
+ * match - the guard against a same-named unrelated program on PATH (see ExecTool.identitySignature). */
+function matchesIdentity(tool: ExecTool, probeOutput: string): boolean {
+  if (!tool.identitySignature) return true;
+  return new RegExp(tool.identitySignature, "i").test(probeOutput);
+}
+
+/** Checks every registered tool's executable against PATH — mirrors agentManager's model-availability
+ * check. resolveToolExecutable already applies the identity signature, so a resolved path is by
+ * definition the genuine tool; a wrong same-named program (e.g. python-httpx instead of
+ * ProjectDiscovery httpx) resolves to nothing and reports unavailable rather than "available but
+ * every run fails". */
 export function listExecToolsWithStatus(): ExecToolWithStatus[] {
   return listExecTools().map((tool) => {
-    const resolvedPath = resolveExecutablePath(tool.executable);
-    return { ...tool, availability: resolvedPath ? "available" : "unavailable", resolvedPath };
+    const resolvedPath = resolveToolExecutable(tool);
+    if (!resolvedPath) {
+      return { ...tool, availability: "unavailable", resolvedPath: undefined, version: undefined };
+    }
+    return { ...tool, availability: "available", resolvedPath, version: versionFromProbe(probeVersionOutput(tool, resolvedPath)) };
   });
 }
 
@@ -167,7 +281,10 @@ async function runRecord(
   runningControllers.set(record.id, controller);
 
   const result = await runExecutable({
-    executable: tool.executable,
+    // Run the identity-resolved absolute path (e.g. ProjectDiscovery httpx in ~/.local/bin), not the
+    // bare name the OS would resolve off PATH - which might be a wrong same-named program. Falls back
+    // to the bare name only if resolution just failed (requestExecution already validated it).
+    executable: resolveToolExecutable(tool) ?? tool.executable,
     args: [...tool.defaultArguments, ...record.arguments],
     cwd: record.cwd,
     timeoutMs: tool.timeout,
@@ -217,22 +334,39 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
   }
   validateArguments(tool, body.arguments);
 
-  if (!resolveExecutablePath(tool.executable)) {
+  // Refuse if the executable is missing, or only resolves to the wrong same-named program (identity
+  // mismatch) - running it would just fail on flags it doesn't have, with a confusing error.
+  if (!resolveToolExecutable(tool)) {
     throw new ExecutableUnavailableError(tool.id, tool.executable);
   }
 
   const resolvedCommand = buildResolvedCommand(tool, body.arguments);
   assertNotPrivileged(resolvedCommand);
 
+  // Best-effort mission scope check - a clear violation blocks outright; when nothing
+  // target-shaped could be found in the arguments at all, the human sees a warning instead of a
+  // silent pass (see scopeMatcher.ts's module doc comment for why argv has no reliable "target").
+  let scopeWarning: string | undefined;
+  const project = await getProject(body.projectId).catch(() => undefined);
+  if (project) {
+    const verdict = checkScope(project.scope, project.outOfScope, body.arguments);
+    if (verdict.verdict === "out_of_scope") throw new OutOfScopeError(verdict.offending);
+    if (verdict.verdict === "unknown") {
+      scopeWarning = "Could not identify a target in this command's arguments - mission scope was not checked.";
+    }
+  }
+
   const record: ExecutionRecord = {
     id: randomUUID(),
     projectId: body.projectId,
     toolId: tool.id,
+    agentId: body.agentId,
     arguments: body.arguments,
     resolvedCommand,
     cwd: env.workspaceRoot,
     status: "pending_confirmation",
     createdAt: Date.now(),
+    scopeWarning,
   };
   executions.set(record.id, record);
   trimHistory(record.projectId);

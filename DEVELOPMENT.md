@@ -4,6 +4,49 @@ This file is the handoff/reference doc for continuing work on 8Rack. It captures
 key decisions, and what's left — things not obvious from just reading the code. For run
 instructions, see `README.md`.
 
+## Stabilization pass (make-it-work audit)
+
+A full end-to-end verification pass against the live stack (backend + real Ollama), walking every
+critical path rather than trusting the unit suites alone. All five functional flows were confirmed
+working live: agent chat, tool execution + human confirmation, single-agent orchestration, and a
+two-step multi-agent plan (verified via curl and browser). Fixes made during the pass:
+
+- **Nested-`<button>` hydration error (`ProjectPanel.tsx`)** — the project card was a
+  `GlassPanel as="button"` containing the Edit/Delete `<button>`s, which is invalid DOM and threw a
+  React hydration error on every render of Workbench/Plans/Findings. Changed the card to a
+  `role="button"` div with an `onKeyDown` (Enter/Space) handler so the inner buttons are valid while
+  keyboard activation is preserved.
+- **Empty target mind map (`findingsManager.ts#GRAPHABLE_TYPES`)** — the graph builder excluded
+  `domain`/`information`/`header`/`cookie`/`interesting_file`, so a whois/DNS-only recon pass
+  produced real findings but a blank graph, even though `FindingsGraphView.tsx#NODE_TONE` already
+  had colours for all 16 finding types. Extended `GRAPHABLE_TYPES` to all 16 so the mind map
+  actually reflects discovered findings (verified live: showpad's 11 whois findings now render).
+- **Dead code removed** — `extensions/pluginRegistry.ts`, `extensions/retrievalRegistry.ts`, and
+  `types/plugin.ts` were a self-contained island with zero live importers (leftover scaffolding for
+  the never-built Plugin system). `toolRegistry.ts`/`types/tool.ts` were kept (still wired into the
+  native tool-calling path).
+- **E2E smoke test added** (`backend/scripts/smoke-test.mjs`, `npm run smoke`) — drives the real
+  running stack over HTTP through all seven critical stages (health → agents → chat → tool exec →
+  confirmation → orchestration → 2-step plan), reporting PASS/FAIL per stage and naming the failing
+  one. Requires the backend + a live Ollama with a pulled model.
+- **Workbench task stuck on "Starting…" (`useOrchestratorTask.ts`)** — a StrictMode double-mount
+  bug: `useOrchestratorTask`'s unmount cleanup aborted the in-flight request synchronously, so in
+  dev StrictMode's mount→unmount→remount cycle cancelled the task started on first mount (the
+  backend saw the client disconnect and marked it `cancelled`), and `TaskSessionPanel`'s start-once
+  guard (`session.started`) then blocked a restart — leaving `task` null and the panel frozen on
+  "Starting…" forever (the abort also being swallowed as a benign `AbortError`, so no error showed).
+  Every UI-started Workbench/`ChatTaskPanel` task was affected; it went unnoticed because the smoke
+  test and earlier orchestration checks drove the API directly, never the task-start UI path. Fix:
+  defer the abort a macrotask and guard it with a `mountedRef`, so StrictMode's immediate remount
+  cancels it while a genuine tab-close unmount still aborts. Verified live: a fresh Recon Agent task
+  now streams, reaches the confirmation gate, and chains tools (whois → dig) through the UI. New
+  regression test in `useOrchestratorTask.test.ts` covers the StrictMode-remount case.
+
+Known non-blocking item (unreachable via the normal UI): the orchestrator/plans routes validate
+that `projectId` is a non-empty string but not that it's UUID-shaped, so a malformed id runs the
+agent before failing at persist time (`InvalidProjectIdError`, correctly surfaced — not swallowed).
+Worth a fast up-front reject if that path ever becomes reachable.
+
 ## Status
 
 Built and verified live (browser + curl) against a real local Ollama instance:
@@ -2120,3 +2163,499 @@ of them.
 **Verified together**: `npm run typecheck`/`npm run build` (backend), `npx tsc -b`/`npm run lint`/
 `npm run build` (frontend), `npm test` both sides (271 backend, 204 frontend) all clean throughout;
 the scan-target fix additionally verified live via curl against the real running backend.
+
+## Project-scoped chat
+
+The last item from the original build plan's "Later" list. Deliberately deferred at the time (see
+"Projects" above) - by the time this was picked up, a lot had changed underneath it: chat sessions
+had gained a *per-session* `projectId` field (`ChatSessionPanel.tsx`'s Project dropdown) that opts
+a thread into tool use, backed by an `OrchestratorTask` (`ChatTaskPanel.tsx`) - which already
+partially overlaps with what "project-scoped chat" originally meant. Asked the user to disambiguate
+before touching anything, since the obvious reading from when the TODO item was written no longer
+obviously applied.
+
+**Chosen design**: one chat thread per **(agent, project)** pair, not a backend persistence change.
+`ChatView.tsx` gains its own page-level "current project" selector - a `ProjectPanel`, the same
+component and pattern Workbench/Findings/Scanners/Reports already each use independently (no
+project selection is shared globally across views, by established convention - see `CLAUDE.md`'s
+"Projects" section). Picking an agent while a project is selected opens/resumes *that project's*
+thread with the agent; switching projects and reopening the same agent gets a genuinely separate
+thread, exactly like task sessions already coexist per agent (see "Concurrent task sessions per
+agent" above) - just keyed by project instead of by a fresh id every time.
+
+**Reused the existing field instead of adding a parallel one**: `hooks/useSessions.ts#openChatSession`
+gained a third, optional `projectId` parameter, and its dedup lookup changed from
+`s.agentId === agentId` to `s.agentId === agentId && s.projectId === projectId`. Since `projectId` is
+the *same* field that already opts a chat into tool use, a project-scoped thread now starts
+tool-enabled automatically - not a separate decision. This was a deliberate consequence of the
+option the user picked, not an oversight: `ChatSessionPanel`'s own per-session Project dropdown is
+unchanged and still works exactly as before, just now pre-filled from the page-level selection at
+creation time rather than being the only place a project is ever picked. Manual (no-agent) chats
+dedup by project too (`agentId === null` combined with `projectId` in the same lookup), so picking
+a project and starting a manual chat also gets its own thread, separate from the global one.
+
+**Disambiguating labels**: `SessionTabs.tsx` already folded a task session's objective into its tab
+label since same-agent task tabs stopped deduping a while back (see "Concurrent task sessions per
+agent"); the same problem now exists for chat tabs, so it gained a `projects?: Project[]` prop
+(optional - only `ChatView` passes one; `OrchestratorWorkbench`'s task tabs don't need it, since
+`initialObjective` already disambiguates those) and appends `· <project name>` to a project-scoped
+chat tab's label, falling back to just the agent name if the project can't be resolved (e.g. it was
+deleted out from under an open session). `AgentNetwork.tsx`'s `SessionNode` tooltip got the same
+treatment for the Command Center map's session nodes.
+
+**What didn't change**: no backend changes at all - this is purely a frontend session-identity/UI
+feature. Plain (no-project) chat still behaves exactly as before (one global thread per agent,
+`useChat.ts`'s `sessionStorage`, no persistence change). `env.workspaceRoot` stays a single global
+directory, unaffected - that was always a separate non-goal from chat scoping.
+
+9 new frontend tests: 5 in `useSessions.test.ts` (dedup with a different project produces a
+separate thread; dedup with the same pair resumes instead of duplicating; manual/no-agent sessions
+scope by project too; a newly-created project-scoped session correctly starts with `projectId` set)
+and a new `SessionTabs.test.tsx` (no dedicated test existed before this - covers the new
+project-suffix label logic, a task session's objective still taking priority, an unresolvable
+`projectId` falling back gracefully, and the `projects` prop's default when omitted). 214 frontend
+tests total.
+
+**Verified live** against the real running app: created two throwaway projects, selected the first
+and opened the Recon Agent from the Command Center map - a new tab opened, correctly labeled
+"Recon Agent · <project>", Project dropdown pre-filled, and tools already enabled (the "Recon Agent
+can request to run commands" message showed immediately, no extra step). Switched to the second
+project and reopened the Recon Agent - a genuinely separate second tab opened (confirmed via the
+right panel's "2 chats, 0 tasks" count), both coexisting. Switched back to the first project and
+reopened the Recon Agent a third time - refocused the *original* tab instead of creating a third
+(count stayed at 2), proving the dedup-by-(agent,project) lookup works both ways. Cleaned up both
+throwaway projects afterward via the DELETE endpoint. `npx tsc -b`, `npm run lint`, `npm test` (214
+passing), and `npm run build` all clean throughout.
+
+**Later removed**: the page-level `ProjectPanel` picker described above (`ChatView.tsx`'s Home tab,
+above the `AgentNetwork` map) was removed - user feedback that it was unnecessary clutter on the
+Command Center. It only ever controlled which project a *new* session started pre-scoped to;
+`ChatSessionPanel.tsx`'s own per-session Project dropdown (`onChangeProject`) already does the same
+plain→project-scoped transition after the fact, so no capability was lost, just the up-front step.
+New chat sessions from the Command Center now always start project-less; `openChatSession`'s third
+`projectId` argument is simply omitted from both the per-agent and manual-chat call sites. The
+dedup-by-(agent,project) lookup, tab-label project suffix, and `AgentNetwork` session-node tooltip
+logic from the original feature are untouched - a project can still be assigned to a session, just
+not before it exists.
+
+## Tool Registry UI: version, path, enable/disable, category rework
+
+First of five large feature requests dropped into TODO.md's "NEW TODO AND CHECK UPS IF ALREADY
+IMPLEMENTED" section, worked one at a time per explicit user instruction. Before touching anything,
+audited all five against the current codebase (see TODO.md's per-task checklists) - a lot of what
+Task 1 asked for already existed (tool discovery, per-agent `execTools` allowlist with a proper
+multi-select UI in `AgentEditor.tsx`), so this pass only closed the real gaps: version display,
+visible resolved path, a runtime enable/disable toggle, and the category taxonomy rework.
+
+**Category taxonomy**: `ExecToolCategory` changed from the original 5 (`filesystem`/`network`/
+`recon`/`exec`/`vcs`) to the 7 the task specified (`recon`/`network`/`web`/`fuzzing`/`analysis`/
+`os`/`reporting`). Every builtin tool in `tools/exec/builtins.ts` got remapped by what it actually
+does rather than a mechanical rename: all the filesystem/git/bash/python tools collapsed into `os`
+(there's no dedicated "system" category in the new 7, and OS is the closest fit for "runs on the
+local machine, not against a target"); `curl`/`http_request`/`httpx`/`katana` became `web` (HTTP-
+layer specific) as distinct from `nmap`/`whois`/`dig`/`nslookup` staying `network` (IP/DNS/port-
+layer); `ffuf` is the only `fuzzing` tool, `nuclei` the only `analysis` tool. Nothing is categorized
+`reporting` - none of the ~20 builtins fit it, and the task explicitly said not to add new security
+tools this pass, so that category exists in the type but currently has zero tools, which is
+expected rather than a bug.
+
+**Version detection**: `ExecTool` gained an optional `versionFlag` (e.g. `"--version"`, `"-V"`) -
+deliberately per-tool rather than a single hardcoded flag, since project-discovery-family tools
+(`httpx`/`katana`/`nuclei`/`subfinder`/`amass`) use single-dash `-version`, `nmap` only recognizes
+`-V`, and GNU-style tools take `--version`. More importantly, `whois` and `nslookup` got **no**
+`versionFlag` at all on purpose: on at least one common `whois` implementation, an unrecognized
+flag is read as the query target, meaning `whois --version` would fire a real outbound whois query
+for the literal string `"--version"` instead of failing safely - not something to risk on every
+`GET /api/tools` call. `toolManager.ts#resolveVersion` runs the probe via `spawnSync` with a 3s
+timeout and empty stdin, taking the first non-empty line of stdout (falling back to stderr) as the
+version string; no flag, a nonzero exit, or a timeout all just leave `version` undefined rather than
+guessing. This runs alongside the existing `which`-based availability check in
+`listExecToolsWithStatus`, so every `GET /api/tools` call now does up to two synchronous child
+processes per tool - acceptable for a local desktop tool count (~20) but would need to move off the
+request path if the roster grows much larger.
+
+**Enable/disable**: `ExecTool.enabled` was already read at request time (`ExecToolDisabledError` in
+`requestExecution`), but was static config baked into `builtins.ts` with no way to flip it without
+editing source. Rather than turning every tool config into a per-tool JSON file (agents' pattern),
+went with a single small overlay file, `backend/data/tools/overrides.json` - a flat
+`{toolId: boolean}` map of every registered tool's current `enabled` value, written in full on every
+toggle (`toolManager.ts#persistToolOverrides`) and re-applied on top of the freshly-registered
+builtins at startup (`loadToolOverridesFromDisk`, called from `index.ts` right after
+`registerExecTool` has run for every builtin, before the "Loaded N tool(s)" boot log line). New
+`PATCH /api/tools/:id` route, body `{"enabled": boolean}`, reuses the existing
+`ExecToolNotFoundError` → 404 mapping. Frontend: `toolsApi.ts#setToolEnabled`, threaded through
+`useTools.ts#toggleTool` (reconciles from the backend's response rather than assuming the optimistic
+value, so availability/version/etc. stay accurate too), and a `Power`-icon `IconButton` in
+`ToolRegistry.tsx` next to the availability pill - disabled tools also get a "disabled" pill and the
+whole row dims. `onToggleEnabled` is an optional prop on `ToolRegistry`, wired at all three of its
+call sites (`OrchestratorWorkbench.tsx`, `MultiAgentPlanner.tsx`,
+`workbench/TaskSessionPanel.tsx`). `backend/data/tools/` follows the same gitignore pattern as
+`backend/data/projects/`/`backend/data/rag/` - a tracked `.gitkeep`, everything else runtime state.
+
+**Path visibility**: `ToolRegistry.tsx` previously rendered the bare `executable` name with
+`resolvedPath` only in a hover tooltip. Now renders `resolvedPath ?? executable` directly as visible
+text - a one-line change, but it was one of the task's explicit asks ("show tool name, version,
+path...").
+
+5 new backend tests in `toolManager.test.ts` (unknown-tool-id rejection, a full toggle round trip
+through `requestExecution`'s `ExecToolDisabledError`, override re-application across a simulated
+restart, no-op on a missing overrides file, and malformed-JSON tolerance) - added a `node:fs/promises`
+mock alongside the existing `projectStore.js` mock so these don't touch the real filesystem. 1 new
+frontend test in `useTools.test.ts` covering `toggleTool`'s backend call and state reconciliation.
+276 backend / 215 frontend tests total, both `tsc` checks and `oxlint` clean.
+
+**Verified live**: `GET /api/tools` shows real detected versions (`GNU bash, version 5.3.15...`,
+`curl 8.21.0...`, `Nmap version 7.99...`) and resolved paths for every available tool. `PATCH
+/api/tools/nmap {"enabled":false}` flipped it, `backend/data/tools/overrides.json` picked up the
+change, and a follow-up `GET /api/tools` reflected it - toggled back and deleted the test override
+file afterward so no stray state was left behind. In the browser: clicked the Power toggle on Bash
+in the Workbench's Tool Registry panel - row dimmed, "disabled" pill appeared, toggled back cleanly.
+Opened the Code Assistant agent's editor, switched to "Select specific tools" - all 6 populated
+categories (Recon 0/2, OS 0/8, Web 0/4, Network 0/4, Fuzzing 0/1, Analysis 0/1) rendered with correct
+per-category tool membership and counts.
+
+### What's next
+
+Tasks 2-5 from the same TODO.md audit, in order, one at a time: Task 2 (attach an `agentId` to
+`ExecutionRecord` so the Tool Registry/Execution History views can show which agent triggered a
+given execution - small, well-scoped), then the substantially larger Tasks 3 (Mission/scope system),
+4 (richer Findings/Evidence fields), and 5 (automatic Mission Controller planning + live graph UI),
+each likely warranting its own scoping discussion before implementation given their size.
+
+## Execution records now carry an agentId
+
+Task 2 of the same TODO.md audit. The Orchestrator's tool-calling loop itself was already fully
+built (analyze → select tool → generate args → confirm → execute → analyze result → continue - see
+"Orchestrator" above) and never bypassed human confirmation; the one real gap the audit found was
+that `ExecutionRecord` had no link back to which agent requested it, so the flat, project-wide Tool
+Registry/Execution History views (which blend every agent's - and every manual, agent-less -
+execution together) couldn't show it, even though a single task session's own view already made the
+agent obvious from context.
+
+**Threading**: `ToolRequestBody.agentId?: string` (new, optional) → `ExecutionRecord.agentId?: string`
+(new, optional) - both undefined for a manual request with no agent involved. The only real producer
+is `orchestrator.ts#advance`, which already had `task.agentId` in scope at its one `requestExecution`
+call site and now passes it straight through. `routes/tools.ts`'s `POST /request` validates it as an
+optional string for symmetry (nothing currently sends it over HTTP directly - the Orchestrator calls
+`requestExecution` in-process - but the route's contract should still describe the full shape
+faithfully rather than silently stripping a field a caller might reasonably send).
+
+**Display**: `ExecutionHistoryPanel.tsx` gained an `agents: AgentWithStatus[]` prop and the same
+`agentName(agents, id)` resolve-or-fall-back-to-raw-id pattern `OrchestratorWorkbench.tsx`/
+`MultiAgentPlanner.tsx` already each have their own copy of (not extracted to a shared helper - three
+near-identical four-line functions didn't seem worth a new shared module for). A resolved name
+renders as a small badge next to the tool id in each history row, omitted entirely when
+`agentId` is absent rather than showing an empty or "manual" placeholder - keeps the common case
+(this app runs almost everything through an agent) uncluttered. Also folded into the row's search
+matching, so typing an agent's name filters the list the same way searching a tool id or command
+output already did. Left `ToolRegistry.tsx`'s "last execution" pill alone - the audit only flagged
+the Execution History view specifically, and the registry's per-tool pill is a much smaller, more
+incidental display.
+
+**Deliberately not touched**: `ExecutionConsole.tsx` (used both by `ExecutionHistoryPanel`'s expanded
+row and by `OrchestratorTaskView.tsx`'s live/pending-confirmation card) - the latter already shows
+the agent via the task session's own header, so adding it a second time inside the console itself
+would be redundant there; threading an optional label through would have meant a prop that's
+meaningful in one caller and dead in the other.
+
+2 new backend tests in `toolManager.test.ts` (agentId carried through end-to-end for an agent-driven
+request, undefined for a manual one) and 2 existing `orchestrator.test.ts` assertions updated (they
+asserted the exact object passed to the now-mocked `requestExecution`, which gained the new field).
+No new frontend test file - `ExecutionHistoryPanel.tsx`/`ToolRegistry.tsx` have no dedicated test
+suite yet (verified by hand instead, see below), consistent with how they were before this pass.
+
+**Verified live**: `POST /api/tools/request` with `agentId: "recon-agent"` in the body round-tripped
+the field through `GET /api/tools/executions` unchanged (then rejected the test execution via `POST
+.../reject` to avoid leaving stray state). In the browser, the Workbench's Execution History panel
+showed a "Recon Agent" badge on that row and no badge at all on an older manual `list_directory`
+execution directly below it.
+
+## Bug Bounty Mission Workspace (Task 3)
+
+The largest of the five TODO.md audit tasks - big enough to scope explicitly with the user before
+starting rather than guess. Four design forks were genuinely open-ended (not just implementation
+detail), so asked directly: (1) keep "Project" as the term everywhere vs. rename to "Mission"
+throughout the codebase, (2) how strictly to enforce scope given tool arguments have no structured
+"target" concept, (3) build Assets as a new backend entity vs. derive it from existing Findings
+data, (4) same question for Activity. User picked the lower-churn option each time: keep "Project",
+best-effort-block-plus-warn, derive both Assets and Activity from existing data. All four shaped
+the implementation below directly.
+
+### Structured mission fields stay on Project, not a new entity
+
+`types/project.ts`'s `Project` gained six new optional fields - `description`, `scope: string[]`,
+`outOfScope: string[]`, `rules`, `startDate`, `status: MissionStatus` (`"planning" | "active" |
+"paused" | "completed"`) - alongside the original `id/name/notes/createdAt`. All optional so every
+existing `project.json` on disk keeps working unmodified; `projectManager.ts#createProject` gained
+a third optional `mission` parameter, `updateProject`'s patch type widened to accept any of them.
+`routes/projects.ts` validates each field independently (array-of-strings for scope/outOfScope, one
+of the four status literals, etc.) on both POST and PATCH, sharing one `validateMissionFields`
+helper so the two routes can't drift.
+
+**Frontend**: no new top-level nav view or "Mission" screen - deliberately, given the terminology
+answer above. Instead, a new `MissionEditor.tsx` (`Sheet`-based, same pattern as `AgentEditor.tsx`)
+opened from a new Edit (pencil) affordance on each `ProjectPanel` card, wired through the
+already-existing-but-previously-unused `useProjects.ts#update()` path (audited at the start of this
+task and found to have zero real callers - every consumer only ever created/deleted projects, never
+edited one). Quick create (name + notes) stays exactly as it was in `ProjectPanel` itself;
+`MissionEditor` is edit-only, so a mission doesn't need every field filled in before it even has an
+id to key findings/executions/tasks against. Scope/outOfScope are edited as one-target-per-line
+textareas rather than a tag-input widget - simpler to build, and the values are meant to be pasted
+in bulk from a program's scope page anyway. `startDate` round-trips through a native `<input
+type="date">` via local-timezone (not UTC) date-string conversion, since a naive `toISOString()`
+slice can shift the displayed date by a day depending on the user's timezone offset.
+
+### Scope enforcement is best-effort by design, not a gap to "finish" later
+
+The core problem, confirmed by research before implementation: a `ToolRequestBody.arguments` is an
+opaque `string[]` - `nmap -sV 10.0.0.5` and `bash -c "curl https://x"` carry no metadata saying
+which token is "the target". Only Scan Profiles (`ScanRun.target`) have an explicit target field.
+Given that, and the user's explicit choice of "best-effort block + always-visible warning" over
+either "warn-only, never block" or "only enforce where a real target field exists":
+
+New `services/scopeMatcher.ts`, three layers:
+- `extractTargets(args)` - regex-pulls URL/IPv4/domain-looking tokens out of `args.join(" ")`.
+  Domain matches are filtered through a curated ~70-entry common-TLD allowlist
+  (`COMMON_TLDS`) rather than accepting any `word.word` pattern - an early version without this
+  filter matched `process.stdout.write(...)` and `config.yaml`/`app.py` as "domains", which would
+  have wrongly blocked completely ordinary bash/python one-liners the moment any scope was
+  configured. Under-matching here just degrades a real target to the "unknown" (warn-only) verdict,
+  never to a silent skip, so erring toward a smaller TLD list is the safe direction.
+- `isInScope(target, list)` - matches an exact domain/IP, a subdomain against its bare parent
+  domain, a `*.example.com` wildcard, an IP inside a CIDR range, or a URL entry by hostname.
+- `checkScope(scope, outOfScope, args)` - the decision: no scope configured at all → always
+  `no_restriction`; scope configured but `extractTargets` found nothing → `unknown`; every found
+  target passes → `in_scope`; any found target is excluded by `outOfScope` or fails a non-empty
+  `scope` allowlist → `out_of_scope` (`outOfScope` checked first, so it can carve out a subdomain
+  from a broader wildcard `scope` entry).
+
+Wired into the one real chokepoint, `toolManager.ts#requestExecution` (after tool/argument
+validation, before the record is created): `out_of_scope` throws a new `OutOfScopeError` (mapped to
+403/`OUT_OF_SCOPE`), rejecting the request before it's even parked as `pending_confirmation`;
+`unknown` doesn't block anything, but sets a new `ExecutionRecord.scopeWarning` string, surfaced as
+an amber banner in `ExecutionConsole.tsx` (both the live pending-confirmation card in
+`OrchestratorTaskView.tsx` and `ExecutionHistoryPanel.tsx`'s expanded row) so the human approving it
+sees "scope wasn't actually checked here" rather than assuming a silent pass meant "checked and
+clear". The `getProject(projectId)` lookup itself is wrapped in `.catch(() => undefined)` -
+scope-checking is defense-in-depth, not something that should ever be capable of taking down tool
+execution if a project lookup fails for an unrelated reason.
+
+**Scan Profiles get real enforcement for free, no separate wiring**: `scanRunner.ts` already routes
+every step through the same `requestExecution`, with the target substituted directly into
+`arguments` as a literal token (`substituteTarget`) - so `extractTargets` reliably finds it (it's
+never a freeform code string), meaning a scan against an out-of-scope target hits the same
+`out_of_scope` block deterministically, no `unknown` case possible. Considered adding a second,
+Scan-Profile-specific enforcement path directly against `ScanRun.target` for a "more definitive"
+check, but it would have been redundant - the shared path already gets it right, and
+`scanRunner.ts`'s existing per-step try/catch around `requestExecution` already turns any thrown
+error (including a new `OutOfScopeError`) into a normal failed-step outcome with zero new code.
+
+### Mission context injection
+
+`orchestrator.ts#buildToolsPreamble` already had `projectId` in scope (it builds the
+`query_findings`/`lookup_cves` tool descriptions from it) - became `async`, fetches the project via
+`projectManager.ts#getProject`, and prepends a `Mission: <name> (status: ...)` block with
+whichever of description/scope/outOfScope/rules are actually set, omitted entirely for a project
+with none configured (avoids preamble noise on the common case). Explicitly tells the agent
+"Tool executions against a target outside this scope are automatically blocked" - the text itself
+isn't the enforcement (that's `scopeMatcher.ts`/`toolManager.ts` above), just makes the agent aware
+upfront instead of discovering it via a rejected tool call. The one call site (`collectAgentReply`)
+already awaited everything around it, so making this one function async was a fully contained
+change. `orchestrator.test.ts` needed a new `vi.mock("./projectManager.js", ...)` (defaulting
+`getProject` to resolve `undefined`, matching pre-change behavior) since its fixture project ids
+like `"proj-1"` aren't UUID-shaped and would otherwise throw through the real
+`projectStore.ts#projectDir`'s validation - same reasoning as `toolManager.test.ts`'s existing
+`projectStore.js` mock.
+
+### Assets and Activity are views, not new stores
+
+Both delivered as pure client-side derivations over data that already existed, per the user's
+choice:
+
+- `AssetsView.tsx` regroups a project's already-fetched `Finding[]` by type into the categories the
+  task asked for (Domains/Subdomains/Ports/Technologies/APIs/Endpoints), deduplicated by each
+  finding's canonical `value` with an occurrence count. No dedicated `ip` `FindingType` was added
+  (the original plan considered one, see TODO.md) - none of the existing parsers would ever
+  populate it without further parser changes, which was out of scope for this pass, so it would
+  have been a type that's valid but permanently empty. Instead, IP addresses are recovered from any
+  finding whose `target` field already happens to be IPv4-shaped (every port/service finding from
+  an IP-based nmap scan satisfies this for free).
+- `ActivityFeed.tsx` + `hooks/useActivity.ts` merge a project's tool executions
+  (`GET /api/tools/executions`) and Orchestrator task transcripts (`GET /api/orchestrator/tasks` -
+  already existed as `services/orchestratorApi.ts#fetchTasks`, just had zero UI consumers before
+  this) into one chronological feed, each row resolving its `agentId` to a name via the same
+  `agentName(agents, id)` lookup pattern used elsewhere (`OrchestratorWorkbench.tsx`,
+  `ExecutionHistoryPanel.tsx`).
+
+Both slot into `FindingsView.tsx` as two more entries in its existing `VIEW_MODES` tab strip
+(Table/Timeline/Graph/**Assets**/**Activity**/Reports) rather than a new nav item or dedicated
+"Mission" screen - consistent with the terminology decision to not restructure the app around a
+new concept.
+
+10 new frontend tests across `AssetsView.test.tsx` (grouping, dedup-with-count, IP derivation,
+empty state, non-asset-type findings ignored) and `ActivityFeed.test.tsx` + `useActivity.test.ts`
+(merge ordering, agent-name resolution, error/loading states). 23 new `scopeMatcher.test.ts` tests
+(including the code-identifier/filename false-positive regression case), 6 new
+`toolManager.test.ts` scope-enforcement cases, 3 new `orchestrator.test.ts` mission-context cases,
+several new `projectManager.test.ts` mission-field cases, and a new `MissionEditor.test.tsx` (8
+cases covering pre-fill, list-splitting, date conversion, and save/error states). 314 backend / 240
+frontend tests total, both `tsc` checks and `oxlint` clean throughout.
+
+**Verified live**: opened the Mission editor on a real project (`https://www.showpad.com/`), set a
+description, status "active", and scope (`showpad.com`, `*.showpad.com`) - saved successfully, the
+project card immediately reflected the new "active" status pill. Confirmed via direct API calls
+against that same now-scoped project: `POST /api/tools/request` for `dig evil.com` returned 403
+`OUT_OF_SCOPE`, the identical request for `dig showpad.com` succeeded normally (cleaned up via
+reject afterward). In the browser, the Findings view's new Assets tab correctly showed "No assets
+discovered yet" for a project whose only findings are `type: "information"` (whois metadata, not an
+asset-eligible type) - and the Activity tab rendered a real merged, chronologically-sorted feed of
+that project's actual execution/task history with agent names resolved throughout.
+
+### What's next
+
+Tasks 4 (richer Findings/Evidence fields) and 5 (automatic Mission Controller planning + live graph
+UI) remain, in order, one at a time. Task 5 in particular now has more to build on than before -
+`Project.scope`/`Assets`/`Activity` give it real primitives ("update the asset inventory",
+"scope-aware") that didn't exist when it was originally audited as ~10% done.
+
+## Findings & Evidence System (Task 4)
+
+Task 4 of the same TODO.md audit. Pre-implementation research turned up one thing the earlier
+audit had undersold: agents could already *read* findings (`query_findings`, read-only) but had no
+way to *create* one - the task's actual headline sentence, "Agents must be able to create findings
+instead of only writing text," wasn't addressed by anything already in the codebase. That became
+the centerpiece of this pass, alongside the requested new fields, status vocabulary, evidence
+model, and dashboard filters.
+
+### Status vocabulary: renamed wholesale, migrated automatically
+
+`FindingStatus` went from a mechanical `discovered`/`updated`/`verified`/`dismissed` (tracking
+"has this been re-observed" more than any real triage state) to the task's actual bug-bounty
+vocabulary: `potential`/`investigating`/`confirmed`/`false_positive`/`reported`/`duplicate`.
+Chose a full rename over layering the new values alongside the old ones (same call as Task 1's
+`ExecToolCategory` rework) - a mixed vocabulary would have been more confusing long-term than a
+one-time migration.
+
+The migration itself (`findingsManager.ts#migrateStatus`/`migrateFinding`) runs on every finding
+*and every history entry* loaded from disk (`loadFindingsFromDisk`), not as a one-off script:
+`discovered`/`updated` → `potential`, `verified` → `confirmed`, `dismissed` → `false_positive`.
+It's idempotent (a value already in the new vocabulary passes through unchanged), so re-running it
+on every startup is free and there's no "have we migrated yet" flag to track or get out of sync.
+The re-detection logic in `upsertFinding` changed to match: only a `"potential"` finding advances
+on re-detection (still logging a history entry either way, so "this was re-observed" stays visible
+in the Timeline even when the status itself doesn't move) - anything a human/agent has explicitly
+triaged past `potential` stays put across a re-scan, same intent as the old "preserve verified/
+dismissed" rule, just against the new vocabulary.
+
+### Evidence: string → typed array, migrated the same way
+
+`Finding.evidence` changed from a single string (repeatedly concatenated with `\n---\n` and capped
+at a raw character length on re-detection - the old `EVIDENCE_MAX_LEN`) to `EvidenceItem[]`, each
+tagged `http_request`/`http_response`/`terminal_output`/`tool_result`/`agent_reasoning`/`note` with
+its own `content`+`createdAt`. Capped at 20 items now (`EVIDENCE_MAX_ITEMS`), oldest dropped first,
+deduplicated by exact content match (`pushEvidence`) rather than the old substring-containment
+check. Same migration mechanism as status: a finding loaded from disk with a legacy plain-string
+`evidence` field gets wrapped into a single `note`-typed item
+(`findingsManager.ts#migrateFinding`).
+
+**Deliberately not built**: screenshot/file attachments, despite being named in the task
+("Screenshots, Files"). Every other requested evidence type is text - HTTP requests/responses,
+terminal output, tool results, agent reasoning - and fits the existing JSON-over-HTTP,
+no-file-storage shape of everything else in 8Rack. Binary attachments would need a real upload
+endpoint and a storage directory (a new, separate feature, not a natural extension of
+`EvidenceItem`), so this was scoped out explicitly rather than half-built. `ParsedFinding`/
+`FindingCreateInput` still take `evidence?: string` (not the full item shape) at their input
+boundary - callers (parsers, the manual creation route, the new `create_finding` pseudo-tool) just
+provide raw text, and `findingsManager.ts` is the only place that wraps it into a typed
+`EvidenceItem`, which kept every parser file untouched.
+
+### New fields: parameter, impact, reproductionSteps, executionIds, relatedAgents
+
+`parameter`/`impact`/`reproductionSteps` are plain optional strings on `Finding`, threaded through
+`ParsedFinding`/`FindingCreateInput`/`FindingPatchInput` the same way `metadata`/`tags` already
+were - editable in `FindingDetails.tsx`'s new "Details" form (not gated behind an edit-mode toggle,
+just three always-visible fields with a "Save details" button, enabled only when something actually
+changed).
+
+`executionIds: string[]` closes the "every finding should link back to the exact execution... that
+produced it" ask - `toolManager.ts#requestExecution`'s call into `ingestExecution` already had the
+`ExecutionRecord.id` in hand; it's now threaded through `upsertFinding`'s new `opts.executionId` and
+appended (deduplicated) on every ingestion, including re-detections.
+
+`relatedAgents: string[]` is stamped by the new `createAgentFinding` path (see below) and
+accumulates across re-detection by a *different* agent (e.g. a Recon Agent's initial finding later
+re-confirmed by a Validator agent both end up listed) - a manual or scanner-sourced finding never
+gets an agent added to this array purely by being queried or viewed; only actually *creating*
+touches it, keeping the field meaningful rather than "every agent that ever looked at this."
+
+### create_finding: closing the actual headline gap
+
+A fourth pseudo-tool alongside `search_knowledge_base`/`query_findings`/`lookup_cves` in
+`orchestrator.ts`, same structural pattern (parsed out of the model's plain-text tool-request
+JSON, a tool-result message pushed back into the conversation, `advance()` recurses). Two things
+make it different from the other three:
+
+- **It's always listed**, not conditional on existing data (the other three only appear once
+  there's something to search/query/look up) - there's no precondition for "record a finding."
+- **It genuinely mutates project state** rather than being read-only, but still skips human
+  confirmation - the same reasoning that already applied to a human manually logging a finding via
+  `POST /api/projects/:id/findings` with no approval gate: it records data, it doesn't run a
+  command or touch the filesystem/network. The bar for requiring confirmation in this codebase has
+  always been "does this execute something," not "does this write something."
+
+**Argument encoding**: every existing pseudo-tool's `arguments` is a flat `string[]`, fine for
+zero or one plain value (`query_findings`'s optional type filter, `lookup_cves`'s product name).
+`create_finding` needs many fields, several optional - flattening them positionally would be
+fragile for a small local model to get right and impossible to extend. Instead, `arguments` is
+still exactly one element, but that element is a JSON object *encoded as a string* -
+`{"tool": "create_finding", "arguments": ["{\"type\":\"potential_vulnerability\",...}"]}`. This
+keeps the outer tool-request shape identical to every other tool call (so `parseToolRequest` needed
+zero changes), while giving the finding payload real structure.
+`parseCreateFindingArgs`/`runCreateFinding` validate every field independently and return a specific
+error string per failure (missing/invalid `type`, an attempt to set `confirmed_vulnerability`
+directly, malformed JSON, etc.), fed back to the agent as a failed tool result so it can retry with
+a corrected payload - same recover-and-retry loop `InvalidToolArgumentsError` already gives a real
+ExecTool call, just implemented locally since this isn't a real ExecTool.
+
+### Dashboard filters
+
+`FindingsView.tsx` gained two filter dropdowns: Confidence (preset ≥50/70/90% thresholds rather
+than a free-form number input - simpler UI, and the presets cover the realistic triage thresholds)
+and Agent (only rendered when the project has at least one agent-touched finding, matching either
+`tool` for an agent-sourced finding or membership in `relatedAgents` - distinct from the existing
+Tool filter, which mixes real tool ids and agent ids together since `Finding.tool` doubles for
+both depending on `source`).
+
+`FindingsTable.tsx` also gained a Status column (there wasn't one at all before this pass - the
+only prior status-driven behavior was dimming a `dismissed` row) - now dims `false_positive` and
+`duplicate` rows, and shows a proper status pill using the same `STATUS_TONE`/`STATUS_VERB` maps
+`FindingsTimeline.tsx`/`FindingDetails.tsx` already exported.
+
+23 new backend tests (`findingsManager.test.ts`: status/evidence migration, `executionIds`
+accumulation, evidence dedup/cap, `createAgentFinding`, the two new `listFindings` filters;
+`orchestrator.test.ts`: `create_finding` preamble/success/validation-error/confirmed_vulnerability-
+rejection/tool-call-cap cases). New `FindingDetails.test.tsx` (12 cases - the component had no
+prior test coverage, and the amount of new interactive logic in this pass - status buttons, the
+Details form, evidence rendering - was substantial enough to be worth a dedicated file, matching
+how `MissionEditor.test.tsx` was added in Task 3). `FindingsTable.test.tsx`/
+`FindingsTimeline.test.tsx`/`AssetsView.test.tsx`/`useFindings.test.ts`/`reportManager.test.ts`
+fixtures all updated for the new status vocabulary and evidence shape. 328 backend / 252 frontend
+tests total, both `tsc` checks and `oxlint` clean.
+
+**Verified live** against the real `showpad.com` project (already had real findings from earlier
+sessions, migrated under the old vocabulary): confirmed via direct API call that an existing
+finding's status read back as `"confirmed"` (was `"verified"`) and its evidence as a `note`-typed
+`EvidenceItem` array (was a plain string) - the migration ran automatically on the dev server's
+next restart, no manual step. Created a finding through the manual API with
+parameter/impact/reproductionSteps/evidence set and confirmed every field round-tripped correctly,
+then deleted it. In the browser: the Findings table showed the new Status column with correct
+pills (`Confirmed`/`Potential`) and the "Any confidence" filter; opened a finding's details and
+confirmed all six status buttons render with the current one highlighted and disabled, the Details
+form pre-fills correctly, and the Evidence section shows the migrated item with its type label and
+timestamp instead of one flat preformatted block.
+
+### What's next
+
+Task 5 (autonomous Mission Controller + live graph UI) remains - the last and largest of the five.
+`Project.scope`, the Assets/Activity views, and now `Finding.executionIds`/`relatedAgents` give it
+considerably more to build on than when it was first audited as ~10% done.

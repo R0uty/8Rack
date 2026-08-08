@@ -14,20 +14,24 @@ interface TimelineEvent extends FindingHistoryEntry {
 }
 
 export const STATUS_TONE: Record<FindingStatus, Tone> = {
-  discovered: "info",
-  updated: "neutral",
-  verified: "primary",
-  dismissed: "critical",
+  potential: "info",
+  investigating: "warning",
+  confirmed: "primary",
+  false_positive: "neutral",
+  reported: "primary",
+  duplicate: "neutral",
 };
 
 export const STATUS_VERB: Record<FindingStatus, string> = {
-  discovered: "Discovered",
-  updated: "Updated",
-  verified: "Verified",
-  dismissed: "Dismissed",
+  potential: "Potential",
+  investigating: "Investigating",
+  confirmed: "Confirmed",
+  false_positive: "False Positive",
+  reported: "Reported",
+  duplicate: "Duplicate",
 };
 
-const STATUSES: FindingStatus[] = ["discovered", "updated", "verified", "dismissed"];
+const STATUSES: FindingStatus[] = ["potential", "investigating", "confirmed", "false_positive", "reported", "duplicate"];
 
 function dayLabel(ms: number): string {
   const date = new Date(ms);

@@ -20,8 +20,9 @@ import {
   resumeTask,
 } from "./orchestrator.js";
 import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragIndex.js";
-import { createFinding } from "./findingsManager.js";
+import { createFinding, getProjectFindings } from "./findingsManager.js";
 import { queryNvd } from "./cveLookup.js";
+import { getProject } from "./projectManager.js";
 import type { AgentWithStatus } from "../types/agent.js";
 import type { ChatResponseChunk } from "../types/ollama.js";
 import type { ExecTool, ExecutionRecord } from "../types/execTool.js";
@@ -41,6 +42,7 @@ vi.mock("./projectStore.js", () => ({
   readProjectJson: vi.fn(async () => []),
   writeProjectJson: vi.fn(async () => undefined),
 }));
+vi.mock("./projectManager.js", () => ({ getProject: vi.fn(async () => undefined) }));
 vi.mock("./ragIndex.js", () => ({ getStatus: vi.fn(), search: vi.fn() }));
 vi.mock("./cveLookup.js", () => ({ queryNvd: vi.fn() }));
 
@@ -53,6 +55,7 @@ const mockCancelExecution = vi.mocked(cancelExecution);
 const mockRejectExecution = vi.mocked(rejectExecution);
 const mockGetRagStatus = vi.mocked(getRagStatus);
 const mockSearchKnowledgeBase = vi.mocked(searchKnowledgeBase);
+const mockGetProject = vi.mocked(getProject);
 const mockQueryNvd = vi.mocked(queryNvd);
 
 const fixtureAgent: AgentWithStatus = {
@@ -219,7 +222,12 @@ describe("createTask", () => {
 
     const task = await createTask("test-agent", "List files", "proj-1");
 
-    expect(mockRequestExecution).toHaveBeenCalledWith({ tool: "bash", arguments: ["-c", "ls"], projectId: "proj-1" });
+    expect(mockRequestExecution).toHaveBeenCalledWith({
+      tool: "bash",
+      arguments: ["-c", "ls"],
+      projectId: "proj-1",
+      agentId: "test-agent",
+    });
     expect(task.status).toBe("waiting_confirmation");
     expect(task.pendingExecutionId).toBe(record.id);
     expect(task.toolExecutionIds).toContain(record.id);
@@ -267,6 +275,51 @@ describe("createTask", () => {
     expect(request.toolsPreamble).toContain("nmap");
   });
 
+  it("prepends mission context to the tools preamble when the project has scope/rules/etc configured", async () => {
+    mockListExecTools.mockReturnValue([fixtureExecTool({ id: "dig" })]);
+    mockGetProject.mockResolvedValueOnce({
+      id: "proj-1",
+      name: "Acme Pentest",
+      notes: "",
+      createdAt: 0,
+      description: "External web app assessment",
+      scope: ["example.com", "*.example.com"],
+      outOfScope: ["staging.example.com"],
+      rules: "No automated DoS testing",
+      status: "active",
+    });
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+
+    await createTask("test-agent", "objective", "proj-1");
+
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble).toContain("Mission: Acme Pentest (status: active)");
+    expect(request.toolsPreamble).toContain("Description: External web app assessment");
+    expect(request.toolsPreamble).toContain("Scope (authorized targets): example.com, *.example.com");
+    expect(request.toolsPreamble).toContain("Out of scope (never target these): staging.example.com");
+    expect(request.toolsPreamble).toContain("Rules of engagement: No automated DoS testing");
+  });
+
+  it("omits mission context entirely for a project with no mission fields set", async () => {
+    mockListExecTools.mockReturnValue([fixtureExecTool({ id: "dig" })]);
+    mockGetProject.mockResolvedValueOnce({ id: "proj-1", name: "Plain Project", notes: "", createdAt: 0 });
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+
+    await createTask("test-agent", "objective", "proj-1");
+
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble).not.toContain("Mission:");
+  });
+
+  it("never crashes tool-calling if the project lookup for mission context fails", async () => {
+    mockListExecTools.mockReturnValue([fixtureExecTool({ id: "dig" })]);
+    mockGetProject.mockRejectedValueOnce(new Error("disk error"));
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+
+    const task = await createTask("test-agent", "objective", "proj-1");
+    expect(task.status).toBe("completed");
+  });
+
   it("rejects a tool request outside the agent's execTools allowlist without executing it", async () => {
     mockGetAgent.mockResolvedValue({ ...fixtureAgent, execTools: ["dig"] });
     mockStreamAgentChat.mockImplementation(repliesGenerator(['{"tool": "nmap", "arguments": ["-sV", "example.com"]}']));
@@ -288,7 +341,12 @@ describe("createTask", () => {
 
     const task = await createTask("test-agent", "objective", "proj-1");
 
-    expect(mockRequestExecution).toHaveBeenCalledWith({ tool: "dig", arguments: ["example.com"], projectId: "proj-1" });
+    expect(mockRequestExecution).toHaveBeenCalledWith({
+      tool: "dig",
+      arguments: ["example.com"],
+      projectId: "proj-1",
+      agentId: "test-agent",
+    });
     expect(task.status).toBe("waiting_confirmation");
   });
 
@@ -582,6 +640,107 @@ describe("lookup_cves tool", () => {
     const parsed = JSON.parse(toolMessage!.content);
     expect(parsed.success).toBe(false);
     expect(parsed.message).toContain("rate limit");
+  });
+});
+
+describe("create_finding tool", () => {
+  const validPayload = JSON.stringify({
+    type: "potential_vulnerability",
+    severity: "high",
+    title: "Reflected XSS in search",
+    description: "The q parameter is reflected unescaped.",
+    target: "example.com",
+    value: "/search?q",
+    parameter: "q",
+    impact: "Session hijack via stolen cookies",
+    reproductionSteps: "1. Send a crafted q value\n2. Observe it reflected unescaped",
+    evidence: "raw HTTP exchange",
+  });
+
+  it("is always listed in the preamble, with no precondition", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+    await createTask("test-agent", "objective", "proj-create-finding-preamble");
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble).toContain("create_finding");
+  });
+
+  it("skips confirmation entirely and records a real finding with source 'agent'", async () => {
+    const projectId = "proj-create-finding-1";
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([`{"tool": "create_finding", "arguments": [${JSON.stringify(validPayload)}]}`, "Recorded."]),
+    );
+
+    const task = await createTask("recon-agent", "find bugs", projectId);
+
+    expect(mockRequestExecution).not.toHaveBeenCalled();
+    expect(task.status).toBe("completed");
+    const toolMessage = task.messages.find((m) => m.role === "tool");
+    const parsed = JSON.parse(toolMessage!.content);
+    expect(parsed).toMatchObject({ tool: "create_finding", success: true });
+
+    const [finding] = getProjectFindings(projectId);
+    expect(finding).toMatchObject({
+      type: "potential_vulnerability",
+      severity: "high",
+      title: "Reflected XSS in search",
+      source: "agent",
+      tool: "recon-agent",
+      parameter: "q",
+      impact: "Session hijack via stolen cookies",
+    });
+    expect(finding.relatedAgents).toEqual(["recon-agent"]);
+    expect(finding.evidence).toEqual([{ type: "agent_reasoning", content: "raw HTTP exchange", createdAt: expect.any(Number) }]);
+  });
+
+  it("reports a validation error and recovers instead of crashing on malformed JSON", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "create_finding", "arguments": ["not json"]}', "ok"]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-create-finding-2");
+
+    expect(task.status).toBe("completed");
+    const toolMessage = task.messages.find((m) => m.role === "tool");
+    const parsed = JSON.parse(toolMessage!.content);
+    expect(parsed.success).toBe(false);
+    expect(parsed.message).toContain("not valid JSON");
+  });
+
+  it("rejects an attempt to create a 'confirmed_vulnerability' directly", async () => {
+    const badPayload = JSON.stringify({
+      type: "confirmed_vulnerability",
+      severity: "high",
+      title: "x",
+      description: "d",
+      target: "t",
+      value: "v",
+    });
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([`{"tool": "create_finding", "arguments": [${JSON.stringify(badPayload)}]}`, "ok"]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-create-finding-3");
+    const toolMessage = task.messages.find((m) => m.role === "tool");
+    const parsed = JSON.parse(toolMessage!.content);
+    expect(parsed.success).toBe(false);
+    expect(parsed.message).toContain("confirmed_vulnerability");
+    expect(getProjectFindings("proj-create-finding-3")).toHaveLength(0);
+  });
+
+  it("still counts against the tool-call cap", async () => {
+    mockStreamAgentChat.mockImplementation(async function* () {
+      yield {
+        model: "test-model",
+        created_at: "",
+        message: { role: "assistant", content: `{"tool": "create_finding", "arguments": [${JSON.stringify(validPayload)}]}` },
+        done: true,
+      };
+    });
+
+    const task = await createTask("test-agent", "objective", "proj-create-finding-cap");
+
+    expect(task.status).toBe("max_executions_reached");
+    expect(task.toolCallCount).toBe(env.maxOrchestratorToolCalls);
   });
 });
 

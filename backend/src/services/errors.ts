@@ -119,6 +119,15 @@ export class PrivilegedCommandError extends Error {
   }
 }
 
+export class OutOfScopeError extends Error {
+  constructor(offendingTargets: string[]) {
+    super(
+      `Execution blocked: target(s) outside this mission's configured scope: ${offendingTargets.join(", ")}`,
+    );
+    this.name = "OutOfScopeError";
+  }
+}
+
 export class TaskNotFoundError extends Error {
   constructor(taskId: string) {
     super(`Task "${taskId}" was not found`);

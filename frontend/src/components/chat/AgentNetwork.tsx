@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 import { MessageSquare, Wrench } from "lucide-react";
 import type { AgentWithStatus } from "../../types/agent";
+import type { Project } from "../../types/project";
 import type { SessionMeta } from "../../hooks/useSessions";
 import { iconFor } from "../../lib/icons";
 import { cn } from "../../lib/cn";
@@ -12,6 +13,8 @@ interface AgentNetworkProps {
   /** All open sessions, both kinds - each renders as a small node connected to its parent agent
    * (or to the hub, for a manual/no-agent chat). */
   sessions: SessionMeta[];
+  /** Resolves a project-scoped chat session's projectId to a name for its tooltip - see SessionNode. */
+  projects: Project[];
   statuses: Record<string, Tone>;
   /** Opens/focuses a chat session for the clicked agent - the default "start working with this
    * agent" gesture. */
@@ -34,7 +37,7 @@ const TONE_COLOR: Record<Tone, string> = {
  * for a manual/no-agent chat, to the center hub). New nodes/lines appear the moment a session
  * opens and disappear when it closes - this is a direct visualization of `sessions`, not a
  * separate decorative state. */
-export function AgentNetwork({ agents, sessions, statuses, onSelectAgent, onSelectSession }: AgentNetworkProps) {
+export function AgentNetwork({ agents, sessions, projects, statuses, onSelectAgent, onSelectSession }: AgentNetworkProps) {
   const total = agents.length;
   const manualSessions = sessions.filter((s) => s.agentId === null);
 
@@ -158,6 +161,7 @@ export function AgentNetwork({ agents, sessions, statuses, onSelectAgent, onSele
           <SessionNode
             key={session.id}
             session={session}
+            projects={projects}
             position={sessionNodePosition(i, total, si, agentSessions.length)}
             tone={statuses[session.id] ?? "neutral"}
             color={agent.color}
@@ -170,6 +174,7 @@ export function AgentNetwork({ agents, sessions, statuses, onSelectAgent, onSele
         <SessionNode
           key={session.id}
           session={session}
+          projects={projects}
           position={manualSessionPosition(i)}
           tone={statuses[session.id] ?? "neutral"}
           color="var(--color-muted)"
@@ -182,18 +187,27 @@ export function AgentNetwork({ agents, sessions, statuses, onSelectAgent, onSele
 
 function SessionNode({
   session,
+  projects,
   position,
   tone,
   color,
   onClick,
 }: {
   session: SessionMeta;
+  projects: Project[];
   position: { x: number; y: number };
   tone: Tone;
   color: string;
   onClick: () => void;
 }) {
   const Icon = session.kind === "task" ? Wrench : MessageSquare;
+  const project = session.projectId ? projects.find((p) => p.id === session.projectId) : undefined;
+  const title =
+    session.kind === "task"
+      ? (session.initialObjective ?? "Task session")
+      : project
+        ? `Chat session · ${project.name}`
+        : "Chat session";
   return (
     <motion.button
       type="button"
@@ -205,7 +219,7 @@ function SessionNode({
       whileHover={{ scale: 1.15 }}
       style={{ left: `${position.x}%`, top: `${position.y}%` }}
       className="absolute flex -translate-x-1/2 -translate-y-1/2 items-center justify-center"
-      title={session.kind === "task" ? (session.initialObjective ?? "Task session") : "Chat session"}
+      title={title}
     >
       <span
         className="flex h-6 w-6 items-center justify-center rounded-full border backdrop-blur-xl"

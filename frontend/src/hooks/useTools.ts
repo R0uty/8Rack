@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchExecutions, fetchTools } from "../services/toolsApi";
+import { fetchExecutions, fetchTools, setToolEnabled } from "../services/toolsApi";
 import type { ExecToolWithStatus, ExecutionRecord } from "../types/execTool";
 
 /** Execution history is project-scoped; pass null when no project is selected yet (tools list
@@ -31,5 +31,12 @@ export function useTools(projectId: string | null) {
     refresh();
   }, [refresh]);
 
-  return { tools, executions, loading, error, refresh };
+  /** Toggles a tool's enabled state on the backend, then reconciles local state from its response
+   * (rather than assuming the optimistic value) so availability/version stay in sync too. */
+  const toggleTool = useCallback(async (toolId: string, enabled: boolean) => {
+    const updated = await setToolEnabled(toolId, enabled);
+    setTools((prev) => prev.map((t) => (t.id === toolId ? updated : t)));
+  }, []);
+
+  return { tools, executions, loading, error, refresh, toggleTool };
 }

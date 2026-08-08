@@ -67,6 +67,32 @@ describe("createProject / getProject / listProjects", () => {
   it("returns an empty list when no projects exist", async () => {
     expect(await listProjects()).toEqual([]);
   });
+
+  it("persists mission fields passed at creation time", async () => {
+    const project = await createProject("Recon Beta", "", {
+      description: "Authorized external pentest",
+      scope: ["example.com", "*.example.com"],
+      outOfScope: ["staging.example.com"],
+      rules: "No DoS testing",
+      startDate: 1700000000000,
+      status: "active",
+    });
+
+    expect(project.description).toBe("Authorized external pentest");
+    expect(project.scope).toEqual(["example.com", "*.example.com"]);
+    expect(project.outOfScope).toEqual(["staging.example.com"]);
+    expect(project.rules).toBe("No DoS testing");
+    expect(project.startDate).toBe(1700000000000);
+    expect(project.status).toBe("active");
+    expect(await getProject(project.id)).toEqual(project);
+  });
+
+  it("defaults to no mission fields when none are passed", async () => {
+    const project = await createProject("Plain", "");
+    expect(project.description).toBeUndefined();
+    expect(project.scope).toBeUndefined();
+    expect(project.status).toBeUndefined();
+  });
 });
 
 describe("updateProject", () => {
@@ -82,6 +108,29 @@ describe("updateProject", () => {
 
   it("throws ProjectNotFoundError for a well-formed but unknown id", async () => {
     await expect(updateProject(VALID_UNKNOWN_ID, { name: "x" })).rejects.toThrow(ProjectNotFoundError);
+  });
+
+  it("sets mission fields on an existing project without touching name/notes", async () => {
+    const project = await createProject("Mission Target", "some notes");
+
+    const updated = await updateProject(project.id, {
+      scope: ["10.0.0.0/24"],
+      status: "planning",
+    });
+
+    expect(updated.name).toBe("Mission Target");
+    expect(updated.notes).toBe("some notes");
+    expect(updated.scope).toEqual(["10.0.0.0/24"]);
+    expect(updated.status).toBe("planning");
+  });
+
+  it("leaves an unset mission field untouched when the patch omits it", async () => {
+    const project = await createProject("Two Step", "", { description: "first pass" });
+
+    const updated = await updateProject(project.id, { status: "active" });
+
+    expect(updated.description).toBe("first pass");
+    expect(updated.status).toBe("active");
   });
 });
 

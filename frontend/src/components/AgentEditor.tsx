@@ -70,11 +70,13 @@ function formFromAgent(agent: AgentWithStatus): FormState {
 }
 
 const CATEGORY_LABEL: Record<ExecToolCategory, string> = {
-  filesystem: "Filesystem",
-  network: "Network",
   recon: "Recon",
-  exec: "Execution",
-  vcs: "Version Control",
+  network: "Network",
+  web: "Web",
+  fuzzing: "Fuzzing",
+  analysis: "Analysis",
+  os: "OS",
+  reporting: "Reporting",
 };
 
 function Field({ label, children }: { label: string; children: ReactNode }) {

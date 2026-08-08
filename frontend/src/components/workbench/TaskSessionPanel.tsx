@@ -23,7 +23,7 @@ interface TaskSessionPanelProps {
 export function TaskSessionPanel({ session, agentName, reportStatus, markStarted }: TaskSessionPanelProps) {
   const { task, liveOutput, streamingText, busy, error, start, approve, reject, continueTask, provideGuidance, cancel } =
     useOrchestratorTask();
-  const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools } = useTools(
+  const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools, toggleTool } = useTools(
     session.projectId ?? null,
   );
   // Guards the auto-start effect within this mount's lifetime (StrictMode double-invokes effects
@@ -93,6 +93,7 @@ export function TaskSessionPanel({ session, agentName, reportStatus, markStarted
           loading={toolsLoading}
           error={toolsError}
           onRefresh={refreshTools}
+          onToggleEnabled={toggleTool}
         />
       </aside>
     </div>

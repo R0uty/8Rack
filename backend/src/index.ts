@@ -15,7 +15,12 @@ import { projectScansRouter, scannersRouter } from "./routes/scanners.js";
 import { projectReportsRouter } from "./routes/reports.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { loadAgents } from "./services/agentManager.js";
-import { listExecToolsWithStatus, loadExecutionsFromDisk, registerExecTool } from "./services/toolManager.js";
+import {
+  listExecToolsWithStatus,
+  loadExecutionsFromDisk,
+  loadToolOverridesFromDisk,
+  registerExecTool,
+} from "./services/toolManager.js";
 import { loadTasksFromDisk } from "./services/orchestrator.js";
 import { loadPlansFromDisk } from "./services/multiAgentOrchestrator.js";
 import { loadFindingsFromDisk } from "./services/findingsManager.js";
@@ -71,6 +76,7 @@ app.listen(env.port, env.host, async () => {
     console.log(`Loaded ${agents.length} agent(s): ${online} online, ${agents.length - online} offline`);
 
     await mkdir(env.workspaceRoot, { recursive: true });
+    await loadToolOverridesFromDisk();
     const tools = listExecToolsWithStatus();
     const available = tools.filter((t) => t.availability === "available").length;
     console.log(

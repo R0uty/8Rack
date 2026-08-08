@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, ShieldAlert, Sparkles, XCircle } from "lucide-react";
+import { CheckCircle2, ShieldAlert, Sparkles } from "lucide-react";
 import { STATUS_TONE, STATUS_VERB } from "./FindingsTimeline";
 import { Button, Sheet, StatusDot, StatusPill, type Tone } from "./ui";
 import { streamChat } from "../services/api";
 import { lookupCves } from "../services/findingsApi";
 import { relativeTime } from "../lib/relativeTime";
-import type { Finding, FindingSeverity } from "../types/finding";
+import { cn } from "../lib/cn";
+import type { EvidenceType, Finding, FindingPatchInput, FindingSeverity, FindingStatus } from "../types/finding";
 
 interface FindingDetailsProps {
   finding: Finding | null;
@@ -13,7 +14,7 @@ interface FindingDetailsProps {
    * same target, different finding - without a dedicated backend round-trip. */
   findings: Finding[];
   onClose: () => void;
-  onUpdate: (id: string, patch: { status: Finding["status"] }) => Promise<Finding>;
+  onUpdate: (id: string, patch: FindingPatchInput) => Promise<Finding>;
   onSelectRelated: (finding: Finding) => void;
   /** Called after a successful CVE lookup so newly-created cve findings show up immediately
    * (they'll already surface under "Related Findings" for free, since they share `target`). */
@@ -27,6 +28,20 @@ const SEVERITY_TONE: Record<FindingSeverity, Tone> = {
   high: "critical",
   critical: "critical",
 };
+
+const STATUSES: FindingStatus[] = ["potential", "investigating", "confirmed", "false_positive", "reported", "duplicate"];
+
+const EVIDENCE_TYPE_LABEL: Record<EvidenceType, string> = {
+  http_request: "HTTP Request",
+  http_response: "HTTP Response",
+  terminal_output: "Terminal Output",
+  tool_result: "Tool Result",
+  agent_reasoning: "Agent Reasoning",
+  note: "Note",
+};
+
+const TEXT_INPUT_CLASS =
+  "w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60";
 
 /** The Vulnerability Validator agent's own description ("Reviews findings, eliminates false
  * positives, and estimates severity") is exactly the "AI Explanation" use case, so it's reused
@@ -43,8 +58,9 @@ function buildExplainPrompt(f: Finding): string {
     `Target: ${f.target}`,
     `Tool: ${f.tool}`,
     `Confidence: ${Math.round(f.confidence * 100)}%`,
+    ...(f.parameter ? [`Parameter: ${f.parameter}`] : []),
     "Evidence:",
-    f.evidence || "(none)",
+    f.evidence.length > 0 ? f.evidence.map((e) => `[${e.type}] ${e.content}`).join("\n---\n") : "(none)",
   ].join("\n");
 }
 
@@ -65,23 +81,51 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
   const [checkingCves, setCheckingCves] = useState(false);
   const [cveError, setCveError] = useState<string | null>(null);
   const [cveFoundCount, setCveFoundCount] = useState<number | null>(null);
+  const [parameter, setParameter] = useState("");
+  const [impact, setImpact] = useState("");
+  const [reproductionSteps, setReproductionSteps] = useState("");
+  const [detailsBusy, setDetailsBusy] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
-  // Reset the AI explanation and CVE-lookup result when a different finding is opened, so stale
-  // state from the previous finding doesn't linger.
+  // Reset the AI explanation, CVE-lookup result, and the editable detail fields when a different
+  // finding is opened, so stale state from the previous finding doesn't linger.
   useEffect(() => {
     setExplanation("");
     setExplainError(null);
     setCveError(null);
     setCveFoundCount(null);
-  }, [finding?.id]);
+    setParameter(finding?.parameter ?? "");
+    setImpact(finding?.impact ?? "");
+    setReproductionSteps(finding?.reproductionSteps ?? "");
+    setDetailsError(null);
+  }, [finding?.id, finding?.parameter, finding?.impact, finding?.reproductionSteps]);
 
-  const handleStatus = async (status: Finding["status"]) => {
+  const detailsDirty =
+    !!finding &&
+    (parameter !== (finding.parameter ?? "") ||
+      impact !== (finding.impact ?? "") ||
+      reproductionSteps !== (finding.reproductionSteps ?? ""));
+
+  const handleStatus = async (status: FindingStatus) => {
     if (!finding || busy) return;
     setBusy(true);
     try {
       await onUpdate(finding.id, { status });
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleSaveDetails = async () => {
+    if (!finding || detailsBusy || !detailsDirty) return;
+    setDetailsBusy(true);
+    setDetailsError(null);
+    try {
+      await onUpdate(finding.id, { parameter, impact, reproductionSteps });
+    } catch (err) {
+      setDetailsError(err instanceof Error ? err.message : "Failed to save details");
+    } finally {
+      setDetailsBusy(false);
     }
   };
 
@@ -131,9 +175,7 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
             <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[11px] capitalize text-muted">
               {finding.type.replace(/_/g, " ")}
             </span>
-            <StatusPill tone={finding.status === "verified" ? "primary" : finding.status === "dismissed" ? "neutral" : "info"}>
-              {finding.status}
-            </StatusPill>
+            <StatusPill tone={STATUS_TONE[finding.status]}>{STATUS_VERB[finding.status]}</StatusPill>
           </div>
 
           {finding.description && <p className="mb-4 text-sm text-text">{finding.description}</p>}
@@ -157,13 +199,62 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
             </div>
           )}
 
-          <div className="mb-4 flex gap-2">
-            <Button variant="secondary" size="sm" icon={CheckCircle2} onClick={() => handleStatus("verified")} disabled={busy}>
-              Mark Verified
-            </Button>
-            <Button variant="danger" size="sm" icon={XCircle} onClick={() => handleStatus("dismissed")} disabled={busy}>
-              Dismiss
-            </Button>
+          <div className="mb-4">
+            <span className="mb-1.5 block text-[11px] font-medium text-muted">Status</span>
+            <div className="flex flex-wrap gap-1.5">
+              {STATUSES.map((s) => (
+                <Button
+                  key={s}
+                  variant={finding.status === s ? "primary" : "secondary"}
+                  size="sm"
+                  icon={s === "confirmed" ? CheckCircle2 : undefined}
+                  onClick={() => handleStatus(s)}
+                  disabled={busy || finding.status === s}
+                >
+                  {STATUS_VERB[s]}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <h3 className="mb-1.5 text-xs font-semibold text-muted">Details</h3>
+            <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2 p-2.5">
+              <label className="block">
+                <span className="mb-1 block text-[11px] text-muted">Parameter</span>
+                <input
+                  type="text"
+                  value={parameter}
+                  onChange={(e) => setParameter(e.target.value)}
+                  placeholder="e.g. id, redirect_url"
+                  className={TEXT_INPUT_CLASS}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-[11px] text-muted">Impact</span>
+                <textarea
+                  value={impact}
+                  onChange={(e) => setImpact(e.target.value)}
+                  rows={2}
+                  placeholder="What happens if this is exploited?"
+                  className={cn(TEXT_INPUT_CLASS, "resize-none")}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-[11px] text-muted">Reproduction Steps</span>
+                <textarea
+                  value={reproductionSteps}
+                  onChange={(e) => setReproductionSteps(e.target.value)}
+                  rows={3}
+                  placeholder="1. ...&#10;2. ..."
+                  className={cn(TEXT_INPUT_CLASS, "resize-none")}
+                />
+              </label>
+              <Button variant="secondary" size="sm" onClick={handleSaveDetails} disabled={detailsBusy || !detailsDirty}>
+                {detailsBusy ? "Saving…" : "Save details"}
+              </Button>
+              {detailsError && <p className="text-xs text-critical">{detailsError}</p>}
+            </div>
           </div>
 
           {finding.type === "technology" && (
@@ -195,12 +286,49 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
             </div>
           )}
 
-          {finding.evidence && (
+          {finding.evidence.length > 0 && (
             <div className="mb-4">
-              <h3 className="mb-1.5 text-xs font-semibold text-muted">Evidence / Raw Output</h3>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-surface-2 p-2.5 font-mono text-[11px] text-text">
-                {finding.evidence}
-              </pre>
+              <h3 className="mb-1.5 text-xs font-semibold text-muted">Evidence</h3>
+              <div className="flex flex-col gap-2">
+                {[...finding.evidence].reverse().map((item, i) => (
+                  <div key={i} className="rounded-lg border border-border bg-surface-2 p-2.5">
+                    <div className="mb-1 flex items-center justify-between">
+                      <span className="text-[11px] font-medium text-muted">{EVIDENCE_TYPE_LABEL[item.type]}</span>
+                      <span className="text-[11px] text-muted">{relativeTime(item.createdAt)}</span>
+                    </div>
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-text">
+                      {item.content}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(finding.relatedAgents.length > 0 || finding.executionIds.length > 0) && (
+            <div className="mb-4 grid grid-cols-2 gap-3">
+              {finding.relatedAgents.length > 0 && (
+                <div>
+                  <div className="mb-1 text-[11px] uppercase tracking-wide text-muted">Related Agents</div>
+                  <div className="flex flex-wrap gap-1">
+                    {finding.relatedAgents.map((a) => (
+                      <span key={a} className="rounded bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">
+                        {a}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {finding.executionIds.length > 0 && (
+                <div>
+                  <div className="mb-1 text-[11px] uppercase tracking-wide text-muted">
+                    Related Executions ({finding.executionIds.length})
+                  </div>
+                  <div className="text-[11px] text-muted">
+                    {finding.executionIds.length} tool execution{finding.executionIds.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

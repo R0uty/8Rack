@@ -29,13 +29,30 @@ export function useOrchestratorTask() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Tracks whether the component is currently mounted, so the unmount cleanup below can tell a real
+  // unmount from React StrictMode's dev-only mount->unmount->remount cycle.
+  const mountedRef = useRef(false);
 
   // Closing this session's tab unmounts the owning TaskSessionPanel/ChatTaskPanel for real (see
   // hooks/useSessions.ts#closeSession) - without this, an in-flight start()/approve()/etc. call
   // just kept running orphaned in the background (its state updates landing on a dead component
   // and silently dropped) until the task's own time cap fired, possibly minutes later.
+  //
+  // The abort is deferred a macrotask (not fired synchronously in the cleanup) so it survives
+  // StrictMode: in dev, StrictMode mounts, immediately unmounts, then remounts. A synchronous abort
+  // there would cancel the task start()ed on the first mount - and TaskSessionPanel's start-once
+  // guard (session.started) then blocks a restart, leaving the task stuck on "Starting..." forever.
+  // By deferring, the immediate remount flips mountedRef back to true before the timeout fires, so
+  // only a genuine unmount (no remount) actually reaches the abort.
   useEffect(() => {
-    return () => abortRef.current?.abort();
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const controller = abortRef.current;
+      setTimeout(() => {
+        if (!mountedRef.current) controller?.abort();
+      }, 0);
+    };
   }, []);
 
   const start = useCallback(async (agentId: string, objective: string, projectId: string, model?: string) => {

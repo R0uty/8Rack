@@ -18,11 +18,25 @@ export type FindingType =
 
 export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
 
-export type FindingStatus = "discovered" | "updated" | "verified" | "dismissed";
+export type FindingStatus = "potential" | "investigating" | "confirmed" | "false_positive" | "reported" | "duplicate";
 
 export interface FindingHistoryEntry {
   status: FindingStatus;
   at: number;
+}
+
+export type EvidenceType =
+  | "http_request"
+  | "http_response"
+  | "terminal_output"
+  | "tool_result"
+  | "agent_reasoning"
+  | "note";
+
+export interface EvidenceItem {
+  type: EvidenceType;
+  content: string;
+  createdAt: number;
 }
 
 export interface Finding {
@@ -37,12 +51,17 @@ export interface Finding {
   confidence: number;
   target: string;
   value: string;
+  parameter?: string;
+  impact?: string;
+  reproductionSteps?: string;
   metadata: Record<string, unknown>;
-  evidence: string;
+  evidence: EvidenceItem[];
   tags: string[];
   status: FindingStatus;
   history: FindingHistoryEntry[];
   sourceCount: number;
+  executionIds: string[];
+  relatedAgents: string[];
   firstSeenAt: number;
   lastSeenAt: number;
   createdAt: number;
@@ -50,10 +69,15 @@ export interface Finding {
 }
 
 export type FindingCreateInput = Pick<Finding, "type" | "severity" | "title" | "description" | "target" | "value"> &
-  Partial<Pick<Finding, "tool" | "confidence" | "metadata" | "evidence" | "tags">>;
+  Partial<Pick<Finding, "tool" | "confidence" | "metadata" | "tags" | "parameter" | "impact" | "reproductionSteps">> & {
+    evidence?: string;
+  };
 
 export type FindingPatchInput = Partial<
-  Pick<Finding, "severity" | "status" | "tags" | "description" | "title" | "confidence">
+  Pick<
+    Finding,
+    "severity" | "status" | "tags" | "description" | "title" | "confidence" | "parameter" | "impact" | "reproductionSteps"
+  >
 >;
 
 export interface FindingsGraphNode {

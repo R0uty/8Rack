@@ -6,12 +6,22 @@ import { useBookmarks } from "../hooks/useBookmarks";
 import { relativeTime } from "../lib/relativeTime";
 import { cn } from "../lib/cn";
 import type { ExecutionRecord, ExecutionStatus } from "../types/execTool";
+import type { AgentWithStatus } from "../types/agent";
 
 interface ExecutionHistoryPanelProps {
   executions: ExecutionRecord[];
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
+  /** Resolves an execution's agentId to a display name - this view blends executions from every
+   * agent (and manual, agent-less requests) in one flat list, unlike a single task session's own
+   * view where the agent is already obvious from context. */
+  agents: AgentWithStatus[];
+}
+
+function agentName(agents: AgentWithStatus[], agentId: string | undefined): string | undefined {
+  if (!agentId) return undefined;
+  return agents.find((a) => a.id === agentId)?.name ?? agentId;
 }
 
 const STATUS_TONE: Record<ExecutionStatus, Tone> = {
@@ -23,12 +33,18 @@ const STATUS_TONE: Record<ExecutionStatus, Tone> = {
   failed: "critical",
 };
 
-/** Matches the search query against the tool id, resolved command, and output — searching what a
- * command *did*, not just what it was named, is the point of the original design spec's Terminal
- * "Search" ask. */
-function matchesQuery(execution: ExecutionRecord, query: string): boolean {
+/** Matches the search query against the tool id, requesting agent, resolved command, and output —
+ * searching what a command *did* (and who ran it), not just what it was named, is the point of the
+ * original design spec's Terminal "Search" ask. */
+function matchesQuery(execution: ExecutionRecord, agentLabel: string | undefined, query: string): boolean {
   if (!query) return true;
-  const haystack = [execution.toolId, execution.resolvedCommand, execution.result?.stdout, execution.result?.stderr]
+  const haystack = [
+    execution.toolId,
+    agentLabel,
+    execution.resolvedCommand,
+    execution.result?.stdout,
+    execution.result?.stderr,
+  ]
     .filter((v): v is string => !!v)
     .join("\n")
     .toLowerCase();
@@ -37,10 +53,12 @@ function matchesQuery(execution: ExecutionRecord, query: string): boolean {
 
 function HistoryRow({
   execution,
+  agentLabel,
   bookmarked,
   onToggleBookmark,
 }: {
   execution: ExecutionRecord;
+  agentLabel?: string;
   bookmarked: boolean;
   onToggleBookmark: () => void;
 }) {
@@ -65,6 +83,11 @@ function HistoryRow({
             {execution.status}
           </StatusPill>
           <span className="shrink-0 text-xs font-medium text-text">{execution.toolId}</span>
+          {agentLabel && (
+            <span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted" title="Requested by">
+              {agentLabel}
+            </span>
+          )}
           <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">
             {execution.resolvedCommand}
           </span>
@@ -86,6 +109,7 @@ function HistoryRow({
             resolvedCommand={execution.resolvedCommand}
             status={execution.status}
             result={execution.result}
+            scopeWarning={execution.scopeWarning}
           />
         </div>
       )}
@@ -101,15 +125,17 @@ function HistoryRow({
  * stdout/stderr per record); bookmarks are frontend-only (hooks/useBookmarks.ts, localStorage),
  * since which executions matter to *you* is a personal preference, not project data.
  */
-export function ExecutionHistoryPanel({ executions, loading, error, onRefresh }: ExecutionHistoryPanelProps) {
+export function ExecutionHistoryPanel({ executions, loading, error, onRefresh, agents }: ExecutionHistoryPanelProps) {
   const [query, setQuery] = useState("");
   const [bookmarkedOnly, setBookmarkedOnly] = useState(false);
   const { isBookmarked, toggle } = useBookmarks();
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return executions.filter((e) => (!bookmarkedOnly || isBookmarked(e.id)) && matchesQuery(e, q));
-  }, [executions, query, bookmarkedOnly, isBookmarked]);
+    return executions.filter(
+      (e) => (!bookmarkedOnly || isBookmarked(e.id)) && matchesQuery(e, agentName(agents, e.agentId), q),
+    );
+  }, [executions, query, bookmarkedOnly, isBookmarked, agents]);
 
   return (
     <section>
@@ -159,6 +185,7 @@ export function ExecutionHistoryPanel({ executions, loading, error, onRefresh }:
           <HistoryRow
             key={execution.id}
             execution={execution}
+            agentLabel={agentName(agents, execution.agentId)}
             bookmarked={isBookmarked(execution.id)}
             onToggleBookmark={() => toggle(execution.id)}
           />

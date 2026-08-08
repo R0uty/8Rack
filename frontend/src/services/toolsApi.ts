@@ -9,6 +9,19 @@ export async function fetchTools(): Promise<ExecToolWithStatus[]> {
   return data.tools;
 }
 
+/** Runtime enable/disable toggle for a tool - persisted on the backend, survives a restart. */
+export async function setToolEnabled(toolId: string, enabled: boolean): Promise<ExecToolWithStatus> {
+  const res = await apiFetch(`/api/tools/${encodeURIComponent(toolId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) await throwForErrorResponse(res);
+  const data = (await res.json().catch(() => null)) as { tool?: ExecToolWithStatus } | null;
+  if (!data?.tool) throw new ApiError("Received an invalid response from the server", 502);
+  return data.tool;
+}
+
 export async function fetchExecutions(projectId: string): Promise<ExecutionRecord[]> {
   const res = await apiFetch(`/api/tools/executions?projectId=${encodeURIComponent(projectId)}`);
   if (!res.ok) await throwForErrorResponse(res);

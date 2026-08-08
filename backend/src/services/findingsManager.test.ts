@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildFindingsGraph,
+  createAgentFinding,
   createFinding,
   deleteFinding,
   getDirectories,
@@ -11,6 +12,7 @@ import {
   getVulnerabilities,
   ingestExecution,
   listFindings,
+  loadFindingsFromDisk,
   lookupCvesByKeyword,
   lookupCvesForFinding,
   searchFindings,
@@ -18,7 +20,9 @@ import {
 } from "./findingsManager.js";
 import { queryNvd } from "./cveLookup.js";
 import { FindingNotFoundError } from "./errors.js";
+import { listProjectIds, readProjectJson } from "./projectStore.js";
 import type { ExecutionRecord } from "../types/execTool.js";
+import type { Finding } from "../types/finding.js";
 
 vi.mock("./cveLookup.js", () => ({ queryNvd: vi.fn() }));
 const mockQueryNvd = vi.mocked(queryNvd);
@@ -28,6 +32,8 @@ vi.mock("./projectStore.js", () => ({
   readProjectJson: vi.fn(async () => []),
   writeProjectJson: vi.fn(async () => undefined),
 }));
+const mockListProjectIds = vi.mocked(listProjectIds);
+const mockReadProjectJson = vi.mocked(readProjectJson);
 
 function fixtureExecution(overrides: Partial<ExecutionRecord> = {}): ExecutionRecord {
   return {
@@ -84,16 +90,28 @@ describe("ingestExecution", () => {
     expect(listFindings(projectId, { type: "port" })).toHaveLength(1);
   });
 
-  it("preserves a human-set verified/dismissed status across re-detection", async () => {
+  it("preserves a human-set status past 'potential' across re-detection", async () => {
     const projectId = randomUUID();
     const execution = fixtureExecution({ projectId });
 
     const [created] = await ingestExecution(execution);
-    await updateFinding(created.id, { status: "verified" });
+    await updateFinding(created.id, { status: "confirmed" });
 
     const [reingested] = await ingestExecution(execution);
-    expect(reingested.status).toBe("verified");
+    expect(reingested.status).toBe("confirmed");
     expect(reingested.sourceCount).toBe(2);
+  });
+
+  it("links the triggering execution's id onto the finding, accumulating across re-detections", async () => {
+    const projectId = randomUUID();
+    const first = fixtureExecution({ projectId });
+    const second = fixtureExecution({ projectId, id: randomUUID() });
+
+    const [created] = await ingestExecution(first);
+    expect(created.executionIds).toEqual([first.id]);
+
+    const [reingested] = await ingestExecution(second);
+    expect(reingested.executionIds).toEqual([first.id, second.id]);
   });
 });
 
@@ -113,16 +131,29 @@ describe("CRUD", () => {
   });
 
   it("updateFinding throws FindingNotFoundError for an unknown id", async () => {
-    await expect(updateFinding("nope", { status: "dismissed" })).rejects.toThrow(FindingNotFoundError);
+    await expect(updateFinding("nope", { status: "false_positive" })).rejects.toThrow(FindingNotFoundError);
   });
 
   it("updateFinding applies a patch and logs a history entry on status change", async () => {
     const projectId = randomUUID();
     const [created] = await ingestExecution(fixtureExecution({ projectId }));
-    const updated = await updateFinding(created.id, { status: "dismissed", severity: "low" });
-    expect(updated.status).toBe("dismissed");
+    const updated = await updateFinding(created.id, { status: "false_positive", severity: "low" });
+    expect(updated.status).toBe("false_positive");
     expect(updated.severity).toBe("low");
-    expect(updated.history.at(-1)).toMatchObject({ status: "dismissed" });
+    expect(updated.history.at(-1)).toMatchObject({ status: "false_positive" });
+  });
+
+  it("updateFinding applies parameter/impact/reproductionSteps patches", async () => {
+    const projectId = randomUUID();
+    const [created] = await ingestExecution(fixtureExecution({ projectId }));
+    const updated = await updateFinding(created.id, {
+      parameter: "id",
+      impact: "Full account takeover",
+      reproductionSteps: "1. Send request X\n2. Observe Y",
+    });
+    expect(updated.parameter).toBe("id");
+    expect(updated.impact).toBe("Full account takeover");
+    expect(updated.reproductionSteps).toBe("1. Send request X\n2. Observe Y");
   });
 
   it("deleteFinding removes the finding, and throws for an unknown id", async () => {
@@ -306,6 +337,163 @@ describe("CVE lookup", () => {
 
     expect(results[0].metadata.sourceFindingId).toBeUndefined();
     expect(results[0]).toMatchObject({ type: "cve", target: "example.com" });
+  });
+});
+
+describe("createAgentFinding", () => {
+  it("creates a finding with source 'agent', stamping relatedAgents and tool with the creating agent", async () => {
+    const projectId = randomUUID();
+    const finding = await createAgentFinding(projectId, "recon-agent", {
+      type: "potential_vulnerability",
+      severity: "high",
+      title: "Reflected XSS",
+      description: "d",
+      target: "example.com",
+      value: "/search?q",
+      parameter: "q",
+      impact: "Session hijack",
+      reproductionSteps: "1. Send crafted request\n2. Observe reflection",
+      evidence: "raw HTTP exchange",
+    });
+
+    expect(finding.source).toBe("agent");
+    expect(finding.tool).toBe("recon-agent");
+    expect(finding.relatedAgents).toEqual(["recon-agent"]);
+    expect(finding.parameter).toBe("q");
+    expect(finding.impact).toBe("Session hijack");
+    expect(finding.reproductionSteps).toBe("1. Send crafted request\n2. Observe reflection");
+    expect(finding.evidence).toEqual([{ type: "agent_reasoning", content: "raw HTTP exchange", createdAt: expect.any(Number) }]);
+  });
+
+  it("accumulates relatedAgents across re-detection by a different agent", async () => {
+    const projectId = randomUUID();
+    const input = {
+      type: "potential_vulnerability" as const,
+      severity: "high" as const,
+      title: "Reflected XSS",
+      description: "d",
+      target: "example.com",
+      value: "/search?q",
+    };
+    await createAgentFinding(projectId, "recon-agent", input);
+    const second = await createAgentFinding(projectId, "validator-agent", input);
+
+    expect(second.relatedAgents).toEqual(["recon-agent", "validator-agent"]);
+    expect(second.sourceCount).toBe(2);
+  });
+});
+
+describe("evidence", () => {
+  it("does not duplicate an evidence item whose content already exists", async () => {
+    const projectId = randomUUID();
+    const execution = fixtureExecution({ projectId });
+    const [created] = await ingestExecution(execution);
+    expect(created.evidence).toHaveLength(1);
+    expect(created.evidence[0].type).toBe("tool_result");
+
+    const [reingested] = await ingestExecution(execution); // identical stdout -> identical evidence text
+    expect(reingested.evidence).toHaveLength(1);
+  });
+
+  it("caps the number of retained evidence items, dropping the oldest first", async () => {
+    const projectId = randomUUID();
+    const base = {
+      type: "technology" as const,
+      severity: "info" as const,
+      title: "nginx",
+      description: "d",
+      target: "example.com",
+      value: "nginx",
+    };
+    let finding = await createFinding(projectId, { ...base, evidence: "evidence-0" });
+    for (let i = 1; i <= 25; i++) {
+      finding = await createFinding(projectId, { ...base, evidence: `evidence-${i}` });
+    }
+
+    expect(finding.evidence.length).toBeLessThanOrEqual(20);
+    expect(finding.evidence.at(-1)?.content).toBe("evidence-25");
+    expect(finding.evidence.some((e) => e.content === "evidence-0")).toBe(false);
+  });
+});
+
+describe("listFindings new filters", () => {
+  it("filters by minConfidence", async () => {
+    const projectId = randomUUID();
+    const base = { type: "technology" as const, severity: "info" as const, description: "d", target: "example.com" };
+    await createFinding(projectId, { ...base, title: "a", value: "a", confidence: 0.3 });
+    await createFinding(projectId, { ...base, title: "b", value: "b", confidence: 0.9 });
+
+    const result = listFindings(projectId, { minConfidence: 0.5 });
+    expect(result).toHaveLength(1);
+    expect(result[0].value).toBe("b");
+  });
+
+  it("filters by agent, matching either tool (agent-sourced) or relatedAgents", async () => {
+    const projectId = randomUUID();
+    await createAgentFinding(projectId, "recon-agent", {
+      type: "potential_vulnerability",
+      severity: "high",
+      title: "a",
+      description: "d",
+      target: "example.com",
+      value: "a",
+    });
+    await createFinding(projectId, {
+      type: "technology",
+      severity: "info",
+      title: "b",
+      description: "d",
+      target: "example.com",
+      value: "b",
+    });
+
+    const result = listFindings(projectId, { agent: "recon-agent" });
+    expect(result).toHaveLength(1);
+    expect(result[0].value).toBe("a");
+  });
+});
+
+describe("status/evidence migration on load", () => {
+  it("migrates old status vocabulary, backfills executionIds/relatedAgents, and wraps legacy string evidence", async () => {
+    const projectId = randomUUID();
+    const legacy = {
+      id: "legacy-1",
+      projectId,
+      type: "port",
+      severity: "info",
+      title: "Port 80/tcp open",
+      description: "",
+      source: "scanner",
+      tool: "nmap",
+      confidence: 0.9,
+      target: "example.com",
+      value: "80/tcp",
+      metadata: {},
+      evidence: "raw evidence text",
+      tags: [],
+      status: "verified",
+      history: [
+        { status: "discovered", at: 0 },
+        { status: "verified", at: 1 },
+      ],
+      sourceCount: 1,
+      firstSeenAt: 0,
+      lastSeenAt: 0,
+      createdAt: 0,
+      updatedAt: 0,
+    } as unknown as Finding;
+
+    mockListProjectIds.mockResolvedValueOnce([projectId]);
+    mockReadProjectJson.mockResolvedValueOnce([legacy]);
+
+    await loadFindingsFromDisk();
+
+    const [migrated] = listFindings(projectId);
+    expect(migrated.status).toBe("confirmed");
+    expect(migrated.history.map((h) => h.status)).toEqual(["potential", "confirmed"]);
+    expect(migrated.evidence).toEqual([{ type: "note", content: "raw evidence text", createdAt: 0 }]);
+    expect(migrated.executionIds).toEqual([]);
+    expect(migrated.relatedAgents).toEqual([]);
   });
 });
 

@@ -57,6 +57,78 @@ describe("useSessions", () => {
     expect(result.current.activeChatId).toBe(firstId);
   });
 
+  it("openChatSession() dedups per (agent, project) - a different project gets a genuinely separate thread", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let noProjectId!: string, projectAId!: string, projectBId!: string;
+    act(() => {
+      noProjectId = result.current.openChatSession("recon", "model-a");
+    });
+    act(() => {
+      projectAId = result.current.openChatSession("recon", "model-a", "proj-a");
+    });
+    act(() => {
+      projectBId = result.current.openChatSession("recon", "model-a", "proj-b");
+    });
+
+    expect(new Set([noProjectId, projectAId, projectBId]).size).toBe(3);
+    expect(result.current.chatSessions).toHaveLength(3);
+    expect(result.current.chatSessions.map((s) => s.projectId)).toEqual([undefined, "proj-a", "proj-b"]);
+  });
+
+  it("openChatSession() with the same (agent, project) pair focuses the existing thread instead of duplicating", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let firstId!: string;
+    act(() => {
+      firstId = result.current.openChatSession("recon", "model-a", "proj-a");
+    });
+    act(() => result.current.setActiveChat(null));
+
+    let secondId!: string;
+    act(() => {
+      secondId = result.current.openChatSession("recon", "model-b", "proj-a");
+    });
+
+    expect(secondId).toBe(firstId);
+    expect(result.current.chatSessions).toHaveLength(1);
+    expect(result.current.activeChatId).toBe(firstId);
+  });
+
+  it("openChatSession() scopes manual (agentId: null) sessions per project too", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let manualNoProjectId!: string, manualProjectAId!: string;
+    act(() => {
+      manualNoProjectId = result.current.openChatSession(null, "model-a");
+    });
+    act(() => {
+      manualProjectAId = result.current.openChatSession(null, "model-a", "proj-a");
+    });
+
+    expect(manualNoProjectId).not.toBe(manualProjectAId);
+    expect(result.current.chatSessions).toHaveLength(2);
+
+    // Reopening with the same (null, "proj-a") pair resumes the existing one, not a third.
+    let reopenedId!: string;
+    act(() => {
+      reopenedId = result.current.openChatSession(null, "model-a", "proj-a");
+    });
+    expect(reopenedId).toBe(manualProjectAId);
+    expect(result.current.chatSessions).toHaveLength(2);
+  });
+
+  it("a new chat session created with a projectId starts tool-enabled (projectId set from creation)", () => {
+    const { result } = renderHook(() => useSessions());
+
+    let id!: string;
+    act(() => {
+      id = result.current.openChatSession("recon", "model-a", "proj-a");
+    });
+
+    expect(result.current.chatSessions.find((s) => s.id === id)?.projectId).toBe("proj-a");
+  });
+
   it("supports one manual (agentId: null) chat session and one per real agent independently", () => {
     const { result } = renderHook(() => useSessions());
 

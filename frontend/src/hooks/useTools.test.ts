@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useTools } from "./useTools";
-import { fetchExecutions, fetchTools } from "../services/toolsApi";
+import { fetchExecutions, fetchTools, setToolEnabled } from "../services/toolsApi";
 import type { ExecToolWithStatus, ExecutionRecord } from "../types/execTool";
 
-vi.mock("../services/toolsApi", () => ({ fetchTools: vi.fn(), fetchExecutions: vi.fn() }));
+vi.mock("../services/toolsApi", () => ({
+  fetchTools: vi.fn(),
+  fetchExecutions: vi.fn(),
+  setToolEnabled: vi.fn(),
+}));
 
 const mockFetchTools = vi.mocked(fetchTools);
 const mockFetchExecutions = vi.mocked(fetchExecutions);
+const mockSetToolEnabled = vi.mocked(setToolEnabled);
 
 const fixtureTool: ExecToolWithStatus = {
   id: "nmap",
@@ -76,5 +81,20 @@ describe("useTools", () => {
 
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.error).toBe("boom");
+  });
+
+  it("toggleTool() calls the backend and reconciles the tool from its response", async () => {
+    mockFetchTools.mockResolvedValue([fixtureTool]);
+    const disabled: ExecToolWithStatus = { ...fixtureTool, enabled: false };
+    mockSetToolEnabled.mockResolvedValue(disabled);
+    const { result } = renderHook(() => useTools(null));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.toggleTool("nmap", false);
+    });
+
+    expect(mockSetToolEnabled).toHaveBeenCalledWith("nmap", false);
+    expect(result.current.tools).toEqual([disabled]);
   });
 });

@@ -29,7 +29,7 @@ const VALID_TYPES: FindingType[] = [
   "cve",
 ];
 const VALID_SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
-const VALID_STATUSES = ["discovered", "updated", "verified", "dismissed"];
+const VALID_STATUSES = ["potential", "investigating", "confirmed", "false_positive", "reported", "duplicate"];
 
 function parseFiltersFromQuery(query: Record<string, unknown>): FindingFilters {
   const filters: FindingFilters = {};
@@ -40,6 +40,11 @@ function parseFiltersFromQuery(query: Record<string, unknown>): FindingFilters {
   if (typeof query.tool === "string" && query.tool.trim()) filters.tool = query.tool;
   if (typeof query.target === "string" && query.target.trim()) filters.target = query.target;
   if (typeof query.tag === "string" && query.tag.trim()) filters.tag = query.tag;
+  if (typeof query.agent === "string" && query.agent.trim()) filters.agent = query.agent;
+  if (typeof query.minConfidence === "string" && query.minConfidence.trim()) {
+    const parsed = Number(query.minConfidence);
+    if (!Number.isNaN(parsed)) filters.minConfidence = parsed;
+  }
   return filters;
 }
 
@@ -52,6 +57,9 @@ interface CreateFindingBody {
   value?: unknown;
   tool?: unknown;
   confidence?: unknown;
+  parameter?: unknown;
+  impact?: unknown;
+  reproductionSteps?: unknown;
   metadata?: unknown;
   evidence?: unknown;
   tags?: unknown;
@@ -72,6 +80,10 @@ function isValidCreateBody(body: CreateFindingBody): body is CreateFindingBody &
     body.value.trim().length > 0 &&
     (body.tool === undefined || typeof body.tool === "string") &&
     (body.confidence === undefined || typeof body.confidence === "number") &&
+    (body.parameter === undefined || typeof body.parameter === "string") &&
+    (body.impact === undefined || typeof body.impact === "string") &&
+    (body.reproductionSteps === undefined || typeof body.reproductionSteps === "string") &&
+    (body.evidence === undefined || typeof body.evidence === "string") &&
     (body.tags === undefined || (Array.isArray(body.tags) && body.tags.every((t) => typeof t === "string")))
   );
 }
@@ -83,6 +95,9 @@ interface PatchFindingBody {
   description?: unknown;
   title?: unknown;
   confidence?: unknown;
+  parameter?: unknown;
+  impact?: unknown;
+  reproductionSteps?: unknown;
 }
 
 function isValidPatchBody(body: PatchFindingBody): body is PatchFindingBody & FindingPatchInput {
@@ -92,7 +107,10 @@ function isValidPatchBody(body: PatchFindingBody): body is PatchFindingBody & Fi
     (body.tags === undefined || (Array.isArray(body.tags) && body.tags.every((t) => typeof t === "string"))) &&
     (body.description === undefined || typeof body.description === "string") &&
     (body.title === undefined || typeof body.title === "string") &&
-    (body.confidence === undefined || typeof body.confidence === "number")
+    (body.confidence === undefined || typeof body.confidence === "number") &&
+    (body.parameter === undefined || typeof body.parameter === "string") &&
+    (body.impact === undefined || typeof body.impact === "string") &&
+    (body.reproductionSteps === undefined || typeof body.reproductionSteps === "string")
   );
 }
 
@@ -146,7 +164,8 @@ findingsRouter.patch("/:id", async (req, res, next) => {
   const body = req.body as PatchFindingBody;
   if (!isValidPatchBody(body)) {
     res.status(400).json({
-      error: "Invalid patch body - severity/status/tags/description/title/confidence must be well-formed if present",
+      error:
+        "Invalid patch body - severity/status/tags/description/title/confidence/parameter/impact/reproductionSteps must be well-formed if present",
       code: "INVALID_REQUEST",
     });
     return;

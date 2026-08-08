@@ -1,9 +1,13 @@
+import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { env } from "../config/env.js";
 import { embed } from "./ollama.js";
 import type { RagChunk, RagIndexStatus, RagSearchResult } from "../types/rag.js";
+
+const execFileAsync = promisify(execFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RAG_DIR = path.resolve(__dirname, "../../data/rag");
@@ -11,6 +15,9 @@ const INDEX_FILE = path.join(RAG_DIR, "index.json");
 
 const SKIP_DIRS = new Set(["node_modules", "dist", "build", "__pycache__"]);
 const MAX_FILE_BYTES = 500 * 1024;
+/** PDFs are indexed by their extracted *text*, so the raw binary can be much larger than a text
+ * file for a comparable amount of content - hence a far higher cap than MAX_FILE_BYTES. */
+const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const CHUNK_LINES = 50;
 const CHUNK_OVERLAP_LINES = 5;
 /** Keeps individual /api/embed requests bounded rather than sending an entire codebase's chunks
@@ -33,6 +40,31 @@ function isBinary(buf: Buffer): boolean {
     if (buf[i] === 0) return true;
   }
   return false;
+}
+
+function isPdf(name: string): boolean {
+  return name.toLowerCase().endsWith(".pdf");
+}
+
+/** Extracts a PDF's text via the poppler `pdftotext` CLI - shelling out (the same pattern the
+ * ExecTool framework already uses) rather than pulling in a JS PDF-parsing dependency. `-q`
+ * silences its diagnostics; `-` writes plain text to stdout. Returns undefined when pdftotext isn't
+ * installed or errors, so the PDF is skipped with a logged reason instead of being indexed as the
+ * binary garbage a raw utf-8 decode would produce. */
+async function extractPdfText(absPath: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("pdftotext", ["-q", absPath, "-"], {
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 120_000,
+    });
+    return stdout;
+  } catch (err) {
+    console.error(
+      `[rag] pdftotext failed for "${absPath}" - is poppler (pdftotext) installed? Skipping this file.`,
+      err instanceof Error ? err.message : err,
+    );
+    return undefined;
+  }
 }
 
 async function walkWorkspace(): Promise<string[]> {
@@ -58,7 +90,8 @@ async function walkWorkspace(): Promise<string[]> {
       } else if (entry.isFile()) {
         try {
           const s = await stat(full);
-          if (s.size > MAX_FILE_BYTES) continue;
+          const cap = isPdf(entry.name) ? MAX_PDF_BYTES : MAX_FILE_BYTES;
+          if (s.size > cap) continue;
         } catch {
           continue;
         }
@@ -121,16 +154,25 @@ export async function reindex(): Promise<RagIndexStatus> {
   const pending: { filePath: string; startLine: number; endLine: number; text: string }[] = [];
 
   for (const absPath of files) {
-    let buf: Buffer;
-    try {
-      buf = await readFile(absPath);
-    } catch {
-      continue;
+    let text: string;
+    if (isPdf(absPath)) {
+      // PDFs are binary and over the text cap, so they go through pdftotext rather than a raw read.
+      const extracted = await extractPdfText(absPath);
+      if (extracted === undefined) continue;
+      text = extracted;
+    } else {
+      let buf: Buffer;
+      try {
+        buf = await readFile(absPath);
+      } catch {
+        continue;
+      }
+      if (isBinary(buf)) continue;
+      text = buf.toString("utf-8");
     }
-    if (isBinary(buf)) continue;
 
     const relPath = path.relative(env.workspaceRoot, absPath);
-    for (const chunk of chunkText(buf.toString("utf-8"))) {
+    for (const chunk of chunkText(text)) {
       pending.push({ filePath: relPath, ...chunk });
     }
   }

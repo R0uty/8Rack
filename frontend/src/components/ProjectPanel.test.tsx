@@ -11,6 +11,7 @@ function project(overrides: Partial<Project> = {}): Project {
 function setup(overrides: Partial<React.ComponentProps<typeof ProjectPanel>> = {}) {
   const onSelect = vi.fn();
   const onCreate = vi.fn().mockResolvedValue(undefined);
+  const onUpdate = vi.fn().mockResolvedValue(undefined);
   const onDelete = vi.fn().mockResolvedValue(undefined);
   const onRefresh = vi.fn();
   const props = {
@@ -20,12 +21,13 @@ function setup(overrides: Partial<React.ComponentProps<typeof ProjectPanel>> = {
     selectedProjectId: null,
     onSelect,
     onCreate,
+    onUpdate,
     onDelete,
     onRefresh,
     ...overrides,
   };
   render(<ProjectPanel {...props} />);
-  return { onSelect, onCreate, onDelete, onRefresh };
+  return { onSelect, onCreate, onUpdate, onDelete, onRefresh };
 }
 
 describe("ProjectPanel", () => {
@@ -132,5 +134,26 @@ describe("ProjectPanel", () => {
     setup({ projects: [project()], disabled: true });
     expect(screen.getByRole("button", { name: "New" })).toBeDisabled();
     expect(screen.getByTitle("Delete project")).toBeDisabled();
+  });
+
+  it("shows a status pill when the project has a mission status set", () => {
+    setup({ projects: [project({ status: "active" })] });
+    expect(screen.getByText("active")).toBeInTheDocument();
+  });
+
+  it("opens the mission editor from the per-project Edit affordance and saves a patch", async () => {
+    const { onUpdate } = setup({ projects: [project()] });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByTitle("Edit mission details"));
+    expect(screen.getByText("Edit Acme")).toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText("What is this engagement, at a glance?"), "Authorized pentest");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(onUpdate).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({ name: "Acme", description: "Authorized pentest" }),
+    );
   });
 });

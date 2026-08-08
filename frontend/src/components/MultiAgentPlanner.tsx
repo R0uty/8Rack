@@ -94,10 +94,11 @@ export function MultiAgentPlanner({ agents }: MultiAgentPlannerProps) {
     error: projectsError,
     refresh: refreshProjects,
     create: createProject,
+    update: updateProject,
     remove: removeProject,
   } = useProjects();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools } =
+  const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools, toggleTool } =
     useTools(selectedProjectId);
   const {
     plan,
@@ -173,6 +174,7 @@ export function MultiAgentPlanner({ agents }: MultiAgentPlannerProps) {
           selectedProjectId={selectedProjectId}
           onSelect={handleSelectProject}
           onCreate={createProject}
+          onUpdate={updateProject}
           onDelete={removeProject}
           onRefresh={refreshProjects}
           disabled={!!plan && !PLAN_TERMINAL_STATUSES.includes(plan.status)}
@@ -317,6 +319,7 @@ export function MultiAgentPlanner({ agents }: MultiAgentPlannerProps) {
           loading={toolsLoading}
           error={toolsError}
           onRefresh={refreshTools}
+          onToggleEnabled={toggleTool}
         />
       </aside>
     </div>

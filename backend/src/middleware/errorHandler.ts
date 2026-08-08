@@ -17,6 +17,7 @@ import {
   InvalidTaskStateError,
   InvalidToolArgumentsError,
   OllamaConnectionError,
+  OutOfScopeError,
   OllamaModelNotFoundError,
   OllamaRequestError,
   InvalidScanStateError,
@@ -90,6 +91,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof ExecToolDisabledError) {
     res.status(403).json({ error: err.message, code: "TOOL_DISABLED" });
+    return;
+  }
+  if (err instanceof OutOfScopeError) {
+    res.status(403).json({ error: err.message, code: "OUT_OF_SCOPE" });
     return;
   }
   if (err instanceof InvalidToolArgumentsError) {

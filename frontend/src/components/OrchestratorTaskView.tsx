@@ -377,6 +377,7 @@ export function OrchestratorTaskView({
             resolvedCommand={pendingExecution.resolvedCommand}
             status={busy ? "running" : pendingExecution.status}
             liveOutput={liveOutput}
+            scopeWarning={pendingExecution.scopeWarning}
           />
           <div className="flex gap-2">
             <Button variant="primary" onClick={onApprove} disabled={busy}>

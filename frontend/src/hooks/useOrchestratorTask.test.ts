@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useOrchestratorTask } from "./useOrchestratorTask";
@@ -66,7 +67,38 @@ describe("useOrchestratorTask", () => {
 
     expect(capturedSignal?.aborted).toBe(false);
     unmount();
+    // The abort is deferred a macrotask (so it survives StrictMode's remount - see the next test),
+    // so it hasn't fired synchronously; flush the macrotask queue, then it should have aborted.
+    expect(capturedSignal?.aborted).toBe(false);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     expect(capturedSignal?.aborted).toBe(true);
+
+    pending.resolve(fixtureTask());
+  });
+
+  it("does NOT abort an in-flight start() across a StrictMode mount/unmount/remount", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const pending = deferred<OrchestratorTask>();
+    mockCreateTask.mockImplementation(async (_agentId, _objective, _projectId, _onChunk, signal) => {
+      capturedSignal = signal;
+      return pending.promise;
+    });
+
+    // StrictMode wraps the hook so React runs its effects setup -> cleanup -> setup on mount, the
+    // same dev-only cycle that previously cancelled a just-started task and left it stuck.
+    const { result } = renderHook(() => useOrchestratorTask(), { wrapper: StrictMode });
+    act(() => {
+      void result.current.start("recon", "scan", "proj-1");
+    });
+
+    // Flush the deferred-abort macrotask: because the component remounted, mountedRef is true again,
+    // so the abort scheduled during StrictMode's cleanup must NOT fire.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(capturedSignal?.aborted).toBe(false);
 
     pending.resolve(fixtureTask());
   });

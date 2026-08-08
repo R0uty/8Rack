@@ -4,14 +4,16 @@ import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
 import { cancelExecution, getExecution, listExecTools, rejectExecution, requestExecution } from "./toolManager.js";
 import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragIndex.js";
-import { getProjectFindings, getTechnologies, lookupCvesByKeyword } from "./findingsManager.js";
+import { createAgentFinding, getProjectFindings, getTechnologies, lookupCvesByKeyword } from "./findingsManager.js";
 import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
+import { getProject } from "./projectManager.js";
 import { AgentNotFoundError, InvalidTaskStateError, RequestCancelledError, TaskNotFoundError } from "./errors.js";
 import type { ChatMessage } from "../types/ollama.js";
 import type { ExecutionRecord } from "../types/execTool.js";
 import type { RagSearchResult } from "../types/rag.js";
 import type { AgentWithStatus } from "../types/agent.js";
-import type { Finding, FindingType } from "../types/finding.js";
+import type { Finding, FindingCreateInput, FindingSeverity, FindingType } from "../types/finding.js";
+import type { Project } from "../types/project.js";
 
 /** A read-only pseudo-tool, not a registered ExecTool - it's an in-process vector search over the
  * RAG index (see services/ragIndex.ts), not an OS command, so it doesn't go through
@@ -30,6 +32,16 @@ const QUERY_FINDINGS_TOOL = "query_findings";
  * genuinely async and can take a few seconds - still bypasses human confirmation since it's a
  * read-only public lookup, not a destructive local action. */
 const LOOKUP_CVES_TOOL = "lookup_cves";
+
+/** A fourth pseudo-tool - lets an agent record a structured Finding directly (see
+ * services/findingsManager.ts#createAgentFinding) instead of only describing one in plain text,
+ * the headline ask behind the Findings & Evidence System task. Same structural pattern as the
+ * other three, but genuinely mutates project state (it's not read-only) - still skips human
+ * confirmation, same reasoning as a human being able to log a finding manually via
+ * POST /api/projects/:id/findings with no gate: it records data, it doesn't run anything. Always
+ * listed (no precondition like the other three, which only appear once there's something to
+ * query/look up). */
+const CREATE_FINDING_TOOL = "create_finding";
 
 /** Called with each piece of the agent's reply text as it streams in, for a live "thinking" UX. */
 export type ChunkListener = (content: string) => void;
@@ -94,7 +106,28 @@ export async function loadTasksFromDisk(): Promise<void> {
  * When `agent.execTools` is set, only those exec tools are listed — an undirected agent (the
  * field omitted) still sees every enabled tool, matching the pre-allowlist behavior.
  */
-function buildToolsPreamble(agent: AgentWithStatus | undefined, projectId: string): string {
+
+/** Prepended to the preamble when the project has any mission fields set (see types/project.ts) -
+ * omitted entirely for a plain project with none configured, to avoid noise on the common case.
+ * Explicitly tells the agent that scope is enforced, not just advisory - see
+ * toolManager.ts#requestExecution/scopeMatcher.ts, which is what actually blocks a violation;
+ * this text alone is not the enforcement mechanism, just makes the agent aware of it upfront. */
+function buildMissionContextLines(project: Project | undefined): string[] {
+  if (!project) return [];
+  const hasContext =
+    !!project.description || !!project.status || !!project.scope?.length || !!project.outOfScope?.length || !!project.rules;
+  if (!hasContext) return [];
+
+  const lines = [`Mission: ${project.name}${project.status ? ` (status: ${project.status})` : ""}`];
+  if (project.description) lines.push(`Description: ${project.description}`);
+  if (project.scope?.length) lines.push(`Scope (authorized targets): ${project.scope.join(", ")}`);
+  if (project.outOfScope?.length) lines.push(`Out of scope (never target these): ${project.outOfScope.join(", ")}`);
+  if (project.rules) lines.push(`Rules of engagement: ${project.rules}`);
+  lines.push("Tool executions against a target outside this scope are automatically blocked.");
+  return lines;
+}
+
+async function buildToolsPreamble(agent: AgentWithStatus | undefined, projectId: string): Promise<string> {
   const allowed = agent?.execTools;
   const lines = listExecTools()
     .filter((t) => t.enabled)
@@ -130,7 +163,31 @@ function buildToolsPreamble(agent: AgentWithStatus | undefined, projectId: strin
         "to nvd.nist.gov and can take a few seconds. Read-only and does not require approval."
       : undefined;
 
+  const createFindingLine =
+    `- ${CREATE_FINDING_TOOL}: Record a structured finding for this project instead of only ` +
+    "describing one in your reply. Arguments should be a single-element array containing one JSON " +
+    'object encoded as a string, e.g. {"tool": "' +
+    CREATE_FINDING_TOOL +
+    '", "arguments": ["{\\"type\\":\\"potential_vulnerability\\",\\"severity\\":\\"high\\",' +
+    '\\"title\\":\\"Reflected XSS in search\\",\\"description\\":\\"...\\",\\"target\\":\\"example.com\\",' +
+    '\\"value\\":\\"/search?q\\",\\"parameter\\":\\"q\\",\\"impact\\":\\"...\\",' +
+    '\\"reproductionSteps\\":\\"...\\",\\"evidence\\":\\"...\\"}"]}. Required: type, severity, title, ' +
+    `description, target, value. Valid types: ${VALID_FINDING_TYPES.join(", ")}. Valid severities: ` +
+    `${VALID_SEVERITIES.join(", ")}. Optional: parameter, impact, reproductionSteps, evidence, ` +
+    "confidence (0-1), tags (array of strings). Never use type \"confirmed_vulnerability\" yourself - " +
+    'always "potential_vulnerability", a human/validator promotes it. Does not require approval - ' +
+    "it records data, it doesn't execute anything.";
+
+  let project: Project | undefined;
+  try {
+    project = await getProject(projectId);
+  } catch (err) {
+    console.error(`[orchestrator] failed to load project "${projectId}" for mission context:`, err);
+  }
+  const missionLines = buildMissionContextLines(project);
+
   return [
+    ...(missionLines.length ? [...missionLines, ""] : []),
     "You have access to the following tools. To use one, respond with ONLY a single JSON object",
     'of the exact form {"tool": "<tool id>", "arguments": ["<arg1>", "<arg2>", ...]} and nothing',
     "else - no explanation, no markdown code fences, no extra text before or after it.",
@@ -143,6 +200,7 @@ function buildToolsPreamble(agent: AgentWithStatus | undefined, projectId: strin
     ...(knowledgeBaseLine ? [knowledgeBaseLine] : []),
     ...(findingsLine ? [findingsLine] : []),
     ...(cveLine ? [cveLine] : []),
+    createFindingLine,
   ].join("\n");
 }
 
@@ -191,10 +249,8 @@ async function collectAgentReply(
   signal?: AbortSignal,
 ): Promise<string> {
   let content = "";
-  for await (const chunk of streamAgentChat(
-    { agentId, messages, model, toolsPreamble: buildToolsPreamble(agent, projectId) },
-    signal,
-  )) {
+  const toolsPreamble = await buildToolsPreamble(agent, projectId);
+  for await (const chunk of streamAgentChat({ agentId, messages, model, toolsPreamble }, signal)) {
     const piece = chunk.message?.content ?? "";
     if (piece) onChunk?.(piece);
     content += piece;
@@ -279,6 +335,8 @@ const VALID_FINDING_TYPES: FindingType[] = [
   "cve",
 ];
 
+const VALID_SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
+
 function formatFindingsResults(results: Finding[]): string {
   if (results.length === 0) return "(no findings recorded yet)";
   return results
@@ -315,6 +373,100 @@ function runFindingsQuery(projectId: string, args: string[]): string {
     stderr: "",
     parsedOutput: results,
   });
+}
+
+/** Parses/validates the create_finding pseudo-tool's single JSON-string argument into a
+ * FindingCreateInput, or returns an error string explaining exactly what's wrong - fed back to the
+ * agent as a tool result, same recover-and-retry loop as an invalid ExecTool argument. */
+function parseCreateFindingArgs(args: string[]): { input: FindingCreateInput } | { error: string } {
+  const raw = args[0];
+  if (!raw) return { error: `${CREATE_FINDING_TOOL} requires a single-element array containing a JSON object string.` };
+
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return { error: `${CREATE_FINDING_TOOL}'s argument is not valid JSON.` };
+  }
+
+  const { type, severity, title, description, target, value, parameter, impact, reproductionSteps, evidence, confidence, tags } =
+    obj;
+
+  if (typeof type !== "string" || !VALID_FINDING_TYPES.includes(type as FindingType)) {
+    return { error: `"type" must be one of: ${VALID_FINDING_TYPES.join(", ")}.` };
+  }
+  if (type === "confirmed_vulnerability") {
+    return {
+      error:
+        'type "confirmed_vulnerability" cannot be set directly - use "potential_vulnerability"; a human/validator promotes it.',
+    };
+  }
+  if (typeof severity !== "string" || !VALID_SEVERITIES.includes(severity as FindingSeverity)) {
+    return { error: `"severity" must be one of: ${VALID_SEVERITIES.join(", ")}.` };
+  }
+  if (typeof title !== "string" || !title.trim()) return { error: '"title" is required.' };
+  if (typeof description !== "string") return { error: '"description" is required.' };
+  if (typeof target !== "string" || !target.trim()) return { error: '"target" is required.' };
+  if (typeof value !== "string" || !value.trim()) return { error: '"value" is required.' };
+  if (parameter !== undefined && typeof parameter !== "string") return { error: '"parameter" must be a string.' };
+  if (impact !== undefined && typeof impact !== "string") return { error: '"impact" must be a string.' };
+  if (reproductionSteps !== undefined && typeof reproductionSteps !== "string") {
+    return { error: '"reproductionSteps" must be a string.' };
+  }
+  if (evidence !== undefined && typeof evidence !== "string") return { error: '"evidence" must be a string.' };
+  if (confidence !== undefined && typeof confidence !== "number") return { error: '"confidence" must be a number.' };
+  if (tags !== undefined && !(Array.isArray(tags) && tags.every((t) => typeof t === "string"))) {
+    return { error: '"tags" must be an array of strings.' };
+  }
+
+  return {
+    input: {
+      type: type as FindingType,
+      severity: severity as FindingSeverity,
+      title,
+      description,
+      target,
+      value,
+      parameter: parameter as string | undefined,
+      impact: impact as string | undefined,
+      reproductionSteps: reproductionSteps as string | undefined,
+      evidence: evidence as string | undefined,
+      confidence: confidence as number | undefined,
+      tags: tags as string[] | undefined,
+    },
+  };
+}
+
+/**
+ * Runs the create_finding pseudo-tool - parses/validates the agent's JSON payload and records a
+ * real Finding via findingsManager.ts#createAgentFinding, same tool-result envelope shape as every
+ * other pseudo-tool.
+ */
+async function runCreateFinding(projectId: string, agentId: string, args: string[]): Promise<string> {
+  const parsed = parseCreateFindingArgs(args);
+  if ("error" in parsed) {
+    return JSON.stringify({ tool: CREATE_FINDING_TOOL, status: "failed", success: false, message: parsed.error });
+  }
+
+  try {
+    const finding = await createAgentFinding(projectId, agentId, parsed.input);
+    return JSON.stringify({
+      tool: CREATE_FINDING_TOOL,
+      status: "completed",
+      success: true,
+      exitCode: 0,
+      stdout: `Finding recorded: [${finding.severity}] ${finding.title} (id: ${finding.id})`,
+      stderr: "",
+      parsedOutput: finding,
+    });
+  } catch (err) {
+    return JSON.stringify({
+      tool: CREATE_FINDING_TOOL,
+      status: "failed",
+      success: false,
+      message: err instanceof Error ? err.message : "Failed to create finding",
+    });
+  }
 }
 
 function formatCveResults(results: Finding[]): string {
@@ -429,6 +581,14 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
     return advance(task, onChunk, signal);
   }
 
+  if (toolRequest.tool === CREATE_FINDING_TOOL) {
+    task.messages.push({
+      role: "tool",
+      content: await runCreateFinding(task.projectId, task.agentId, toolRequest.arguments),
+    });
+    return advance(task, onChunk, signal);
+  }
+
   // Enforced here too, not just by omitting the tool from the preamble - a model can still guess
   // or recall a tool id it isn't supposed to have, and the preamble alone is only a suggestion.
   if (agent?.execTools && !agent.execTools.includes(toolRequest.tool)) {
@@ -449,6 +609,7 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
       tool: toolRequest.tool,
       arguments: toolRequest.arguments,
       projectId: task.projectId,
+      agentId: task.agentId,
     });
   } catch (err) {
     // Previously this fed the error straight back and recursed immediately - the agent would

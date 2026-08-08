@@ -36,10 +36,11 @@ export function OrchestratorWorkbench({ agents, models, sessions }: Orchestrator
     error: projectsError,
     refresh: refreshProjects,
     create: createProject,
+    update: updateProject,
     remove: removeProject,
   } = useProjects();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools } =
+  const { tools, executions, loading: toolsLoading, error: toolsError, refresh: refreshTools, toggleTool } =
     useTools(selectedProjectId);
 
   const {
@@ -111,6 +112,7 @@ export function OrchestratorWorkbench({ agents, models, sessions }: Orchestrator
                 selectedProjectId={selectedProjectId}
                 onSelect={handleSelectProject}
                 onCreate={createProject}
+                onUpdate={updateProject}
                 onDelete={removeProject}
                 onRefresh={refreshProjects}
               />
@@ -174,12 +176,14 @@ export function OrchestratorWorkbench({ agents, models, sessions }: Orchestrator
                 loading={toolsLoading}
                 error={toolsError}
                 onRefresh={refreshTools}
+                onToggleEnabled={toggleTool}
               />
               <ExecutionHistoryPanel
                 executions={executions}
                 loading={toolsLoading}
                 error={toolsError}
                 onRefresh={refreshTools}
+                agents={agents}
               />
             </aside>
           </div>

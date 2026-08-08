@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Copy, Download, Terminal } from "lucide-react";
+import { AlertTriangle, Check, Copy, Download, Terminal } from "lucide-react";
 import type { ExecutionResult, ExecutionStatus } from "../types/execTool";
 import type { LiveOutputChunk } from "../hooks/useOrchestratorTask";
 import { GlassPanel, IconButton, ProgressRing, StatusPill, type Tone } from "./ui";
@@ -12,6 +12,11 @@ interface ExecutionConsoleProps {
   result?: ExecutionResult;
   /** Chunks received so far, in order — used while the execution is still streaming (no result yet). */
   liveOutput?: LiveOutputChunk[];
+  /** Set when the mission has scope configured but no target could be identified in this
+   * execution's arguments - see ExecutionRecord.scopeWarning. A clear scope violation is blocked
+   * outright before an execution ever reaches this console, so this is the only scope-related
+   * signal a human reviewing a pending confirmation ever sees here. */
+  scopeWarning?: string;
 }
 
 const STATUS_LABEL: Record<ExecutionStatus, string> = {
@@ -32,7 +37,14 @@ const STATUS_TONE: Record<ExecutionStatus, Tone> = {
   failed: "critical",
 };
 
-export function ExecutionConsole({ toolId, resolvedCommand, status, result, liveOutput }: ExecutionConsoleProps) {
+export function ExecutionConsole({
+  toolId,
+  resolvedCommand,
+  status,
+  result,
+  liveOutput,
+  scopeWarning,
+}: ExecutionConsoleProps) {
   const [copied, setCopied] = useState(false);
 
   const outputText = liveOutput?.length
@@ -71,6 +83,13 @@ export function ExecutionConsole({ toolId, resolvedCommand, status, result, live
       </div>
 
       <pre className="overflow-x-auto px-3.5 py-2.5 font-mono text-xs text-info">$ {resolvedCommand}</pre>
+
+      {scopeWarning && (
+        <div className="flex items-start gap-2 border-t border-border bg-warning-dim px-3.5 py-2.5 text-xs text-warning">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+          <span>{scopeWarning}</span>
+        </div>
+      )}
 
       {(!!liveOutput?.length || (result && (result.stdout || result.stderr))) && (
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap border-t border-border bg-black/20 px-3.5 py-3 font-mono text-xs">

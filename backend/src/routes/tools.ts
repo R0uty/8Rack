@@ -7,6 +7,7 @@ import {
   listExecutions,
   rejectExecution,
   requestExecution,
+  setToolEnabled,
 } from "../services/toolManager.js";
 import type { ToolRequestBody } from "../types/execTool.js";
 
@@ -17,6 +18,7 @@ interface ToolRequestBodyRaw {
   arguments?: unknown;
   projectId?: unknown;
   stdin?: unknown;
+  agentId?: unknown;
 }
 
 function isValidToolRequest(body: ToolRequestBodyRaw): body is ToolRequestBody {
@@ -27,12 +29,30 @@ function isValidToolRequest(body: ToolRequestBodyRaw): body is ToolRequestBody {
     body.arguments.every((a) => typeof a === "string") &&
     typeof body.projectId === "string" &&
     body.projectId.trim().length > 0 &&
-    (body.stdin === undefined || typeof body.stdin === "string")
+    (body.stdin === undefined || typeof body.stdin === "string") &&
+    (body.agentId === undefined || typeof body.agentId === "string")
   );
 }
 
 toolsRouter.get("/", (_req, res) => {
   res.json({ tools: listExecToolsWithStatus() });
+});
+
+/** Runtime enable/disable toggle - distinct from `availability` (whether the executable actually
+ * resolves), matching ExecTool.enabled's doc comment. */
+toolsRouter.patch("/:id", async (req, res, next) => {
+  const { enabled } = req.body as { enabled?: unknown };
+  if (typeof enabled !== "boolean") {
+    res.status(400).json({ error: 'Request must be {"enabled": boolean}', code: "INVALID_REQUEST" });
+    return;
+  }
+  try {
+    await setToolEnabled(req.params.id, enabled);
+    const tool = listExecToolsWithStatus().find((t) => t.id === req.params.id);
+    res.json({ tool });
+  } catch (err) {
+    next(err);
+  }
 });
 
 toolsRouter.get("/executions", (req, res) => {

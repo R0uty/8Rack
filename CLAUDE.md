@@ -192,16 +192,21 @@ ever building a path, which is the fix for a real path-traversal finding (see `D
 "Fixed: projectId path-traversal" section) - if you add a new project-scoped store, route it through
 `readProjectJson`/`writeProjectJson`, not a hand-rolled path.
 
-Plain chat (`useChat.ts`, one global `sessionStorage` thread per agent) is deliberately **not**
-project-scoped - see `DEVELOPMENT.md`'s "Projects" section for why, and the still-open
-"Project-scoped chat" item in `TODO.md`. A chat session can opt *into* project-scoping mid-
-conversation by picking a project (`ChatSessionPanel.tsx`'s Project selector), which switches that
-session over to `ChatTaskPanel.tsx` - backed by a real project-scoped `OrchestratorTask`, not
-`useChat` - starting a fresh thread with no memory of the prior plain-chat messages (an explicit
-in-UI notice says so; see `DEVELOPMENT.md`'s Medium-audit-findings section for why this couldn't
-be a lossless conversion instead). The frontend's own session concept (`hooks/useSessions.ts` -
-which agent/task tabs are open, independent of any one project) is a different, unrelated meaning
-of "session" from the backend's project-scoped history - don't conflate the two when reading
+Chat sessions dedup per **(agent, project)** pair, not per agent alone - `ChatView.tsx` has its own
+page-level "current project" selector (a `ProjectPanel`, same pattern as Workbench/Findings/
+Scanners/Reports, not shared globally across views), and picking an agent while a project is
+selected opens/resumes that project's own thread with the agent (`hooks/useSessions.ts#openChatSession`'s
+optional third `projectId` param). Picking a project - whether via that page-level selector at
+creation time, or later via `ChatSessionPanel.tsx`'s own per-session Project dropdown - switches a
+chat's body over to `ChatTaskPanel.tsx`: backed by a real project-scoped `OrchestratorTask`, not
+plain `useChat`, starting a fresh thread with no memory of any prior plain-chat messages in that
+same session (an explicit in-UI notice says so; see `DEVELOPMENT.md`'s Medium-audit-findings
+section for why this couldn't be a lossless conversion instead). A chat with **no** project picked
+stays exactly the old way - one global `sessionStorage` thread per agent, `useChat.ts`, no backend
+persistence (that non-goal didn't change - see `DEVELOPMENT.md`'s "Project-scoped chat" section for
+what did and didn't). The frontend's own session concept (`hooks/useSessions.ts` - which agent/task
+tabs are open) is a different, unrelated meaning of "session" from the backend's project-scoped
+history - don't conflate the two when reading
 either codebase.
 
 ### Settings vs. session storage

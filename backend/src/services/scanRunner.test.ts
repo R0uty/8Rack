@@ -22,7 +22,7 @@ const echoTool: ExecTool = {
   id: "scan-echo-tool",
   name: "Scan Echo Tool",
   description: "Runs a Node script for testing.",
-  category: "exec",
+  category: "os",
   executable: process.execPath,
   defaultArguments: ["-e"],
   timeout: 5000,

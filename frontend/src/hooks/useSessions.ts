@@ -13,10 +13,11 @@ export interface SessionMeta {
   model: string;
   createdAt: number;
   /** Task sessions: set by the Workbench "New Task" form before the tab even exists, so the new
-   * tab carries what it needs to auto-start itself once, on mount. Chat sessions: unset by
-   * default (a plain chat, no tool use); setting it (see setSessionProject below) opts that chat
-   * into tool use, backed by an OrchestratorTask instead of a plain streamed reply - see
-   * components/chat/ChatTaskPanel.tsx. */
+   * tab carries what it needs to auto-start itself once, on mount. Chat sessions: set at creation
+   * time from whichever project is currently selected on ChatView's own page-level selector (see
+   * openChatSession below), or later via setSessionProject - either way, a set projectId opts that
+   * chat into tool use, backed by an OrchestratorTask instead of a plain streamed reply, and is
+   * also the key (alongside agentId) chat sessions dedup on - see components/chat/ChatTaskPanel.tsx. */
   projectId?: string;
   /** Task sessions only - see projectId above. */
   initialObjective?: string;
@@ -68,10 +69,15 @@ function createId(): string {
  * (ChatSessionPanel / TaskSessionPanel), not here. This hook only tracks the lightweight metadata
  * and which tab is focused per kind.
  *
- * Chat enforces "one session per agent" - opening an agent that already has a chat session just
- * focuses it instead of duplicating it, since a chat is one ongoing conversation thread. Closing a
- * chat tab only hides it (SessionMeta.closed) rather than discarding it, so reopening that same
- * agent later resumes exactly where the conversation left off instead of silently starting blank.
+ * Chat enforces "one session per (agent, project) pair" - opening an agent that already has a chat
+ * session for the currently-selected project (see ChatView.tsx's own page-level project selector,
+ * matching Workbench/Findings/Scanners/Reports) just focuses it instead of duplicating it, since a
+ * chat is one ongoing conversation thread; picking a different project and reopening the same agent
+ * gets a genuinely separate thread. A chat session's `projectId` doubles as the existing
+ * tool-enabling field (see below) - a project-scoped chat starts tool-enabled by design, not as a
+ * separate opt-in. Closing a chat tab only hides it (SessionMeta.closed) rather than discarding it,
+ * so reopening that same (agent, project) pair later resumes exactly where the conversation left
+ * off instead of silently starting blank.
  * Task sessions don't: each "Start Task" always opens a brand new session, even for an agent that
  * already has one running or completed - e.g. asking the Recon Agent to run nmap in one task and
  * ffuf in another, concurrently, is exactly the kind of thing a real workflow needs (a single task
@@ -98,8 +104,10 @@ export function useSessions() {
   const sessions = useMemo(() => allSessions.filter((s) => !s.closed), [allSessions]);
 
   const openChatSession = useCallback(
-    (agentId: string | null, model: string): string => {
-      const existing = allSessions.find((s) => s.kind === "chat" && s.agentId === agentId);
+    (agentId: string | null, model: string, projectId?: string): string => {
+      const existing = allSessions.find(
+        (s) => s.kind === "chat" && s.agentId === agentId && s.projectId === projectId,
+      );
       if (existing) {
         if (existing.closed) {
           setAllSessions((prev) => prev.map((s) => (s.id === existing.id ? { ...s, closed: false } : s)));
@@ -108,7 +116,7 @@ export function useSessions() {
         return existing.id;
       }
       const id = createId();
-      setAllSessions((prev) => [...prev, { id, kind: "chat", agentId, model, createdAt: Date.now() }]);
+      setAllSessions((prev) => [...prev, { id, kind: "chat", agentId, model, projectId, createdAt: Date.now() }]);
       setActive((a) => ({ ...a, chat: id }));
       return id;
     },

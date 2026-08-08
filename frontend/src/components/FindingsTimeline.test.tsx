@@ -20,14 +20,16 @@ function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
     target: "example.com",
     value: "80/tcp",
     metadata: {},
-    evidence: "",
+    evidence: [],
     tags: [],
-    status: "verified",
+    status: "confirmed",
     history: [
-      { status: "discovered", at: now - 60_000 },
-      { status: "verified", at: now },
+      { status: "potential", at: now - 60_000 },
+      { status: "confirmed", at: now },
     ],
     sourceCount: 1,
+    executionIds: [],
+    relatedAgents: [],
     firstSeenAt: now - 60_000,
     lastSeenAt: now,
     createdAt: now - 60_000,
@@ -47,19 +49,19 @@ describe("FindingsTimeline", () => {
     expect(screen.getByText("Today")).toBeInTheDocument();
     const rows = screen.getAllByRole("button").filter((b) => b.textContent?.includes("Port 80/tcp open"));
     expect(rows).toHaveLength(2);
-    // Newest event ("Verified") should render before the older one ("Discovered").
-    expect(rows[0].textContent).toContain("Verified");
-    expect(rows[1].textContent).toContain("Discovered");
+    // Newest event ("Confirmed") should render before the older one ("Potential").
+    expect(rows[0].textContent).toContain("Confirmed");
+    expect(rows[1].textContent).toContain("Potential");
   });
 
   it("filters by event type", async () => {
     render(<FindingsTimeline findings={[fixtureFinding()]} onSelectFinding={vi.fn()} />);
     const user = userEvent.setup();
-    await user.selectOptions(screen.getByRole("combobox"), "verified");
+    await user.selectOptions(screen.getByRole("combobox"), "confirmed");
 
     const rows = screen.getAllByRole("button").filter((b) => b.textContent?.includes("Port 80/tcp open"));
     expect(rows).toHaveLength(1);
-    expect(rows[0].textContent).toContain("Verified");
+    expect(rows[0].textContent).toContain("Confirmed");
   });
 
   it("calls onSelectFinding when a row is clicked", async () => {

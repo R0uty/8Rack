@@ -33,7 +33,7 @@ export function useProjects() {
   );
 
   const update = useCallback(
-    async (id: string, patch: { name?: string; notes?: string }) => {
+    async (id: string, patch: Partial<Omit<Project, "id" | "createdAt">>) => {
       const project = await updateProject(id, patch);
       await refresh();
       return project;

@@ -1,4 +1,4 @@
-export type ExecToolCategory = "filesystem" | "network" | "recon" | "exec" | "vcs";
+export type ExecToolCategory = "recon" | "network" | "web" | "fuzzing" | "analysis" | "os" | "reporting";
 export type OutputParserKind = "text" | "lines" | "json";
 
 export interface ExecTool {
@@ -21,6 +21,7 @@ export type ExecToolAvailability = "available" | "unavailable";
 export interface ExecToolWithStatus extends ExecTool {
   availability: ExecToolAvailability;
   resolvedPath?: string;
+  version?: string;
 }
 
 export interface ExecutionResult {
@@ -46,6 +47,7 @@ export type ExecutionStatus =
 export interface ExecutionRecord {
   id: string;
   toolId: string;
+  agentId?: string;
   arguments: string[];
   resolvedCommand: string;
   cwd: string;
@@ -53,6 +55,7 @@ export interface ExecutionRecord {
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
+  scopeWarning?: string;
   result?: ExecutionResult;
   error?: string;
 }

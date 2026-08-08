@@ -40,6 +40,8 @@ export function ChatView({ agents, models, settings, manualModel, sessions, onFo
   } = sessions;
   // Owned once here (rather than inside each ChatSessionPanel) so every open tab shares the same
   // fetched list instead of re-requesting it independently - matches OrchestratorWorkbench.tsx.
+  // New sessions always start project-less; a project is assigned afterwards via each session's own
+  // ChatSessionPanel Project dropdown (onChangeProject), not picked up front here.
   const { projects } = useProjects();
 
   const handleSelectSession = (session: SessionMeta) => {
@@ -55,17 +57,19 @@ export function ChatView({ agents, models, settings, manualModel, sessions, onFo
         onSelect={setActiveChat}
         onClose={closeSession}
         agents={agents}
+        projects={projects}
         statuses={statuses}
         homeIcon={Compass}
         homeLabel="Command Center"
       />
 
-      <div className="min-h-0 flex-1 pt-4">
+      <div className="min-h-0 flex-1 overflow-y-auto pt-4">
         <div className={cn("h-full", activeChatId !== null && "hidden")}>
-          <div className="flex h-full flex-col items-center justify-center gap-6">
+          <div className="flex h-full flex-col items-center justify-center gap-6 pb-6">
             <AgentNetwork
               agents={agents}
               sessions={allSessions}
+              projects={projects}
               statuses={statuses}
               onSelectAgent={(agent) => openChatSession(agent.id, agent.model)}
               onSelectSession={handleSelectSession}
