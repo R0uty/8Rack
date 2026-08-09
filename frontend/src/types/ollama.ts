@@ -12,4 +12,7 @@ export interface OllamaModel {
     parameter_size?: string;
     quantization_level?: string;
   };
+  /** Ollama's own capability tags - "completion", "tools", "embedding", "thinking", "insert", ...
+   *  Absent on older Ollama versions, which is why every consumer must fail open. */
+  capabilities?: string[];
 }

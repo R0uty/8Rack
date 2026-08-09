@@ -28,6 +28,24 @@ describe("useModels", () => {
     expect(result.current.error).toBeNull();
   });
 
+  it("hides embedding-only models from `models` but keeps them in `allModels`", async () => {
+    const embedModel: OllamaModel = {
+      name: "nomic-embed-text:latest",
+      model: "nomic-embed-text:latest",
+      modified_at: "",
+      size: 0,
+      digest: "",
+      capabilities: ["embedding"],
+    };
+    mockFetchModels.mockResolvedValue([embedModel, fixtureModel]);
+    const { result } = renderHook(() => useModels());
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.models).toEqual([fixtureModel]);
+    expect(result.current.allModels).toEqual([embedModel, fixtureModel]);
+  });
+
   it("surfaces a load failure", async () => {
     mockFetchModels.mockRejectedValue(new Error("boom"));
     const { result } = renderHook(() => useModels());

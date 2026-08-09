@@ -480,6 +480,17 @@ a findings list, pending a decision on scope like last time. Baseline sanity che
 
 ## Polish / hardening
 
+- [x] Hide embedding-only models from the chat/agent model pickers. `nomic-embed-text` was listed
+      in every model dropdown and rejected by Ollama the moment it was picked
+      (`"nomic-embed-text:latest" does not support chat` — it's a `nomic-bert` encoder,
+      `capabilities: ["embedding"]`, no generative decoder); worse, `App.tsx`'s auto-select-first
+      effect could land on it with no user action, since Ollama listed it first. `capabilities?:
+      string[]` added to both `OllamaModel` types (it was absent, so nothing *could* filter on it),
+      new `frontend/src/lib/modelCapabilities.ts`, and the filter applied once in `useModels.ts`
+      rather than at each of the five picker call sites — so a sixth picker can't reintroduce it.
+      Fails open when `capabilities` is absent (older Ollama). `useModels` also returns unfiltered
+      `allModels`; backend `/api/models` still reports everything installed. 7 new frontend tests.
+      See DEVELOPMENT.md's "Embedding-only models are hidden from the chat/agent model pickers".
 - [x] Add automated tests — first pass, backend service-level unit tests (Vitest). Covers the
       exact gaps `DEVELOPMENT.md` had been flagging: `orchestrator.ts`'s state machine + the
       `parseToolRequest` fence/JSON-extraction logic (now exported for direct testing),

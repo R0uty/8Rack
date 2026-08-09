@@ -2659,3 +2659,56 @@ timestamp instead of one flat preformatted block.
 Task 5 (autonomous Mission Controller + live graph UI) remains - the last and largest of the five.
 `Project.scope`, the Assets/Activity views, and now `Finding.executionIds`/`relatedAgents` give it
 considerably more to build on than when it was first audited as ~10% done.
+
+## Embedding-only models are hidden from the chat/agent model pickers
+
+`nomic-embed-text` was showing up in every model dropdown and failing the moment it was picked.
+That isn't a wiring bug — it's what the model is. `/api/tags` reports it as `family: nomic-bert`,
+137M params, `capabilities: ["embedding"]`: an encoder with no generative decoder at all. Ollama
+itself refuses the request outright:
+
+```
+$ curl http://localhost:11434/api/chat -d '{"model":"nomic-embed-text:latest","messages":[...]}'
+{"error":"\"nomic-embed-text:latest\" does not support chat"}
+```
+
+It exists in this project for exactly one job: `EMBEDDING_MODEL` (`config/env.ts`, default
+`nomic-embed-text`), which `services/ragIndex.ts` uses to build and search the knowledge-base
+index. The reverse of the constraint documented in the "RAG over a workspace codebase" section —
+chat/coder models don't declare `embedding` and get rejected by `/api/embed` — is equally true, and
+neither direction was being enforced in the UI.
+
+The reason it leaked into the pickers is that nothing had ever looked at `capabilities`.
+`GET /api/models` forwards `/api/tags` verbatim (`routes/models.ts`), `useModels.ts` passed the
+result straight through, and the field wasn't even present on the `OllamaModel` type on either
+side — so no consumer *could* have filtered on it. Worse, `App.tsx`'s "auto-select the first model"
+effect (`if (!selectedModel && models.length > 0) setSelectedModel(models[0].name)`) picked
+whatever Ollama listed first, which on this machine was `nomic-embed-text:latest` — so a fresh load
+could land on an unusable model with no user action at all.
+
+**The fix.** `capabilities?: string[]` added to both `OllamaModel` types (backend and frontend
+mirror), and a new `frontend/src/lib/modelCapabilities.ts` with `isChatCapable`/`chatCapableModels`.
+The filter is applied **once, in `useModels.ts`**, not at each call site: every consumer of that
+hook's `models` (the sidebar `ModelSelector`, `ChatSessionPanel`, `OrchestratorWorkbench`,
+`AgentEditor`, `CommandPalette`) is a chat or agent picker where an embedding-only model can only
+ever fail, and filtering centrally means a sixth picker added later can't quietly reintroduce the
+bug. The hook additionally returns `allModels` (unfiltered), so the raw list stays available —
+there's no embedding-model picker today (`EMBEDDING_MODEL` is env-only, `KnowledgeBasePanel` just
+displays whatever RAG status reports), but hiding models behind a hook named `useModels` without
+leaving the full list reachable would be a trap.
+
+`isChatCapable` **fails open**: `/api/tags` only started reporting `capabilities` in recent Ollama
+versions, so a model that declares nothing (or an empty array) is treated as chat-capable rather
+than hidden. Hiding a working model on an older Ollama would be a far worse failure than showing
+one that errors clearly. Backend behavior is deliberately unchanged — `/api/models` still reports
+everything installed (it answers "what's installed", not "what can chat"), and if an embedding
+model does reach `/api/chat` some other way, Ollama's own `does not support chat` message already
+passes through `OllamaRequestError` intact.
+
+`AgentEditor.tsx`'s existing "keep the current value even if it's not in the list" `<option>`
+fallback (line 206) means an agent already saved against an embedding model still shows its
+configured model rather than silently switching — no migration needed.
+
+7 new frontend tests (`lib/modelCapabilities.test.ts` — completion/embedding-only/absent-and-empty
+capabilities, plus the list filter; `useModels.test.ts` — `models` filtered while `allModels` stays
+whole). 258 frontend / 328 backend tests, both `tsc` checks and `oxlint` clean.

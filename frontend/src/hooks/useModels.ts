@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchModels } from "../services/api";
+import { chatCapableModels } from "../lib/modelCapabilities";
 import type { OllamaModel } from "../types/ollama";
 
 export function useModels() {
@@ -23,5 +24,10 @@ export function useModels() {
     refresh();
   }, [refresh]);
 
-  return { models, loading, error, refresh };
+  // Every consumer of `models` is a chat or agent model picker, so the chat-capable filter lives
+  // here rather than at each call site - an embedding-only model in any of them can only fail.
+  // `allModels` keeps the unfiltered list available (e.g. for an embedding-model picker).
+  const chatModels = useMemo(() => chatCapableModels(models), [models]);
+
+  return { models: chatModels, allModels: models, loading, error, refresh };
 }
