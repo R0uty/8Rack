@@ -12,10 +12,10 @@ import {
 import type { ExecTool } from "../types/execTool.js";
 import type { ScanEvent } from "./scanRunner.js";
 
-vi.mock("./projectStore.js", () => ({
-  listProjectIds: vi.fn(async () => []),
-  readProjectJson: vi.fn(async () => []),
-  writeProjectJson: vi.fn(async () => undefined),
+vi.mock("./missionStore.js", () => ({
+  listMissionIds: vi.fn(async () => []),
+  readMissionJson: vi.fn(async () => []),
+  writeMissionJson: vi.fn(async () => undefined),
 }));
 
 const echoTool: ExecTool = {
@@ -165,14 +165,14 @@ describe("cancelScanRun", () => {
 });
 
 describe("listScans / getScan", () => {
-  it("only returns scans for the requested project, and getScan finds by id across projects", async () => {
+  it("only returns scans for the requested mission, and getScan finds by id across missions", async () => {
     await createScanRun("proj-list-a", "test-profile", "example.com");
     await createScanRun("proj-list-a", "test-profile", "example.com");
     const runB = await createScanRun("proj-list-b", "test-profile", "example.com");
 
     expect(listScans("proj-list-a")).toHaveLength(2);
     expect(listScans("proj-list-b")).toHaveLength(1);
-    expect(getScan(runB.id)?.projectId).toBe("proj-list-b");
+    expect(getScan(runB.id)?.missionId).toBe("proj-list-b");
     expect(getScan("nope")).toBeUndefined();
   });
 });

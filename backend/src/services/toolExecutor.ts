@@ -60,8 +60,14 @@ export function runExecutable(options: RunExecutableOptions): Promise<ExecutionR
       signal?.removeEventListener("abort", onExternalAbort);
     };
 
+    // The live onOutput callback (streamed to the confirming client) is bounded by the same
+    // maxOutputBytes cap as the accumulated stdout/stderr, and stops firing entirely once a stream
+    // is truncated - previously it fired unconditionally *before* the cap check below, so a tool
+    // emitting far more than maxOutputBytes (e.g. a huge ffuf wordlist, `head -c 1e8 /dev/urandom`)
+    // streamed unboundedly to the client and kept memory-buffering under res.write() backpressure,
+    // even though the final stored result was already correctly capped.
     const appendOutput = (stream: "stdout" | "stderr", text: string) => {
-      onOutput?.({ stream, data: text });
+      if (stream === "stdout" ? stdoutTruncated : stderrTruncated) return;
       const current = stream === "stdout" ? stdout : stderr;
       if (Buffer.byteLength(current, "utf-8") + Buffer.byteLength(text, "utf-8") > maxOutputBytes) {
         if (stream === "stdout") stdoutTruncated = true;
@@ -70,6 +76,7 @@ export function runExecutable(options: RunExecutableOptions): Promise<ExecutionR
       }
       if (stream === "stdout") stdout += text;
       else stderr += text;
+      onOutput?.({ stream, data: text });
     };
 
     let child;

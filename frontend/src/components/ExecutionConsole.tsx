@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { AlertTriangle, Check, Copy, Download, Terminal } from "lucide-react";
 import type { ExecutionResult, ExecutionStatus } from "../types/execTool";
-import type { LiveOutputChunk } from "../hooks/useOrchestratorTask";
 import { GlassPanel, IconButton, ProgressRing, StatusPill, type Tone } from "./ui";
 import { cn } from "../lib/cn";
 
@@ -10,8 +9,6 @@ interface ExecutionConsoleProps {
   resolvedCommand: string;
   status: ExecutionStatus;
   result?: ExecutionResult;
-  /** Chunks received so far, in order — used while the execution is still streaming (no result yet). */
-  liveOutput?: LiveOutputChunk[];
   /** Set when the mission has scope configured but no target could be identified in this
    * execution's arguments - see ExecutionRecord.scopeWarning. A clear scope violation is blocked
    * outright before an execution ever reaches this console, so this is the only scope-related
@@ -37,19 +34,10 @@ const STATUS_TONE: Record<ExecutionStatus, Tone> = {
   failed: "critical",
 };
 
-export function ExecutionConsole({
-  toolId,
-  resolvedCommand,
-  status,
-  result,
-  liveOutput,
-  scopeWarning,
-}: ExecutionConsoleProps) {
+export function ExecutionConsole({ toolId, resolvedCommand, status, result, scopeWarning }: ExecutionConsoleProps) {
   const [copied, setCopied] = useState(false);
 
-  const outputText = liveOutput?.length
-    ? liveOutput.map((c) => c.data).join("")
-    : [result?.stdout, result?.stderr].filter(Boolean).join("\n");
+  const outputText = [result?.stdout, result?.stderr].filter(Boolean).join("\n");
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(outputText);
@@ -91,20 +79,10 @@ export function ExecutionConsole({
         </div>
       )}
 
-      {(!!liveOutput?.length || (result && (result.stdout || result.stderr))) && (
+      {result && (result.stdout || result.stderr) && (
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap border-t border-border bg-black/20 px-3.5 py-3 font-mono text-xs">
-          {liveOutput && liveOutput.length > 0
-            ? liveOutput.map((chunk, i) => (
-                <span key={i} className={chunk.stream === "stderr" ? "text-critical" : "text-text"}>
-                  {chunk.data}
-                </span>
-              ))
-            : (
-                <>
-                  {result?.stdout && <span className="text-text">{result.stdout}</span>}
-                  {result?.stderr && <span className="text-critical">{result.stderr}</span>}
-                </>
-              )}
+          {result.stdout && <span className="text-text">{result.stdout}</span>}
+          {result.stderr && <span className="text-critical">{result.stderr}</span>}
         </pre>
       )}
 

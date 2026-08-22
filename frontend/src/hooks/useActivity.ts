@@ -1,41 +1,36 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchExecutions } from "../services/toolsApi";
-import { fetchTasks } from "../services/orchestratorApi";
-import type { ExecutionRecord } from "../types/execTool";
-import type { OrchestratorTask } from "../types/orchestrator";
+import { fetchActivity } from "../services/activityApi";
+import type { MissionEvent } from "../types/missionEvent";
 
-/** Merges a project's tool executions and Orchestrator task transcripts for the Activity feed -
- * both already exist and are separately fetchable (see useTools.ts/useOrchestratorTask.ts), this
- * just combines them for one project-wide view instead of adding a new backend entity. */
-export function useActivity(projectId: string | null) {
-  const [executions, setExecutions] = useState<ExecutionRecord[]>([]);
-  const [tasks, setTasks] = useState<OrchestratorTask[]>([]);
+/** The Mission Activity Timeline - an explicit, named-event log (see backend/src/services/
+ * activityLog.ts), superseding this hook's earlier client-side merge of tool executions +
+ * orchestrator task transcripts (that merge only covered execution/task-level detail; this covers
+ * every mission-scoped action - assets, work orders, findings, reports, scope blocks). */
+export function useActivity(missionId: string | null) {
+  const [events, setEvents] = useState<MissionEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    if (!projectId) {
-      setExecutions([]);
-      setTasks([]);
+    if (!missionId) {
+      setEvents([]);
       setLoading(false);
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const [executionList, taskList] = await Promise.all([fetchExecutions(projectId), fetchTasks(projectId)]);
-      setExecutions(executionList);
-      setTasks(taskList);
+      setEvents(await fetchActivity(missionId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load activity");
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [missionId]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  return { executions, tasks, loading, error, refresh };
+  return { events, loading, error, refresh };
 }

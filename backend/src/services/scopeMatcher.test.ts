@@ -34,6 +34,24 @@ describe("extractTargets", () => {
     expect(extractTargets(["example.com", "example.com"])).toEqual(["example.com"]);
   });
 
+  it("extracts a bare IPv6 address", () => {
+    expect(extractTargets(["ping6", "::1"])).toEqual(["::1"]);
+    expect(extractTargets(["nmap", "-6", "fe80::1"])).toEqual(["fe80::1"]);
+  });
+
+  it("extracts the bracketed IPv6 host out of a URL, without the brackets", () => {
+    expect(extractTargets(["curl", "http://[::1]:8080/path"])).toEqual(["::1"]);
+  });
+
+  it("normalizes decimal/hex/octal alternate IPv4 forms embedded in a URL", () => {
+    expect(extractTargets(["curl", "http://2130706433/"])).toEqual(["127.0.0.1"]);
+    expect(extractTargets(["curl", "http://0x7f000001/"])).toEqual(["127.0.0.1"]);
+  });
+
+  it("does not mistake a host:port suffix for an IPv6 address", () => {
+    expect(extractTargets(["curl", "example.com:8443"])).toEqual(["example.com"]);
+  });
+
   it("never double-counts an IP as also matching the domain pattern", () => {
     const targets = extractTargets(["10.0.0.5"]);
     expect(targets).toEqual(["10.0.0.5"]);
@@ -71,6 +89,24 @@ describe("isInScope", () => {
 
   it("is case-insensitive", () => {
     expect(isInScope("Example.COM", ["example.com"])).toBe(true);
+  });
+
+  it("matches an exact IPv6 address regardless of compression/case", () => {
+    expect(isInScope("::1", ["::1"])).toBe(true);
+    expect(isInScope("0:0:0:0:0:0:0:1", ["::1"])).toBe(true);
+    expect(isInScope("FE80::1", ["fe80::1"])).toBe(true);
+    expect(isInScope("::2", ["::1"])).toBe(false);
+  });
+
+  it("matches an IPv6 address inside a CIDR range", () => {
+    expect(isInScope("2001:db8::1", ["2001:db8::/32"])).toBe(true);
+    expect(isInScope("2001:db9::1", ["2001:db8::/32"])).toBe(false);
+  });
+
+  it("matches a scope entry that includes a port by host only", () => {
+    expect(isInScope("example.com", ["example.com:8080"])).toBe(true);
+    expect(isInScope("10.0.0.5", ["10.0.0.5:22"])).toBe(true);
+    expect(isInScope("other.com", ["example.com:8080"])).toBe(false);
   });
 });
 

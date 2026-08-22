@@ -27,11 +27,9 @@ const baseProps = {
   loading: false,
   error: null as string | null,
   warnings: [] as { file: string; reason: string }[],
-  activeAgentIds: new Set<string>(),
   onSelectAgent: vi.fn(),
   onRefresh: vi.fn(),
   onCreateAgent: vi.fn(),
-  onEditAgent: vi.fn(),
 };
 
 describe("AgentList", () => {
@@ -101,14 +99,5 @@ describe("AgentList", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "New agent" }));
     expect(onCreateAgent).toHaveBeenCalledTimes(1);
-  });
-
-  it("calls onEditAgent from the per-agent edit button", async () => {
-    const onEditAgent = vi.fn();
-    const a = agent();
-    render(<AgentList {...baseProps} agents={[a]} onEditAgent={onEditAgent} />);
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Edit Planner" }));
-    expect(onEditAgent).toHaveBeenCalledWith(a);
   });
 });

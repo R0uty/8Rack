@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -8,10 +8,11 @@ import { fileURLToPath } from "node:url";
 import { env } from "../config/env.js";
 import { runExecutable } from "./toolExecutor.js";
 import type { OutputChunk } from "./toolExecutor.js";
-import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
+import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStore.js";
 import { ingestExecution } from "./findingsManager.js";
-import { getProject } from "./projectManager.js";
+import { getMission, onMissionDeleted } from "./missionManager.js";
 import { checkScope } from "./scopeMatcher.js";
+import { logActivity } from "./activityLog.js";
 import {
   ExecToolDisabledError,
   ExecToolNotFoundError,
@@ -20,6 +21,7 @@ import {
   InvalidToolArgumentsError,
   OutOfScopeError,
   PrivilegedCommandError,
+  TooManyConcurrentExecutionsError,
 } from "./errors.js";
 import type {
   ExecTool,
@@ -39,9 +41,22 @@ const pendingStdin = new Map<string, string>();
 const MAX_HISTORY = 200;
 const EXECUTIONS_FILE = "executions.json";
 
+// A deleted mission's executions must stop returning from listExecutions/getExecution, and a
+// still-running one must actually be aborted - otherwise its eventual persistExecutions() call
+// would recreate the directory deleteMission() just removed. See missionManager.ts#onMissionDeleted.
+onMissionDeleted((missionId) => {
+  for (const [id, record] of executions) {
+    if (record.missionId !== missionId) continue;
+    runningControllers.get(id)?.abort();
+    runningControllers.delete(id);
+    pendingStdin.delete(id);
+    executions.delete(id);
+  }
+});
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-/** Not project-scoped (tools are global, unlike executions) - one shared file, not under
- * data/projects/, so it doesn't go through projectStore.ts's per-project helpers. */
+/** Not mission-scoped (tools are global, unlike executions) - one shared file, not under
+ * data/missions/, so it doesn't go through missionStore.ts's per-mission helpers. */
 const TOOL_OVERRIDES_FILE = path.resolve(__dirname, "../../data/tools/overrides.json");
 
 export function registerExecTool(tool: ExecTool): void {
@@ -101,7 +116,7 @@ export async function setToolEnabled(id: string, enabled: boolean): Promise<Exec
 
 /** Every existing binary that `executable` could refer to: an absolute path is just itself; a bare
  * name expands to all its PATH matches (`which -a`) plus a few common user-local bin dirs a Go /
- * ProjectDiscovery install lands in (~/.local/bin, ~/go/bin). Those extras matter because a service
+ * MissionDiscovery install lands in (~/.local/bin, ~/go/bin). Those extras matter because a service
  * launched outside a login shell - e.g. from an IDE - often has a narrower PATH that omits them, so
  * the genuine binary can be installed and working yet invisible to a plain `which`. */
 function executableCandidates(executable: string): string[] {
@@ -115,7 +130,7 @@ function executableCandidates(executable: string): string[] {
 
 /** Resolves a tool to the absolute path of its genuine binary. Without an identitySignature that's
  * simply the first candidate that exists (preserving the old first-on-PATH behaviour); with one, the
- * first candidate whose version output matches - so e.g. ProjectDiscovery httpx in ~/.local/bin is
+ * first candidate whose version output matches - so e.g. MissionDiscovery httpx in ~/.local/bin is
  * chosen even when python-httpx sits earlier on PATH. Undefined when nothing qualifies. */
 function resolveToolExecutable(tool: ExecTool): string | undefined {
   const candidates = executableCandidates(tool.executable);
@@ -141,7 +156,7 @@ function probeVersionOutput(tool: ExecTool, resolvedPath: string): string {
 }
 
 /** A human-readable version from a probe: the first semver-ish token if present (so multi-line
- * banners like ProjectDiscovery's collapse to just "v1.10.0"), else the first non-empty line. */
+ * banners like MissionDiscovery's collapse to just "v1.10.0"), else the first non-empty line. */
 function versionFromProbe(output: string): string | undefined {
   const semver = output.match(/v?\d+\.\d+(?:\.\d+)?[\w.-]*/)?.[0];
   if (semver) return semver;
@@ -161,7 +176,7 @@ function matchesIdentity(tool: ExecTool, probeOutput: string): boolean {
 /** Checks every registered tool's executable against PATH — mirrors agentManager's model-availability
  * check. resolveToolExecutable already applies the identity signature, so a resolved path is by
  * definition the genuine tool; a wrong same-named program (e.g. python-httpx instead of
- * ProjectDiscovery httpx) resolves to nothing and reports unavailable rather than "available but
+ * MissionDiscovery httpx) resolves to nothing and reports unavailable rather than "available but
  * every run fails". */
 export function listExecToolsWithStatus(): ExecToolWithStatus[] {
   return listExecTools().map((tool) => {
@@ -173,15 +188,41 @@ export function listExecToolsWithStatus(): ExecToolWithStatus[] {
   });
 }
 
-/** True if `candidate`, resolved against `base`, stays within `base`. */
-function isPathContained(base: string, candidate: string): boolean {
+/** Resolves `p` to its real (symlink-free) absolute path. `p` itself may not exist yet (e.g. a
+ * write_file target that hasn't been created) - falls back to the nearest existing ancestor's
+ * real path plus the remaining, not-yet-created suffix, so a symlinked ancestor directory is still
+ * followed even though the leaf itself can't be realpath'd directly. */
+function realOrNearestPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    const parent = path.dirname(p);
+    if (parent === p) return p; // reached the filesystem root without finding anything real
+    return path.join(realOrNearestPath(parent), path.basename(p));
+  }
+}
+
+/** True if `candidate`, resolved against `base` with every symlink on both sides followed, stays
+ * within `base`'s own real location. Following symlinks (not just a lexical path.resolve) closes
+ * the bypass where a symlink planted inside the workspace points outside it - read_file/grep/find
+ * would otherwise happily follow it to wherever it really points. `realBase` is the caller's
+ * already-resolved `realOrNearestPath(base)` - `base` is always env.workspaceRoot, a constant
+ * across a whole validateArguments call, so resolving it once there (not per argument here) avoids
+ * repeating the same realpathSync ancestor walk for every path-like argument. */
+function isPathContained(base: string, realBase: string, candidate: string): boolean {
   const resolved = path.resolve(base, candidate);
-  const relative = path.relative(base, resolved);
+  const realResolved = realOrNearestPath(resolved);
+  const relative = path.relative(realBase, realResolved);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+// ".." is deliberately included even though it contains no "/" - `ls ..` (a bare ".." argv
+// element) previously slipped past this check entirely and listed the workspace's parent
+// directory. isPathContained correctly rejects it once looksLikePath actually flags it. A leading
+// "~" is deliberately NOT included here - validateArguments rejects it outright before this is
+// ever called, so a "~" branch here would be dead code at its only call site.
 function looksLikePath(arg: string): boolean {
-  return arg.includes("/") || arg === "." || arg.startsWith("~");
+  return arg.includes("/") || arg === "." || arg === "..";
 }
 
 function validateArguments(tool: ExecTool, args: string[]): void {
@@ -194,8 +235,25 @@ function validateArguments(tool: ExecTool, args: string[]): void {
     }
   }
 
+  // Resolved once per call, not once per argument - base (env.workspaceRoot) never changes within
+  // a single validateArguments call, so repeating the realpathSync ancestor walk per argument was
+  // wasted I/O for tools invoked with several path-like arguments.
+  const realBase = realOrNearestPath(env.workspaceRoot);
+
   for (const arg of args) {
-    if (looksLikePath(arg) && !isPathContained(env.workspaceRoot, arg)) {
+    // "~" is never expanded by this check (path.resolve treats it as a literal directory name,
+    // not shell tilde-expansion), so evaluating it for containment would be actively misleading -
+    // it would resolve to a harmless-looking path *inside* the workspace while a tool that does
+    // its own shell expansion (bash -c "cat ~/...", git) reads the real home directory instead.
+    // Reject outright rather than pretend to have checked it.
+    if (arg.startsWith("~")) {
+      throw new InvalidToolArgumentsError(
+        `Argument "${arg}" starts with "~" - this isn't expanded by the workspace containment ` +
+          "check, and may be expanded differently (or not at all) by the tool itself. Use an " +
+          "absolute or workspace-relative path instead.",
+      );
+    }
+    if (looksLikePath(arg) && !isPathContained(env.workspaceRoot, realBase, arg)) {
       throw new InvalidToolArgumentsError(
         `Argument "${arg}" resolves outside the workspace root (${env.workspaceRoot})`,
       );
@@ -223,30 +281,30 @@ function assertNotPrivileged(resolvedCommand: string): void {
   }
 }
 
-/** Caps history per project (not globally) — each project's execution log is independent. */
-function trimHistory(projectId: string): void {
-  const projectRecords = [...executions.values()].filter((r) => r.projectId === projectId);
-  if (projectRecords.length <= MAX_HISTORY) return;
-  const oldestFirst = projectRecords.sort((a, b) => a.createdAt - b.createdAt);
-  for (const record of oldestFirst.slice(0, projectRecords.length - MAX_HISTORY)) {
+/** Caps history per mission (not globally) — each mission's execution log is independent. */
+function trimHistory(missionId: string): void {
+  const missionRecords = [...executions.values()].filter((r) => r.missionId === missionId);
+  if (missionRecords.length <= MAX_HISTORY) return;
+  const oldestFirst = missionRecords.sort((a, b) => a.createdAt - b.createdAt);
+  for (const record of oldestFirst.slice(0, missionRecords.length - MAX_HISTORY)) {
     executions.delete(record.id);
   }
 }
 
-function projectExecutions(projectId: string): ExecutionRecord[] {
-  return [...executions.values()].filter((r) => r.projectId === projectId).sort((a, b) => b.createdAt - a.createdAt);
+function missionExecutions(missionId: string): ExecutionRecord[] {
+  return [...executions.values()].filter((r) => r.missionId === missionId).sort((a, b) => b.createdAt - a.createdAt);
 }
 
-async function persistExecutions(projectId: string): Promise<void> {
-  await writeProjectJson(projectId, EXECUTIONS_FILE, projectExecutions(projectId));
+async function persistExecutions(missionId: string): Promise<void> {
+  await writeMissionJson(missionId, EXECUTIONS_FILE, missionExecutions(missionId));
 }
 
 /** Hydrates the in-memory execution history from disk — called once at server startup so history
  * survives a restart instead of only being written-through from that point on. */
 export async function loadExecutionsFromDisk(): Promise<void> {
-  const projectIds = await listProjectIds();
-  for (const projectId of projectIds) {
-    const records = await readProjectJson<ExecutionRecord>(projectId, EXECUTIONS_FILE);
+  const missionIds = await listMissionIds();
+  for (const missionId of missionIds) {
+    const records = await readMissionJson<ExecutionRecord>(missionId, EXECUTIONS_FILE);
     for (const record of records) executions.set(record.id, record);
   }
 }
@@ -274,6 +332,15 @@ async function runRecord(
   stdin: string | undefined,
   onOutput?: (chunk: OutputChunk) => void,
 ): Promise<ExecutionRecord> {
+  // Global cap on real OS processes spawned at once, shared across every caller (manual requests,
+  // Orchestrator tasks, Scan Profiles) since they all reach this one chokepoint - runningControllers
+  // already tracks exactly "processes currently spawned", so it doubles as the live count with no
+  // separate counter needed. Not a queue: the record is left untouched at pending_confirmation
+  // (nothing was spent) so the human can just confirm again once a slot frees up.
+  if (runningControllers.size >= env.maxConcurrentExecutions) {
+    throw new TooManyConcurrentExecutionsError(env.maxConcurrentExecutions);
+  }
+
   record.status = "running";
   record.startedAt = Date.now();
 
@@ -281,7 +348,7 @@ async function runRecord(
   runningControllers.set(record.id, controller);
 
   const result = await runExecutable({
-    // Run the identity-resolved absolute path (e.g. ProjectDiscovery httpx in ~/.local/bin), not the
+    // Run the identity-resolved absolute path (e.g. MissionDiscovery httpx in ~/.local/bin), not the
     // bare name the OS would resolve off PATH - which might be a wrong same-named program. Falls back
     // to the bare name only if resolution just failed (requestExecution already validated it).
     executable: resolveToolExecutable(tool) ?? tool.executable,
@@ -304,7 +371,7 @@ async function runRecord(
     `[tools] ${record.status}: ${record.resolvedCommand} (exit ${result.exitCode}, ${result.executionTimeMs}ms)`,
   );
 
-  // Execution -> Parser -> Findings Engine -> Project Findings. A parsing failure must never
+  // Execution -> Parser -> Findings Engine -> Mission Findings. A parsing failure must never
   // break the actual tool-execution flow, hence the isolated try/catch (ingestExecution itself
   // already never throws, but this stays defensive against future changes there).
   try {
@@ -313,8 +380,52 @@ async function runRecord(
     console.error(`[tools] findings ingestion failed for execution "${record.id}":`, err);
   }
 
-  await persistExecutions(record.projectId);
+  await persistExecutions(record.missionId);
   return record;
+}
+
+/**
+ * Best-effort mission scope check (see scopeMatcher.ts's module doc comment for why argv has no
+ * reliable "target"). Three outcomes for the confirming human: a clear violation blocks outright
+ * (thrown); nothing target-shaped found in the arguments is only a silent pass when no *strict*
+ * (non-empty) `scope` allowlist is configured - under a strict allowlist, "we can't tell what this
+ * targets" is exactly the case that allowlist exists to catch, so it blocks too; anything else
+ * returns a human-readable warning string (or undefined for a clean, checked, in-scope target) to
+ * attach to the execution record. A mission that can't be resolved (deleted, malformed id, or
+ * simply doesn't exist yet) can't have its scope checked at all - previously this failed silently
+ * with no trace; now it always surfaces as a warning rather than looking identical to "no scope
+ * configured".
+ */
+async function checkExecutionScope(missionId: string, args: string[]): Promise<string | undefined> {
+  let mission;
+  try {
+    mission = await getMission(missionId);
+  } catch (err) {
+    console.warn(`[tools] could not load mission "${missionId}" for scope check:`, err);
+  }
+  if (!mission) {
+    return "Mission scope could not be checked - the mission record could not be loaded.";
+  }
+
+  const verdict = checkScope(mission.scope, mission.outOfScope, args);
+  if (verdict.verdict === "out_of_scope") {
+    await logActivity(missionId, "scope_blocked", `Execution blocked - target(s) outside scope: ${verdict.offending.join(", ")}`, {
+      offending: verdict.offending,
+    });
+    throw new OutOfScopeError(verdict.offending);
+  }
+  if (verdict.verdict === "unknown") {
+    if (mission.scope?.length) {
+      await logActivity(
+        missionId,
+        "scope_blocked",
+        "Execution blocked - no identifiable target found and a strict scope allowlist is configured",
+      );
+      throw new OutOfScopeError(["(no identifiable target found in this command's arguments)"]);
+    }
+    return "Could not identify a target in this command's arguments - mission scope was not checked.";
+  }
+  return undefined;
 }
 
 /**
@@ -340,25 +451,22 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
     throw new ExecutableUnavailableError(tool.id, tool.executable);
   }
 
-  const resolvedCommand = buildResolvedCommand(tool, body.arguments);
+  // stdin content itself is deliberately never persisted into the record (see pendingStdin's own
+  // doc comment above) - but a confirming human should still see *that* content is about to be
+  // piped in and roughly how much, rather than a resolved command that looks identical to a
+  // no-content run. A byte count is a reasonable middle ground: enough for the human to sanity
+  // check ("that's way more than I expected") without the potentially large/sensitive content
+  // itself ever landing in the (listable, persisted) execution history.
+  const resolvedCommand =
+    buildResolvedCommand(tool, body.arguments) +
+    (body.stdin !== undefined ? ` (stdin: ${Buffer.byteLength(body.stdin, "utf-8")} bytes)` : "");
   assertNotPrivileged(resolvedCommand);
 
-  // Best-effort mission scope check - a clear violation blocks outright; when nothing
-  // target-shaped could be found in the arguments at all, the human sees a warning instead of a
-  // silent pass (see scopeMatcher.ts's module doc comment for why argv has no reliable "target").
-  let scopeWarning: string | undefined;
-  const project = await getProject(body.projectId).catch(() => undefined);
-  if (project) {
-    const verdict = checkScope(project.scope, project.outOfScope, body.arguments);
-    if (verdict.verdict === "out_of_scope") throw new OutOfScopeError(verdict.offending);
-    if (verdict.verdict === "unknown") {
-      scopeWarning = "Could not identify a target in this command's arguments - mission scope was not checked.";
-    }
-  }
+  const scopeWarning = await checkExecutionScope(body.missionId, body.arguments);
 
   const record: ExecutionRecord = {
     id: randomUUID(),
-    projectId: body.projectId,
+    missionId: body.missionId,
     toolId: tool.id,
     agentId: body.agentId,
     arguments: body.arguments,
@@ -369,8 +477,8 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
     scopeWarning,
   };
   executions.set(record.id, record);
-  trimHistory(record.projectId);
-  await persistExecutions(record.projectId);
+  trimHistory(record.missionId);
+  await persistExecutions(record.missionId);
 
   console.log(`[tools] requested: ${record.resolvedCommand} (execution ${record.id})`);
 
@@ -393,6 +501,12 @@ export async function confirmExecution(
   const tool = tools.get(record.toolId);
   if (!tool) throw new ExecToolNotFoundError(record.toolId);
 
+  // Re-check mission scope at confirm time too - the mission's scope could have been edited (or
+  // the mission deleted) in the window between request and confirm, and this is the last point
+  // before the command actually runs. A now-out-of-scope target throws and leaves the execution
+  // parked at pending_confirmation for the human to explicitly reject.
+  record.scopeWarning = await checkExecutionScope(record.missionId, record.arguments);
+
   const stdin = pendingStdin.get(id);
   pendingStdin.delete(id);
   return runRecord(record, tool, stdin, onOutput);
@@ -409,7 +523,7 @@ export function rejectExecution(id: string): ExecutionRecord {
   record.finishedAt = Date.now();
   // Fire-and-forget: rejectExecution stays synchronous (its route calls it inline), and a local
   // JSON write lagging by a tick is harmless here - see persistExecutions/DEVELOPMENT.md.
-  void persistExecutions(record.projectId).catch((err) => console.error("[tools] persist failed:", err));
+  void persistExecutions(record.missionId).catch((err) => console.error("[tools] persist failed:", err));
   return record;
 }
 
@@ -428,6 +542,6 @@ export function getExecution(id: string): ExecutionRecord | undefined {
   return executions.get(id);
 }
 
-export function listExecutions(projectId: string): ExecutionRecord[] {
-  return projectExecutions(projectId);
+export function listExecutions(missionId: string): ExecutionRecord[] {
+  return missionExecutions(missionId);
 }

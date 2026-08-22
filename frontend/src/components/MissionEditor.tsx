@@ -1,14 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { MissionStatus, Project } from "../types/project";
+import type { MissionStatus, Mission } from "../types/mission";
 import { Button, Sheet } from "./ui";
 import { cn } from "../lib/cn";
 
 interface MissionEditorProps {
   open: boolean;
-  /** The project being edited - MissionEditor is edit-only (creation stays ProjectPanel's quick
+  /** The mission being edited - MissionEditor is edit-only (creation stays MissionPanel's quick
    * name+notes form), so this is never null while open. */
-  project: Project | null;
-  onSave: (id: string, patch: Partial<Project>) => Promise<unknown>;
+  mission: Mission | null;
+  onSave: (id: string, patch: Partial<Mission>) => Promise<unknown>;
   onClose: () => void;
 }
 
@@ -34,7 +34,18 @@ const EMPTY_FORM: FormState = {
   rules: "",
 };
 
-const STATUS_OPTIONS: MissionStatus[] = ["planning", "active", "paused", "completed"];
+const STATUS_OPTIONS: MissionStatus[] = [
+  "draft",
+  "ready",
+  "recon",
+  "investigating",
+  "validating",
+  "reporting",
+  "review",
+  "completed",
+  "paused",
+  "cancelled",
+];
 
 /** epoch ms -> "YYYY-MM-DD" for the date input's value, in the local timezone (not UTC) so the
  * displayed date matches what the user picked when it was originally saved. */
@@ -60,16 +71,16 @@ function linesToList(value: string): string[] {
     .filter(Boolean);
 }
 
-function formFromProject(project: Project): FormState {
+function formFromMission(mission: Mission): FormState {
   return {
-    name: project.name,
-    notes: project.notes,
-    description: project.description ?? "",
-    status: project.status ?? "",
-    startDate: toDateInputValue(project.startDate),
-    scope: (project.scope ?? []).join("\n"),
-    outOfScope: (project.outOfScope ?? []).join("\n"),
-    rules: project.rules ?? "",
+    name: mission.name,
+    notes: mission.notes,
+    description: mission.description ?? "",
+    status: mission.status ?? "",
+    startDate: toDateInputValue(mission.startDate),
+    scope: (mission.scope ?? []).join("\n"),
+    outOfScope: (mission.outOfScope ?? []).join("\n"),
+    rules: mission.rules ?? "",
   };
 }
 
@@ -93,28 +104,28 @@ const TEXT_INPUT_CLASS =
   "w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60";
 
 /**
- * Edits a mission's structured fields (see types/project.ts) - opened from ProjectPanel's per-card
- * Edit affordance. Quick create (name + notes only) stays in ProjectPanel itself; this is
+ * Edits a mission's structured fields (see types/mission.ts) - opened from MissionPanel's per-card
+ * Edit affordance. Quick create (name + notes only) stays in MissionPanel itself; this is
  * deliberately edit-only so a brand-new mission doesn't have to be filled out in full before it
  * even has an id to key everything else (findings, executions, tasks) against.
  */
-export function MissionEditor({ open, project, onSave, onClose }: MissionEditorProps) {
+export function MissionEditor({ open, mission, onSave, onClose }: MissionEditorProps) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    setForm(project ? formFromProject(project) : EMPTY_FORM);
+    setForm(mission ? formFromMission(mission) : EMPTY_FORM);
     setError(null);
-  }, [open, project]);
+  }, [open, mission]);
 
   const handleSave = async () => {
-    if (!project || !form.name.trim() || busy) return;
+    if (!mission || !form.name.trim() || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await onSave(project.id, {
+      await onSave(mission.id, {
         name: form.name.trim(),
         notes: form.notes,
         description: form.description.trim(),
@@ -133,7 +144,7 @@ export function MissionEditor({ open, project, onSave, onClose }: MissionEditorP
   };
 
   return (
-    <Sheet open={open} onClose={onClose} title={project ? `Edit ${project.name}` : "Edit Mission"} width="max-w-lg">
+    <Sheet open={open} onClose={onClose} title={mission ? `Edit ${mission.name}` : "Edit Mission"} width="max-w-lg">
       <Field label="Name">
         <input
           type="text"

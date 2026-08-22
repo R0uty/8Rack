@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
 import { getFinding } from "./findingsManager.js";
-import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
+import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStore.js";
+import { onMissionDeleted } from "./missionManager.js";
+import { logActivity } from "./activityLog.js";
 import { FindingNotFoundError, NoFindingsSelectedError, ReportNotFoundError } from "./errors.js";
-import type { Report, ReportSection } from "../types/report.js";
+import type { Report, ReportSection, ReportStatus } from "../types/report.js";
 import type { Finding } from "../types/finding.js";
 
 const reports = new Map<string, Report>();
@@ -16,26 +18,34 @@ const REPORTS_FILE = "reports.json";
  * adding a dedicated one. */
 const DEFAULT_AGENT_ID = "report-writer";
 
-function projectReports(projectId: string): Report[] {
-  return [...reports.values()].filter((r) => r.projectId === projectId).sort((a, b) => b.createdAt - a.createdAt);
+function missionReports(missionId: string): Report[] {
+  return [...reports.values()].filter((r) => r.missionId === missionId).sort((a, b) => b.createdAt - a.createdAt);
 }
 
-async function persistReports(projectId: string): Promise<void> {
-  await writeProjectJson(projectId, REPORTS_FILE, projectReports(projectId));
+async function persistReports(missionId: string): Promise<void> {
+  await writeMissionJson(missionId, REPORTS_FILE, missionReports(missionId));
 }
+
+// See missionManager.ts#onMissionDeleted - a deleted mission's reports must stop returning from
+// the Reports tab instead of lingering as ghost records.
+onMissionDeleted((missionId) => {
+  for (const [id, report] of reports) {
+    if (report.missionId === missionId) reports.delete(id);
+  }
+});
 
 /** Hydrates in-memory reports from disk - called once at server startup so report history
- * survives a restart, same pattern as every other project-scoped store (executions/tasks/scans). */
+ * survives a restart, same pattern as every other mission-scoped store (executions/tasks/scans). */
 export async function loadReportsFromDisk(): Promise<void> {
-  const projectIds = await listProjectIds();
-  for (const projectId of projectIds) {
-    const records = await readProjectJson<Report>(projectId, REPORTS_FILE);
+  const missionIds = await listMissionIds();
+  for (const missionId of missionIds) {
+    const records = await readMissionJson<Report>(missionId, REPORTS_FILE);
     for (const record of records) reports.set(record.id, record);
   }
 }
 
-export function listReports(projectId: string): Report[] {
-  return projectReports(projectId);
+export function listReports(missionId: string): Report[] {
+  return missionReports(missionId);
 }
 
 export function getReport(id: string): Report | undefined {
@@ -46,7 +56,7 @@ export async function deleteReport(id: string): Promise<void> {
   const report = reports.get(id);
   if (!report) throw new ReportNotFoundError(id);
   reports.delete(id);
-  await persistReports(report.projectId);
+  await persistReports(report.missionId);
 }
 
 function buildPrompt(title: string, findings: Finding[]): string {
@@ -119,7 +129,7 @@ export function splitSections(markdown: string): ReportSection[] {
  * with the final persisted Report once generation completes.
  */
 export async function createReport(
-  projectId: string,
+  missionId: string,
   title: string,
   findingIds: string[],
   onChunk?: (content: string) => void,
@@ -150,16 +160,39 @@ export async function createReport(
   const agent = await getAgent(agentId);
   const report: Report = {
     id: randomUUID(),
-    projectId,
+    missionId,
     title,
     findingIds,
     agentId,
     model: model ?? agent?.model ?? "unknown",
     markdown,
     sections: splitSections(markdown),
+    status: "ai_generated",
     createdAt: Date.now(),
   };
   reports.set(report.id, report);
-  await persistReports(projectId);
+  await persistReports(missionId);
+  await logActivity(missionId, "report_generated", `Report generated: "${title}" (${findingIds.length} finding(s))`, {
+    reportId: report.id,
+    findingCount: findingIds.length,
+  });
+  return report;
+}
+
+/** Moves a report through the human-review pipeline (draft/ai_generated/human_review/ready/
+ * submitted) - see types/report.ts#ReportStatus for why there's no enforced transition graph. */
+export async function updateReportStatus(reportId: string, status: ReportStatus): Promise<Report> {
+  const report = reports.get(reportId);
+  if (!report) throw new ReportNotFoundError(reportId);
+  const previousStatus = report.status;
+  report.status = status;
+  await persistReports(report.missionId);
+  if (previousStatus !== status) {
+    await logActivity(report.missionId, "report_status_changed", `Report "${report.title}" status changed: ${previousStatus} -> ${status}`, {
+      reportId: report.id,
+      from: previousStatus,
+      to: status,
+    });
+  }
   return report;
 }

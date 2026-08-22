@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { SELECT_CLASS } from "./FindingsView";
-import { StatusDot, type Tone } from "./ui";
+import { SELECT_CLASS, StatusDot } from "./ui";
+import { FINDING_STATUSES, STATUS_TONE, STATUS_VERB } from "../lib/findingStatus";
 import { relativeTime } from "../lib/relativeTime";
-import type { Finding, FindingHistoryEntry, FindingStatus } from "../types/finding";
+import type { Finding, FindingHistoryEntry } from "../types/finding";
 
 interface FindingsTimelineProps {
   findings: Finding[];
@@ -12,26 +12,6 @@ interface FindingsTimelineProps {
 interface TimelineEvent extends FindingHistoryEntry {
   finding: Finding;
 }
-
-export const STATUS_TONE: Record<FindingStatus, Tone> = {
-  potential: "info",
-  investigating: "warning",
-  confirmed: "primary",
-  false_positive: "neutral",
-  reported: "primary",
-  duplicate: "neutral",
-};
-
-export const STATUS_VERB: Record<FindingStatus, string> = {
-  potential: "Potential",
-  investigating: "Investigating",
-  confirmed: "Confirmed",
-  false_positive: "False Positive",
-  reported: "Reported",
-  duplicate: "Duplicate",
-};
-
-const STATUSES: FindingStatus[] = ["potential", "investigating", "confirmed", "false_positive", "reported", "duplicate"];
 
 function dayLabel(ms: number): string {
   const date = new Date(ms);
@@ -61,8 +41,8 @@ function groupByDay(events: TimelineEvent[]): { label: string; events: TimelineE
   return groups;
 }
 
-/** Every finding already carries a full history[] from GET /api/projects/:id/findings - no new
- * backend call needed. Flattens every finding's history into one project-wide, newest-first,
+/** Every finding already carries a full history[] from GET /api/missions/:id/findings - no new
+ * backend call needed. Flattens every finding's history into one mission-wide, newest-first,
  * filterable, day-grouped timeline. */
 export function FindingsTimeline({ findings, onSelectFinding }: FindingsTimelineProps) {
   const [statusFilter, setStatusFilter] = useState("");
@@ -79,7 +59,7 @@ export function FindingsTimeline({ findings, onSelectFinding }: FindingsTimeline
     <div className="flex flex-col gap-3">
       <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className={`${SELECT_CLASS} self-start`}>
         <option value="">All events</option>
-        {STATUSES.map((s) => (
+        {FINDING_STATUSES.map((s) => (
           <option key={s} value={s}>
             {STATUS_VERB[s]}
           </option>

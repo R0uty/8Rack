@@ -19,7 +19,7 @@ const mockDeleteFinding = vi.mocked(deleteFinding);
 function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
   return {
     id: "finding-1",
-    projectId: "proj-1",
+    missionId: "proj-1",
     type: "port",
     severity: "info",
     title: "Port 80/tcp open",
@@ -46,7 +46,7 @@ function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
 }
 
 describe("useFindings", () => {
-  it("skips fetching and stays empty when projectId is null", async () => {
+  it("skips fetching and stays empty when missionId is null", async () => {
     const { result } = renderHook(() => useFindings(null));
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -54,7 +54,7 @@ describe("useFindings", () => {
     expect(mockFetchFindings).not.toHaveBeenCalled();
   });
 
-  it("loads findings scoped to a projectId", async () => {
+  it("loads findings scoped to a missionId", async () => {
     mockFetchFindings.mockResolvedValue([fixtureFinding()]);
     const { result } = renderHook(() => useFindings("proj-1"));
 
@@ -63,14 +63,14 @@ describe("useFindings", () => {
     expect(result.current.findings).toEqual([fixtureFinding()]);
   });
 
-  it("re-fetches when projectId changes", async () => {
+  it("re-fetches when missionId changes", async () => {
     mockFetchFindings.mockResolvedValue([]);
-    const { result, rerender } = renderHook(({ projectId }) => useFindings(projectId), {
-      initialProps: { projectId: "proj-1" as string | null },
+    const { result, rerender } = renderHook(({ missionId }) => useFindings(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
 
-    rerender({ projectId: "proj-2" });
+    rerender({ missionId: "proj-2" });
     await waitFor(() => expect(mockFetchFindings).toHaveBeenLastCalledWith("proj-2"));
   });
 

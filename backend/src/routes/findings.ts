@@ -114,33 +114,33 @@ function isValidPatchBody(body: PatchFindingBody): body is PatchFindingBody & Fi
   );
 }
 
-/** Project-scoped findings routes - GET /api/projects/:projectId/findings[...]. MUST be created
- * with { mergeParams: true } or req.params.projectId is undefined once mounted under a parent
- * router's :projectId segment (backend/src/index.ts). */
-export const projectFindingsRouter = Router({ mergeParams: true });
+/** Mission-scoped findings routes - GET /api/missions/:missionId/findings[...]. MUST be created
+ * with { mergeParams: true } or req.params.missionId is undefined once mounted under a parent
+ * router's :missionId segment (backend/src/index.ts). */
+export const missionFindingsRouter = Router({ mergeParams: true });
 
-function projectIdOf(req: { params: Record<string, string> }): string {
-  return req.params.projectId;
+function missionIdOf(req: { params: Record<string, string> }): string {
+  return req.params.missionId;
 }
 
-projectFindingsRouter.get("/", (req, res) => {
-  res.json({ findings: listFindings(projectIdOf(req), parseFiltersFromQuery(req.query as Record<string, unknown>)) });
+missionFindingsRouter.get("/", (req, res) => {
+  res.json({ findings: listFindings(missionIdOf(req), parseFiltersFromQuery(req.query as Record<string, unknown>)) });
 });
 
-projectFindingsRouter.get("/search", (req, res) => {
+missionFindingsRouter.get("/search", (req, res) => {
   const { q } = req.query;
   if (typeof q !== "string" || !q.trim()) {
     res.status(400).json({ error: "q query parameter is required", code: "INVALID_REQUEST" });
     return;
   }
-  res.json({ findings: searchFindings(projectIdOf(req), q) });
+  res.json({ findings: searchFindings(missionIdOf(req), q) });
 });
 
-projectFindingsRouter.get("/graph", (req, res) => {
-  res.json({ graph: buildFindingsGraph(projectIdOf(req)) });
+missionFindingsRouter.get("/graph", (req, res) => {
+  res.json({ graph: buildFindingsGraph(missionIdOf(req)) });
 });
 
-projectFindingsRouter.post("/", async (req, res, next) => {
+missionFindingsRouter.post("/", async (req, res, next) => {
   const body = req.body as CreateFindingBody;
   if (!isValidCreateBody(body)) {
     res.status(400).json({
@@ -150,7 +150,7 @@ projectFindingsRouter.post("/", async (req, res, next) => {
     return;
   }
   try {
-    const finding = await createFinding(projectIdOf(req), body);
+    const finding = await createFinding(missionIdOf(req), body);
     res.status(201).json({ finding });
   } catch (err) {
     next(err);

@@ -1,5 +1,5 @@
 import { StatusPill, type Tone } from "./ui";
-import { STATUS_TONE, STATUS_VERB } from "./FindingsTimeline";
+import { STATUS_TONE, STATUS_VERB } from "../lib/findingStatus";
 import { relativeTime } from "../lib/relativeTime";
 import { cn } from "../lib/cn";
 import type { Finding, FindingSeverity } from "../types/finding";

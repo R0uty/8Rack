@@ -1,8 +1,7 @@
 import type { CSSProperties } from "react";
-import { AlertTriangle, Pencil, Plus, RefreshCw } from "lucide-react";
+import { AlertTriangle, Plus, RefreshCw } from "lucide-react";
 import type { AgentConfigWarning, AgentWithStatus } from "../types/agent";
 import { iconFor } from "../lib/icons";
-import { cn } from "../lib/cn";
 import { FOCUS_RING, IconButton, SectionHeading, SkeletonRows, StatusDot } from "./ui";
 
 interface AgentListProps {
@@ -10,29 +9,15 @@ interface AgentListProps {
   loading: boolean;
   error: string | null;
   warnings: AgentConfigWarning[];
-  /** Agent ids with at least one open session (chat or task) - highlighted, not "selected"; an
-   * agent can have zero, one, or two (one per kind) open sessions at once. */
-  activeAgentIds: ReadonlySet<string>;
-  /** Opens (or focuses, if one is already open) a chat session for this agent. */
+  /** Opens the AgentEditor sheet for this agent - a row click and this are the same action, there's
+   * no longer a separate "chat with"/"edit" distinction now that Chat is gone. */
   onSelectAgent: (agent: AgentWithStatus) => void;
   onRefresh: () => void;
   /** Opens the AgentEditor sheet in create mode. */
   onCreateAgent: () => void;
-  /** Opens the AgentEditor sheet in edit mode for this agent. */
-  onEditAgent: (agent: AgentWithStatus) => void;
 }
 
-export function AgentList({
-  agents,
-  loading,
-  error,
-  warnings,
-  activeAgentIds,
-  onSelectAgent,
-  onRefresh,
-  onCreateAgent,
-  onEditAgent,
-}: AgentListProps) {
+export function AgentList({ agents, loading, error, warnings, onSelectAgent, onRefresh, onCreateAgent }: AgentListProps) {
   return (
     <section className="flex min-h-0 flex-1 flex-col">
       <SectionHeading
@@ -77,23 +62,16 @@ export function AgentList({
 
       <ul className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto">
         {agents.map((agent) => {
-          const active = activeAgentIds.has(agent.id);
           const Icon = iconFor(agent.icon);
           const style = { "--agent-color": agent.color } as CSSProperties;
           return (
-            <li key={agent.id} className="group/row relative">
+            <li key={agent.id}>
               <button
                 type="button"
                 style={style}
                 onClick={() => onSelectAgent(agent)}
                 title={agent.description}
-                className={cn(
-                  "group flex w-full items-start gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-all duration-150",
-                  FOCUS_RING,
-                  active
-                    ? "border-[var(--agent-color)]/50 bg-card-hover"
-                    : "border-transparent hover:border-border hover:bg-card",
-                )}
+                className={`group flex w-full items-start gap-2.5 rounded-lg border border-transparent px-2.5 py-2 text-left transition-all duration-150 hover:border-border hover:bg-card ${FOCUS_RING}`}
               >
                 <span
                   className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
@@ -102,7 +80,7 @@ export function AgentList({
                   <Icon size={14} strokeWidth={2} />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="flex items-center justify-between gap-2 pr-6">
+                  <span className="flex items-center justify-between gap-2">
                     <span className="truncate text-sm font-medium text-text">{agent.name}</span>
                     <StatusDot tone={agent.status === "online" ? "primary" : "neutral"} pulse={agent.status === "online"} />
                   </span>
@@ -112,16 +90,6 @@ export function AgentList({
                   </span>
                 </span>
               </button>
-              <IconButton
-                icon={Pencil}
-                label={`Edit ${agent.name}`}
-                size="sm"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEditAgent(agent);
-                }}
-                className="absolute right-2 top-2 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/row:opacity-100"
-              />
             </li>
           );
         })}

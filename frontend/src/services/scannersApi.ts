@@ -9,16 +9,16 @@ export async function fetchScanProfiles(): Promise<ScanProfile[]> {
   return data.profiles;
 }
 
-export async function fetchScans(projectId: string): Promise<ScanRun[]> {
-  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/scans`);
+export async function fetchScans(missionId: string): Promise<ScanRun[]> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/scans`);
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { scans?: ScanRun[] } | null;
   if (!data?.scans) throw new ApiError("Received an invalid response from the server", 502);
   return data.scans;
 }
 
-export async function previewScan(projectId: string, profileId: string, target: string): Promise<ScanPreview> {
-  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/scans/preview`, {
+export async function previewScan(missionId: string, profileId: string, target: string): Promise<ScanPreview> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/scans/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ profileId, target }),
@@ -48,13 +48,13 @@ export type ScanStreamEvent =
 /** Starts a scan run and streams live progress (scan/step/output events), resolving with the final
  * ScanRun once every step has settled or the run was cancelled. */
 export async function createScan(
-  projectId: string,
+  missionId: string,
   profileId: string,
   target: string,
   onEvent: (event: ScanStreamEvent) => void,
   signal?: AbortSignal,
 ): Promise<ScanRun> {
-  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/scans`, {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/scans`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ profileId, target }),
@@ -92,9 +92,9 @@ export async function createScan(
   return result;
 }
 
-export async function cancelScan(projectId: string, scanId: string): Promise<ScanRun> {
+export async function cancelScan(missionId: string, scanId: string): Promise<ScanRun> {
   const res = await apiFetch(
-    `/api/projects/${encodeURIComponent(projectId)}/scans/${encodeURIComponent(scanId)}/cancel`,
+    `/api/missions/${encodeURIComponent(missionId)}/scans/${encodeURIComponent(scanId)}/cancel`,
     { method: "POST" },
   );
   if (!res.ok) await throwForErrorResponse(res);

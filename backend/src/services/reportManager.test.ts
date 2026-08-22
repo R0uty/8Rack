@@ -2,16 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
 import { getFinding } from "./findingsManager.js";
-import { createReport, deleteReport, getReport, listReports, splitSections } from "./reportManager.js";
+import { createReport, deleteReport, getReport, listReports, splitSections, updateReportStatus } from "./reportManager.js";
+import { listActivity } from "./activityLog.js";
 import { FindingNotFoundError, NoFindingsSelectedError, ReportNotFoundError } from "./errors.js";
 import type { AgentWithStatus } from "../types/agent.js";
 import type { ChatResponseChunk } from "../types/ollama.js";
 import type { Finding } from "../types/finding.js";
 
-vi.mock("./projectStore.js", () => ({
-  listProjectIds: vi.fn(async () => []),
-  readProjectJson: vi.fn(async () => []),
-  writeProjectJson: vi.fn(async () => undefined),
+vi.mock("./missionStore.js", () => ({
+  listMissionIds: vi.fn(async () => []),
+  readMissionJson: vi.fn(async () => []),
+  writeMissionJson: vi.fn(async () => undefined),
 }));
 vi.mock("./agentManager.js", () => ({ getAgent: vi.fn() }));
 vi.mock("./chatService.js", () => ({ streamAgentChat: vi.fn() }));
@@ -39,7 +40,7 @@ const fixtureAgent: AgentWithStatus = {
 function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
   return {
     id: "finding-1",
-    projectId: "proj-1",
+    missionId: "proj-1",
     type: "potential_vulnerability",
     severity: "high",
     title: "SQL Injection in /login",
@@ -50,7 +51,7 @@ function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
     target: "example.com",
     value: "sqli-login",
     metadata: {},
-    evidence: [{ type: "note", content: "' OR 1=1 --", createdAt: 0 }],
+    evidence: [{ id: "ev-1", type: "note", content: "' OR 1=1 --", createdAt: 0 }],
     tags: [],
     status: "potential",
     history: [],
@@ -96,15 +97,19 @@ describe("createReport", () => {
     const report = await createReport("proj-1", "My Report", ["finding-1"], (c) => chunks.push(c));
 
     expect(chunks.join("")).toContain("Executive Summary");
-    expect(report.projectId).toBe("proj-1");
+    expect(report.missionId).toBe("proj-1");
     expect(report.title).toBe("My Report");
     expect(report.findingIds).toEqual(["finding-1"]);
     expect(report.agentId).toBe("report-writer");
     expect(report.model).toBe("test-model");
     expect(report.markdown).toContain("Executive Summary");
+    expect(report.status).toBe("ai_generated");
     expect(report.sections).toHaveLength(2);
     expect(report.sections[0]).toEqual({ heading: "Executive Summary", content: "Looks bad." });
     expect(report.sections[1]).toEqual({ heading: "Finding: SQLi", content: "Fix it." });
+
+    const events = listActivity("proj-1");
+    expect(events.some((e) => e.type === "report_generated" && e.meta?.reportId === report.id)).toBe(true);
   });
 
   it("passes the findings' data into the agent prompt", async () => {
@@ -163,7 +168,7 @@ describe("splitSections", () => {
 });
 
 describe("listReports / getReport / deleteReport", () => {
-  it("only returns reports for the requested project, and getReport finds by id across projects", async () => {
+  it("only returns reports for the requested mission, and getReport finds by id across missions", async () => {
     mockGetFinding.mockReturnValue(fixtureFinding());
     mockStreamAgentChat.mockImplementation(replyGenerator("body"));
 
@@ -173,7 +178,7 @@ describe("listReports / getReport / deleteReport", () => {
 
     expect(listReports("proj-list-a")).toHaveLength(2);
     expect(listReports("proj-list-b")).toHaveLength(1);
-    expect(getReport(reportB.id)?.projectId).toBe("proj-list-b");
+    expect(getReport(reportB.id)?.missionId).toBe("proj-list-b");
     expect(getReport("nope")).toBeUndefined();
   });
 
@@ -186,5 +191,31 @@ describe("listReports / getReport / deleteReport", () => {
     expect(getReport(report.id)).toBeUndefined();
 
     await expect(deleteReport(report.id)).rejects.toThrow(ReportNotFoundError);
+  });
+});
+
+describe("updateReportStatus", () => {
+  it("transitions and persists a report's status", async () => {
+    mockGetFinding.mockReturnValue(fixtureFinding());
+    mockStreamAgentChat.mockImplementation(replyGenerator("body"));
+
+    const report = await createReport("proj-status", "Report", ["finding-1"]);
+    expect(report.status).toBe("ai_generated");
+
+    const updated = await updateReportStatus(report.id, "human_review");
+    expect(updated.status).toBe("human_review");
+    expect(getReport(report.id)?.status).toBe("human_review");
+
+    const ready = await updateReportStatus(report.id, "ready");
+    expect(ready.status).toBe("ready");
+
+    const events = listActivity("proj-status").filter((e) => e.type === "report_status_changed");
+    expect(events).toHaveLength(2);
+    expect(events.some((e) => e.meta?.to === "human_review")).toBe(true);
+    expect(events.some((e) => e.meta?.to === "ready")).toBe(true);
+  });
+
+  it("refuses to update an unknown report id", async () => {
+    await expect(updateReportStatus("nope", "ready")).rejects.toThrow(ReportNotFoundError);
   });
 });

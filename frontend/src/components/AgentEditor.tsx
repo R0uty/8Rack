@@ -3,6 +3,7 @@ import { Trash2 } from "lucide-react";
 import type { Agent, AgentWithStatus } from "../types/agent";
 import type { ExecToolCategory, ExecToolWithStatus } from "../types/execTool";
 import type { OllamaModel } from "../types/ollama";
+import { AgentToolAccess } from "./AgentToolAccess";
 import { Button, Collapsible, Sheet } from "./ui";
 import { cn } from "../lib/cn";
 
@@ -347,6 +348,13 @@ export function AgentEditor({ open, agent, models, execTools, onSave, onDelete, 
             {execTools.length === 0 && <p className="py-1 text-xs text-muted">No exec tools registered.</p>}
           </div>
         )}
+
+        <div className="mt-3 rounded-lg border border-border bg-surface-2 p-2.5">
+          <AgentToolAccess
+            agent={{ execTools: form.execToolsMode === "custom" ? form.execTools : undefined }}
+            tools={execTools}
+          />
+        </div>
       </div>
 
       {error && <p className="mb-3 text-xs text-critical">{error}</p>}

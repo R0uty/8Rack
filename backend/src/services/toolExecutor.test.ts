@@ -97,6 +97,30 @@ describe("runExecutable", () => {
     expect(result.stdout.length).toBeLessThanOrEqual(5);
   });
 
+  it("stops calling onOutput once a stream is truncated, instead of streaming it unboundedly", async () => {
+    // Writes in two separate chunks so a naive "call onOutput before checking the cap" bug would
+    // fire it for both, even though the second chunk pushes well past maxOutputBytes.
+    const { executable, args } = node(
+      "process.stdout.write('01234567890123456789'); process.stdout.write('more-after-the-cap');",
+    );
+    const onOutput = vi.fn<(chunk: OutputChunk) => void>();
+
+    const result = await runExecutable({
+      executable,
+      args,
+      cwd: process.cwd(),
+      timeoutMs: 5000,
+      maxOutputBytes: 5,
+      onOutput,
+    });
+
+    expect(result.truncated).toBe(true);
+    // Only the chunks that actually fit under the cap were ever streamed to the client - the
+    // over-cap chunk(s) were dropped both from the accumulated result and the live stream.
+    const streamedBytes = onOutput.mock.calls.reduce((n, [chunk]) => n + Buffer.byteLength(chunk.data), 0);
+    expect(streamedBytes).toBeLessThanOrEqual(5);
+  });
+
   it("resolves (never rejects) with a failure result when the executable doesn't exist", async () => {
     const result = await runExecutable({
       executable: "/definitely/not/a/real/executable-xyz",

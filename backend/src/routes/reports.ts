@@ -1,16 +1,19 @@
 import { Router } from "express";
 import { RequestCancelledError } from "../services/errors.js";
-import { createReport, deleteReport, getReport, listReports } from "../services/reportManager.js";
+import { createReport, deleteReport, getReport, listReports, updateReportStatus } from "../services/reportManager.js";
 import { abortOnClientDisconnect } from "./streamUtils.js";
+import type { ReportStatus } from "../types/report.js";
 
-/** Project-scoped report routes - GET/POST/DELETE /api/projects/:projectId/reports[...]. MUST be
- * created with { mergeParams: true } or req.params.projectId is undefined once mounted under a
- * parent router's :projectId segment (backend/src/index.ts) - see routes/findings.ts/scanners.ts
+const VALID_STATUSES: ReportStatus[] = ["draft", "ai_generated", "human_review", "ready", "submitted"];
+
+/** Mission-scoped report routes - GET/POST/DELETE /api/missions/:missionId/reports[...]. MUST be
+ * created with { mergeParams: true } or req.params.missionId is undefined once mounted under a
+ * parent router's :missionId segment (backend/src/index.ts) - see routes/findings.ts/scanners.ts
  * for the same requirement. */
-export const projectReportsRouter = Router({ mergeParams: true });
+export const missionReportsRouter = Router({ mergeParams: true });
 
-function projectIdOf(req: { params: Record<string, string> }): string {
-  return req.params.projectId;
+function missionIdOf(req: { params: Record<string, string> }): string {
+  return req.params.missionId;
 }
 
 interface CreateReportBody {
@@ -34,11 +37,11 @@ function isValidCreateBody(
   );
 }
 
-projectReportsRouter.get("/", (req, res) => {
-  res.json({ reports: listReports(projectIdOf(req)) });
+missionReportsRouter.get("/", (req, res) => {
+  res.json({ reports: listReports(missionIdOf(req)) });
 });
 
-projectReportsRouter.get("/:id", (req, res) => {
+missionReportsRouter.get("/:id", (req, res) => {
   const report = getReport(req.params.id);
   if (!report) {
     res.status(404).json({ error: `Report "${req.params.id}" was not found`, code: "REPORT_NOT_FOUND" });
@@ -53,7 +56,7 @@ projectReportsRouter.get("/:id", (req, res) => {
  * routes/orchestrator.ts's runAndStreamTask (chunk-then-final-object), since this is a single
  * agent generation, not a multi-step process like a scan.
  */
-projectReportsRouter.post("/", async (req, res, next) => {
+missionReportsRouter.post("/", async (req, res, next) => {
   const body = req.body as CreateReportBody;
   if (!isValidCreateBody(body)) {
     res.status(400).json({
@@ -69,7 +72,7 @@ projectReportsRouter.post("/", async (req, res, next) => {
 
   try {
     const report = await createReport(
-      projectIdOf(req),
+      missionIdOf(req),
       body.title,
       body.findingIds,
       (content) => res.write(`${JSON.stringify({ type: "chunk", content })}\n`),
@@ -94,7 +97,24 @@ projectReportsRouter.post("/", async (req, res, next) => {
   }
 });
 
-projectReportsRouter.delete("/:id", async (req, res, next) => {
+missionReportsRouter.patch("/:id", async (req, res, next) => {
+  const status = (req.body as { status?: unknown }).status;
+  if (typeof status !== "string" || !VALID_STATUSES.includes(status as ReportStatus)) {
+    res.status(400).json({
+      error: `status must be one of: ${VALID_STATUSES.join(", ")}`,
+      code: "INVALID_REQUEST",
+    });
+    return;
+  }
+  try {
+    const report = await updateReportStatus(req.params.id, status as ReportStatus);
+    res.json({ report });
+  } catch (err) {
+    next(err);
+  }
+});
+
+missionReportsRouter.delete("/:id", async (req, res, next) => {
   try {
     await deleteReport(req.params.id);
     res.status(204).end();

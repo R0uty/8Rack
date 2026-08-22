@@ -10,10 +10,10 @@ dist-ssr/
 backend/workspace/*
 !backend/workspace/.gitkeep
 
-# User-created projects (tool execution + orchestrator task history) - runtime data, not shipped
-# config like backend/data/agents/*.json, and project notes may contain sensitive target/scope info
-backend/data/projects/*
-!backend/data/projects/.gitkeep
+# User-created missions (tool execution + orchestrator task history) - runtime data, not shipped
+# config like backend/data/agents/*.json, and mission notes may contain sensitive target/scope info
+backend/data/missions/*
+!backend/data/missions/.gitkeep
 
 # RAG knowledge base index (embedded chunks of the workspace codebase) - runtime data, and its
 # content could reflect proprietary/sensitive code from WORKSPACE_ROOT
@@ -46,6 +46,9 @@ npm-debug.log*
 
 *.local
 *.suo
+
+# graphify skill output - local knowledge-graph artifacts, not shipped
+graphify-out/
 *.ntvs*
 *.njsproj
 *.sln

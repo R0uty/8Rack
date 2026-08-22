@@ -14,15 +14,16 @@ import {
   cancelTask,
   continueTask,
   createTask,
+  getTask,
   listTasks,
   parseToolRequest,
   provideGuidance,
   resumeTask,
 } from "./orchestrator.js";
 import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragIndex.js";
-import { createFinding, getProjectFindings } from "./findingsManager.js";
+import { createFinding, getMissionFindings } from "./findingsManager.js";
 import { queryNvd } from "./cveLookup.js";
-import { getProject } from "./projectManager.js";
+import { getMission, onMissionDeleted } from "./missionManager.js";
 import type { AgentWithStatus } from "../types/agent.js";
 import type { ChatResponseChunk } from "../types/ollama.js";
 import type { ExecTool, ExecutionRecord } from "../types/execTool.js";
@@ -37,14 +38,29 @@ vi.mock("./toolManager.js", () => ({
   rejectExecution: vi.fn(),
   listExecTools: vi.fn(() => []),
 }));
-vi.mock("./projectStore.js", () => ({
-  listProjectIds: vi.fn(async () => []),
-  readProjectJson: vi.fn(async () => []),
-  writeProjectJson: vi.fn(async () => undefined),
+vi.mock("./missionStore.js", () => ({
+  listMissionIds: vi.fn(async () => []),
+  readMissionJson: vi.fn(async () => []),
+  writeMissionJson: vi.fn(async () => undefined),
 }));
-vi.mock("./projectManager.js", () => ({ getProject: vi.fn(async () => undefined) }));
+vi.mock("./missionManager.js", () => ({ getMission: vi.fn(async () => undefined), onMissionDeleted: vi.fn() }));
 vi.mock("./ragIndex.js", () => ({ getStatus: vi.fn(), search: vi.fn() }));
 vi.mock("./cveLookup.js", () => ({ queryNvd: vi.fn() }));
+
+const mockOnMissionDeleted = vi.mocked(onMissionDeleted);
+/** Captured once, synchronously, right here at module load - every module in this test's import
+ * graph that calls onMissionDeleted(...) at its own top level (orchestrator.ts's own handler, plus
+ * findingsManager.ts's transitively) registered by now, in whatever order ESM evaluated their
+ * imports. Must be captured before any test runs: the file's own `beforeEach(() =>
+ * vi.clearAllMocks())` below wipes mockOnMissionDeleted.mock.calls before every test, and these
+ * registrations only ever happen once, at import time - reading the array lazily inside
+ * purgeMission would see it empty by the time any test body actually calls it. */
+const registeredPurgeHandlers = mockOnMissionDeleted.mock.calls.map(([handler]) => handler);
+/** Replicates exactly what the real (mocked-away) missionManager.ts#deleteMission does: call every
+ * registered handler for the given id. */
+function purgeMission(missionId: string) {
+  for (const handler of registeredPurgeHandlers) handler(missionId);
+}
 
 const mockGetAgent = vi.mocked(getAgent);
 const mockStreamAgentChat = vi.mocked(streamAgentChat);
@@ -55,7 +71,7 @@ const mockCancelExecution = vi.mocked(cancelExecution);
 const mockRejectExecution = vi.mocked(rejectExecution);
 const mockGetRagStatus = vi.mocked(getRagStatus);
 const mockSearchKnowledgeBase = vi.mocked(searchKnowledgeBase);
-const mockGetProject = vi.mocked(getProject);
+const mockGetMission = vi.mocked(getMission);
 const mockQueryNvd = vi.mocked(queryNvd);
 
 const fixtureAgent: AgentWithStatus = {
@@ -87,7 +103,7 @@ function repliesGenerator(replies: string[]) {
 function fixtureExecution(overrides: Partial<ExecutionRecord> = {}): ExecutionRecord {
   return {
     id: randomUUID(),
-    projectId: "proj-1",
+    missionId: "proj-1",
     toolId: "bash",
     arguments: ["-c", "echo hi"],
     resolvedCommand: "bash -c 'echo hi'",
@@ -200,9 +216,12 @@ describe("createTask", () => {
     const task = await createTask("test-agent", "objective", "proj-1", undefined, undefined, "override-model");
 
     expect(task.model).toBe("override-model");
+    // Second arg is always a real per-task AbortSignal now (advanceTask creates one even when the
+    // caller doesn't pass one, so cancelTask can always reach an in-flight generation) - not the
+    // literal `undefined` a caller-omitted signal used to pass straight through as.
     expect(mockStreamAgentChat).toHaveBeenCalledWith(
       expect.objectContaining({ model: "override-model" }),
-      undefined,
+      expect.any(AbortSignal),
     );
   });
 
@@ -212,12 +231,15 @@ describe("createTask", () => {
     const task = await createTask("test-agent", "objective", "proj-1");
 
     expect(task.model).toBeUndefined();
-    expect(mockStreamAgentChat).toHaveBeenCalledWith(expect.objectContaining({ model: undefined }), undefined);
+    expect(mockStreamAgentChat).toHaveBeenCalledWith(
+      expect.objectContaining({ model: undefined }),
+      expect.any(AbortSignal),
+    );
   });
 
   it("requests the tool and lands on waiting_confirmation for a valid tool request", async () => {
     mockStreamAgentChat.mockImplementation(repliesGenerator(['{"tool": "bash", "arguments": ["-c", "ls"]}']));
-    const record = fixtureExecution({ projectId: "proj-1" });
+    const record = fixtureExecution({ missionId: "proj-1" });
     mockRequestExecution.mockResolvedValue(record);
 
     const task = await createTask("test-agent", "List files", "proj-1");
@@ -225,13 +247,56 @@ describe("createTask", () => {
     expect(mockRequestExecution).toHaveBeenCalledWith({
       tool: "bash",
       arguments: ["-c", "ls"],
-      projectId: "proj-1",
+      missionId: "proj-1",
       agentId: "test-agent",
     });
     expect(task.status).toBe("waiting_confirmation");
     expect(task.pendingExecutionId).toBe(record.id);
     expect(task.toolExecutionIds).toContain(record.id);
     expect(task.toolCallCount).toBe(1);
+  });
+
+  it("splits a write_file request's second argument into stdin instead of a literal argv element", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "write_file", "arguments": ["notes.txt", "line one\\nline two"]}']),
+    );
+    mockRequestExecution.mockResolvedValue(fixtureExecution({ toolId: "write_file" }));
+
+    await createTask("test-agent", "Save these notes", "proj-1");
+
+    expect(mockRequestExecution).toHaveBeenCalledWith({
+      tool: "write_file",
+      arguments: ["notes.txt"],
+      missionId: "proj-1",
+      agentId: "test-agent",
+      stdin: "line one\nline two",
+    });
+  });
+
+  it("passes undefined stdin for a write_file request with no content argument", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator(['{"tool": "write_file", "arguments": ["notes.txt"]}']));
+    mockRequestExecution.mockResolvedValue(fixtureExecution({ toolId: "write_file" }));
+
+    await createTask("test-agent", "Create an empty file", "proj-1");
+
+    expect(mockRequestExecution).toHaveBeenCalledWith({
+      tool: "write_file",
+      arguments: ["notes.txt"],
+      missionId: "proj-1",
+      agentId: "test-agent",
+      stdin: undefined,
+    });
+  });
+
+  it("does not split a non-write_file tool's arguments into stdin", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator(['{"tool": "bash", "arguments": ["-c", "ls"]}']));
+    mockRequestExecution.mockResolvedValue(fixtureExecution());
+
+    await createTask("test-agent", "List files", "proj-1");
+
+    const [[call]] = mockRequestExecution.mock.calls;
+    expect(call.arguments).toEqual(["-c", "ls"]);
+    expect(call.stdin).toBeUndefined();
   });
 
   it("pauses at waiting_guidance (not an automatic retry) when the tool request is invalid", async () => {
@@ -275,9 +340,25 @@ describe("createTask", () => {
     expect(request.toolsPreamble).toContain("nmap");
   });
 
-  it("prepends mission context to the tools preamble when the project has scope/rules/etc configured", async () => {
+  it("appends a tool's usageHint after its description in the preamble, when it has one", async () => {
+    mockListExecTools.mockReturnValue([
+      fixtureExecTool({ id: "nmap", usageHint: 'Use for port scanning. arguments: ["-sV", "<host>"]' }),
+      fixtureExecTool({ id: "dig" }), // no usageHint - must not blow up or leave a stray trailing space
+    ]);
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+
+    await createTask("test-agent", "objective", "proj-1");
+
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble).toContain(
+      '- nmap: Queries DNS records for a domain. Use for port scanning. arguments: ["-sV", "<host>"]',
+    );
+    expect(request.toolsPreamble).toContain("- dig: Queries DNS records for a domain.\n");
+  });
+
+  it("prepends mission context to the tools preamble when the mission has scope/rules/etc configured", async () => {
     mockListExecTools.mockReturnValue([fixtureExecTool({ id: "dig" })]);
-    mockGetProject.mockResolvedValueOnce({
+    mockGetMission.mockResolvedValueOnce({
       id: "proj-1",
       name: "Acme Pentest",
       notes: "",
@@ -286,23 +367,23 @@ describe("createTask", () => {
       scope: ["example.com", "*.example.com"],
       outOfScope: ["staging.example.com"],
       rules: "No automated DoS testing",
-      status: "active",
+      status: "recon",
     });
     mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
 
     await createTask("test-agent", "objective", "proj-1");
 
     const [[request]] = mockStreamAgentChat.mock.calls;
-    expect(request.toolsPreamble).toContain("Mission: Acme Pentest (status: active)");
+    expect(request.toolsPreamble).toContain("Mission: Acme Pentest (status: recon)");
     expect(request.toolsPreamble).toContain("Description: External web app assessment");
     expect(request.toolsPreamble).toContain("Scope (authorized targets): example.com, *.example.com");
     expect(request.toolsPreamble).toContain("Out of scope (never target these): staging.example.com");
     expect(request.toolsPreamble).toContain("Rules of engagement: No automated DoS testing");
   });
 
-  it("omits mission context entirely for a project with no mission fields set", async () => {
+  it("omits mission context entirely for a mission with no mission fields set", async () => {
     mockListExecTools.mockReturnValue([fixtureExecTool({ id: "dig" })]);
-    mockGetProject.mockResolvedValueOnce({ id: "proj-1", name: "Plain Project", notes: "", createdAt: 0 });
+    mockGetMission.mockResolvedValueOnce({ id: "proj-1", name: "Plain Mission", notes: "", createdAt: 0 });
     mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
 
     await createTask("test-agent", "objective", "proj-1");
@@ -311,9 +392,9 @@ describe("createTask", () => {
     expect(request.toolsPreamble).not.toContain("Mission:");
   });
 
-  it("never crashes tool-calling if the project lookup for mission context fails", async () => {
+  it("never crashes tool-calling if the mission lookup for mission context fails", async () => {
     mockListExecTools.mockReturnValue([fixtureExecTool({ id: "dig" })]);
-    mockGetProject.mockRejectedValueOnce(new Error("disk error"));
+    mockGetMission.mockRejectedValueOnce(new Error("disk error"));
     mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
 
     const task = await createTask("test-agent", "objective", "proj-1");
@@ -344,7 +425,7 @@ describe("createTask", () => {
     expect(mockRequestExecution).toHaveBeenCalledWith({
       tool: "dig",
       arguments: ["example.com"],
-      projectId: "proj-1",
+      missionId: "proj-1",
       agentId: "test-agent",
     });
     expect(task.status).toBe("waiting_confirmation");
@@ -469,8 +550,8 @@ describe("search_knowledge_base tool", () => {
 
 describe("query_findings tool", () => {
   it("skips confirmation entirely and returns matching findings", async () => {
-    const projectId = "proj-findings-1";
-    await createFinding(projectId, {
+    const missionId = "proj-findings-1";
+    await createFinding(missionId, {
       type: "port",
       severity: "info",
       title: "Port 80/tcp open",
@@ -482,7 +563,7 @@ describe("query_findings tool", () => {
       repliesGenerator(['{"tool": "query_findings", "arguments": []}', "There is one open port."]),
     );
 
-    const task = await createTask("test-agent", "What's known?", projectId);
+    const task = await createTask("test-agent", "What's known?", missionId);
 
     expect(mockRequestExecution).not.toHaveBeenCalled();
     expect(task.status).toBe("completed");
@@ -493,8 +574,8 @@ describe("query_findings tool", () => {
   });
 
   it("filters by type when a type argument is given", async () => {
-    const projectId = "proj-findings-2";
-    await createFinding(projectId, {
+    const missionId = "proj-findings-2";
+    await createFinding(missionId, {
       type: "port",
       severity: "info",
       title: "Port A",
@@ -502,7 +583,7 @@ describe("query_findings tool", () => {
       target: "t",
       value: "80/tcp",
     });
-    await createFinding(projectId, {
+    await createFinding(missionId, {
       type: "technology",
       severity: "info",
       title: "nginx",
@@ -514,7 +595,7 @@ describe("query_findings tool", () => {
       repliesGenerator(['{"tool": "query_findings", "arguments": ["technology"]}', "ok"]),
     );
 
-    const task = await createTask("test-agent", "objective", projectId);
+    const task = await createTask("test-agent", "objective", missionId);
     const toolMessage = task.messages.find((m) => m.role === "tool");
     const parsed = JSON.parse(toolMessage!.content);
     expect(parsed.parsedOutput).toHaveLength(1);
@@ -538,8 +619,8 @@ describe("query_findings tool", () => {
   });
 
   it("reports failure without crashing for an unrecognized type filter", async () => {
-    const projectId = "proj-findings-3";
-    await createFinding(projectId, {
+    const missionId = "proj-findings-3";
+    await createFinding(missionId, {
       type: "port",
       severity: "info",
       title: "p",
@@ -551,7 +632,7 @@ describe("query_findings tool", () => {
       repliesGenerator(['{"tool": "query_findings", "arguments": ["not-a-type"]}', "ok"]),
     );
 
-    const task = await createTask("test-agent", "objective", projectId);
+    const task = await createTask("test-agent", "objective", missionId);
     const toolMessage = task.messages.find((m) => m.role === "tool");
     expect(JSON.parse(toolMessage!.content).success).toBe(false);
   });
@@ -559,8 +640,8 @@ describe("query_findings tool", () => {
 
 describe("lookup_cves tool", () => {
   it("skips confirmation entirely and creates a linked cve finding", async () => {
-    const projectId = "proj-cve-1";
-    await createFinding(projectId, {
+    const missionId = "proj-cve-1";
+    await createFinding(missionId, {
       type: "technology",
       severity: "info",
       title: "nginx",
@@ -575,7 +656,7 @@ describe("lookup_cves tool", () => {
       repliesGenerator(['{"tool": "lookup_cves", "arguments": ["nginx"]}', "Found a critical CVE."]),
     );
 
-    const task = await createTask("test-agent", "Check nginx for CVEs", projectId);
+    const task = await createTask("test-agent", "Check nginx for CVEs", missionId);
 
     expect(mockQueryNvd).toHaveBeenCalledWith("nginx");
     expect(mockRequestExecution).not.toHaveBeenCalled();
@@ -590,13 +671,13 @@ describe("lookup_cves tool", () => {
   });
 
   it("falls back to target 'unknown' when no matching technology finding exists", async () => {
-    const projectId = "proj-cve-2";
+    const missionId = "proj-cve-2";
     mockQueryNvd.mockResolvedValue([
       { id: "CVE-2021-5678", description: "d", cvssScore: 5.0, cvssSeverity: "medium", cvssVector: null, references: [] },
     ]);
     mockStreamAgentChat.mockImplementation(repliesGenerator(['{"tool": "lookup_cves", "arguments": ["apache"]}', "ok"]));
 
-    const task = await createTask("test-agent", "objective", projectId);
+    const task = await createTask("test-agent", "objective", missionId);
     const toolMessage = task.messages.find((m) => m.role === "tool");
     const parsed = JSON.parse(toolMessage!.content);
     expect(parsed.parsedOutput[0].target).toBe("unknown");
@@ -665,12 +746,12 @@ describe("create_finding tool", () => {
   });
 
   it("skips confirmation entirely and records a real finding with source 'agent'", async () => {
-    const projectId = "proj-create-finding-1";
+    const missionId = "proj-create-finding-1";
     mockStreamAgentChat.mockImplementation(
       repliesGenerator([`{"tool": "create_finding", "arguments": [${JSON.stringify(validPayload)}]}`, "Recorded."]),
     );
 
-    const task = await createTask("recon-agent", "find bugs", projectId);
+    const task = await createTask("recon-agent", "find bugs", missionId);
 
     expect(mockRequestExecution).not.toHaveBeenCalled();
     expect(task.status).toBe("completed");
@@ -678,7 +759,7 @@ describe("create_finding tool", () => {
     const parsed = JSON.parse(toolMessage!.content);
     expect(parsed).toMatchObject({ tool: "create_finding", success: true });
 
-    const [finding] = getProjectFindings(projectId);
+    const [finding] = getMissionFindings(missionId);
     expect(finding).toMatchObject({
       type: "potential_vulnerability",
       severity: "high",
@@ -689,7 +770,16 @@ describe("create_finding tool", () => {
       impact: "Session hijack via stolen cookies",
     });
     expect(finding.relatedAgents).toEqual(["recon-agent"]);
-    expect(finding.evidence).toEqual([{ type: "agent_reasoning", content: "raw HTTP exchange", createdAt: expect.any(Number) }]);
+    expect(finding.evidence).toEqual([
+      {
+        id: expect.any(String),
+        type: "agent_reasoning",
+        content: "raw HTTP exchange",
+        createdAt: expect.any(Number),
+        agentId: "recon-agent",
+        executionId: undefined,
+      },
+    ]);
   });
 
   it("reports a validation error and recovers instead of crashing on malformed JSON", async () => {
@@ -724,7 +814,7 @@ describe("create_finding tool", () => {
     const parsed = JSON.parse(toolMessage!.content);
     expect(parsed.success).toBe(false);
     expect(parsed.message).toContain("confirmed_vulnerability");
-    expect(getProjectFindings("proj-create-finding-3")).toHaveLength(0);
+    expect(getMissionFindings("proj-create-finding-3")).toHaveLength(0);
   });
 
   it("still counts against the tool-call cap", async () => {
@@ -741,6 +831,114 @@ describe("create_finding tool", () => {
 
     expect(task.status).toBe("max_executions_reached");
     expect(task.toolCallCount).toBe(env.maxOrchestratorToolCalls);
+  });
+});
+
+describe("validate_finding tool", () => {
+  it("is always listed in the preamble, with no precondition", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+    await createTask("test-agent", "objective", "proj-validate-finding-preamble");
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble).toContain("validate_finding");
+  });
+
+  it("records a verdict, severity, and reasoning-as-evidence against an existing finding in the same mission", async () => {
+    const missionId = "proj-validate-finding-1";
+    const finding = await createFinding(missionId, {
+      type: "potential_vulnerability",
+      severity: "medium",
+      title: "Reflected XSS in search",
+      description: "The q parameter is reflected unescaped.",
+      target: "example.com",
+      value: "/search?q",
+    });
+
+    const payload = JSON.stringify({
+      findingId: finding.id,
+      verdict: "confirmed",
+      severity: "high",
+      notes: "Reproduced against /search?q=<script>...; reflected unescaped in response body.",
+    });
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([`{"tool": "validate_finding", "arguments": [${JSON.stringify(payload)}]}`, "Validated."]),
+    );
+
+    const task = await createTask("vulnerability-validator", "validate this finding", missionId);
+
+    expect(task.status).toBe("completed");
+    const toolMessage = task.messages.find((m) => m.role === "tool");
+    const parsed = JSON.parse(toolMessage!.content);
+    expect(parsed).toMatchObject({ tool: "validate_finding", success: true });
+
+    const [updated] = getMissionFindings(missionId);
+    expect(updated.status).toBe("confirmed");
+    expect(updated.severity).toBe("high");
+    expect(updated.validatedBy).toBe("vulnerability-validator");
+    expect(updated.relatedAgents).toContain("vulnerability-validator");
+    expect(updated.evidence).toContainEqual(
+      expect.objectContaining({
+        type: "agent_reasoning",
+        content: "Reproduced against /search?q=<script>...; reflected unescaped in response body.",
+        agentId: "vulnerability-validator",
+      }),
+    );
+  });
+
+  it("rejects a findingId that belongs to a different mission", async () => {
+    const otherMissionFinding = await createFinding("proj-validate-finding-other", {
+      type: "potential_vulnerability",
+      severity: "low",
+      title: "x",
+      description: "d",
+      target: "t",
+      value: "v",
+    });
+
+    const payload = JSON.stringify({ findingId: otherMissionFinding.id, verdict: "confirmed", notes: "n" });
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([`{"tool": "validate_finding", "arguments": [${JSON.stringify(payload)}]}`, "ok"]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-validate-finding-2");
+    const toolMessage = task.messages.find((m) => m.role === "tool");
+    const parsed = JSON.parse(toolMessage!.content);
+    expect(parsed.success).toBe(false);
+    expect(parsed.message).toContain("No finding");
+  });
+
+  it("reports a validation error and recovers instead of crashing on an invalid verdict", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "validate_finding", "arguments": ["{\\"findingId\\":\\"x\\",\\"verdict\\":\\"maybe\\",\\"notes\\":\\"n\\"}"]}', "ok"]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-validate-finding-3");
+
+    expect(task.status).toBe("completed");
+    const toolMessage = task.messages.find((m) => m.role === "tool");
+    const parsed = JSON.parse(toolMessage!.content);
+    expect(parsed.success).toBe(false);
+    expect(parsed.message).toContain("verdict");
+  });
+
+  it("requires non-empty notes explaining the reasoning", async () => {
+    const finding = await createFinding("proj-validate-finding-4", {
+      type: "potential_vulnerability",
+      severity: "low",
+      title: "x",
+      description: "d",
+      target: "t",
+      value: "v",
+    });
+    const payload = JSON.stringify({ findingId: finding.id, verdict: "false_positive", notes: "" });
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([`{"tool": "validate_finding", "arguments": [${JSON.stringify(payload)}]}`, "ok"]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-validate-finding-4");
+    const toolMessage = task.messages.find((m) => m.role === "tool");
+    const parsed = JSON.parse(toolMessage!.content);
+    expect(parsed.success).toBe(false);
+    expect(parsed.message).toContain("notes");
   });
 });
 
@@ -824,6 +1022,98 @@ describe("resumeTask", () => {
     const parsed = toolMessage && JSON.parse(toolMessage.content);
     expect(parsed.parsedOutput).toEqual(["a.txt", "b.txt"]);
     expect(parsed.stdout).toBe(record.result!.stdout);
+  });
+
+  it("truncates a large stdout/stderr before storing it in the task transcript", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "bash", "arguments": ["-c", "big"]}', "Done."]),
+    );
+    const record = fixtureExecution({ status: "pending_confirmation" });
+    mockRequestExecution.mockResolvedValue(record);
+    const task = await createTask("test-agent", "objective", "proj-transcript-1");
+
+    const hugeStdout = "x".repeat(10_000);
+    const hugeStderr = "e".repeat(10_000);
+    mockGetExecution.mockReturnValue(
+      fixtureExecution({
+        ...record,
+        status: "completed",
+        result: { ...record.result!, stdout: hugeStdout, stderr: hugeStderr },
+      }),
+    );
+    const resumed = await resumeTask(task.id);
+
+    const toolMessage = resumed.messages.find((m) => m.role === "tool");
+    const parsed = toolMessage && JSON.parse(toolMessage.content);
+    expect(Buffer.byteLength(parsed.stdout, "utf-8")).toBeLessThan(hugeStdout.length);
+    expect(parsed.stdout).toMatch(/\.\.\.\[truncated, showing 4000 of 10000 bytes\]$/);
+    expect(parsed.stderr).toMatch(/\.\.\.\[truncated, showing 4000 of 10000 bytes\]$/);
+  });
+
+  it("leaves stdout/stderr untouched when under the truncation cap", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "bash", "arguments": []}', "Done."]),
+    );
+    const record = fixtureExecution({ status: "pending_confirmation" });
+    mockRequestExecution.mockResolvedValue(record);
+    const task = await createTask("test-agent", "objective", "proj-transcript-2");
+
+    mockGetExecution.mockReturnValue(fixtureExecution({ ...record, status: "completed" }));
+    const resumed = await resumeTask(task.id);
+
+    const toolMessage = resumed.messages.find((m) => m.role === "tool");
+    const parsed = toolMessage && JSON.parse(toolMessage.content);
+    expect(parsed.stdout).toBe("hi\n");
+    expect(parsed.stdout).not.toContain("truncated");
+  });
+
+  it("caps a large array parsedOutput by item count, not just by bytes", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "subfinder", "arguments": ["-d", "example.com"]}', "Done."]),
+    );
+    const record = fixtureExecution({ status: "pending_confirmation", toolId: "subfinder" });
+    mockRequestExecution.mockResolvedValue(record);
+    const task = await createTask("test-agent", "objective", "proj-transcript-3");
+
+    const manySubdomains = Array.from({ length: 500 }, (_, i) => `sub${i}.example.com`);
+    mockGetExecution.mockReturnValue(
+      fixtureExecution({
+        ...record,
+        status: "completed",
+        result: { ...record.result!, parsedOutput: manySubdomains },
+      }),
+    );
+    const resumed = await resumeTask(task.id);
+
+    const toolMessage = resumed.messages.find((m) => m.role === "tool");
+    const parsed = toolMessage && JSON.parse(toolMessage.content);
+    expect(parsed.parsedOutput).toHaveLength(201); // 200 items + one truncation-note entry
+    expect(parsed.parsedOutput[0]).toBe("sub0.example.com");
+    expect(parsed.parsedOutput.at(-1)).toMatch(/truncated, showing 200 of 500 items/);
+  });
+
+  it("falls back to a truncated serialized string for an oversized object parsedOutput", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "nuclei", "arguments": ["-u", "https://example.com"]}', "Done."]),
+    );
+    const record = fixtureExecution({ status: "pending_confirmation", toolId: "nuclei" });
+    mockRequestExecution.mockResolvedValue(record);
+    const task = await createTask("test-agent", "objective", "proj-transcript-4");
+
+    const bigObject = { findings: Array.from({ length: 1000 }, (_, i) => ({ id: i, note: "x".repeat(20) })) };
+    mockGetExecution.mockReturnValue(
+      fixtureExecution({
+        ...record,
+        status: "completed",
+        result: { ...record.result!, parsedOutput: bigObject },
+      }),
+    );
+    const resumed = await resumeTask(task.id);
+
+    const toolMessage = resumed.messages.find((m) => m.role === "tool");
+    const parsed = toolMessage && JSON.parse(toolMessage.content);
+    expect(typeof parsed.parsedOutput).toBe("string");
+    expect(parsed.parsedOutput).toContain("...[truncated");
   });
 
   it("reaches max_time_reached once the task has been alive past the time cap", async () => {
@@ -1109,5 +1399,138 @@ describe("cancelTask", () => {
 
     expect(() => cancelTask(task.id)).not.toThrow();
     expect(cancelTask(task.id).status).toBe("cancelled");
+  });
+
+  it("aborts a generation that's still in flight when cancelTask arrives from a different caller, and never spawns a new execution afterward", async () => {
+    // Simulates the exact race the fix closes: a cancel arriving on a different connection than
+    // the one that created the task, while streamAgentChat is still awaiting a reply. Before the
+    // fix, cancelTask only flipped the in-memory status - this still-running call had no way to
+    // find out and would keep going, potentially reaching requestExecution below.
+    const generationStarted = new Promise<void>((resolveStarted) => {
+      mockStreamAgentChat.mockImplementation(async function* (_req, signal) {
+        resolveStarted();
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new RequestCancelledError()));
+        });
+        // Unreachable once aborted, but present so this stays a valid AsyncGenerator if it weren't.
+        yield { model: "test-model", created_at: "", message: { role: "assistant", content: '{"tool": "bash", "arguments": []}' }, done: true };
+      });
+    });
+
+    // createTask propagates RequestCancelledError as a rejection (same existing contract as a
+    // same-connection cancel - see advance()'s catch) rather than resolving with a cancelled-status
+    // task, so attach a no-op catch immediately to avoid an unhandled-rejection warning while the
+    // assertions below run against the in-memory task object instead.
+    const taskPromise = createTask("test-agent", "objective", "proj-cancel-race");
+    taskPromise.catch(() => {});
+    await generationStarted;
+
+    const [inFlightTask] = listTasks("proj-cancel-race");
+    expect(inFlightTask.status).toBe("running");
+
+    const cancelledNow = cancelTask(inFlightTask.id);
+    expect(cancelledNow.status).toBe("cancelled");
+
+    await expect(taskPromise).rejects.toThrow(RequestCancelledError);
+    expect(listTasks("proj-cancel-race")[0].status).toBe("cancelled");
+    expect(mockRequestExecution).not.toHaveBeenCalled();
+  });
+
+  it("blocks a tool execution if the task was cancelled in the gap between the reply and requestExecution", async () => {
+    // There's no await between streamAgentChat resolving and requestExecution being called for a
+    // plain tool request, so the only way to land a cancel in that exact window is to trigger it
+    // from inside the mocked reply itself - this exercises the explicit `signal?.aborted` check in
+    // advance() directly, independent of the RequestCancelledError path covered above.
+    mockStreamAgentChat.mockImplementation(async function* () {
+      const [current] = listTasks("proj-cancel-race-2");
+      cancelTask(current.id);
+      yield {
+        model: "test-model",
+        created_at: "",
+        message: { role: "assistant", content: '{"tool": "bash", "arguments": []}' },
+        done: true,
+      };
+    });
+
+    const task = await createTask("test-agent", "objective", "proj-cancel-race-2");
+
+    expect(task.status).toBe("cancelled");
+    expect(mockRequestExecution).not.toHaveBeenCalled();
+  });
+
+  it("rejects the execution and stays cancelled if the cancel lands while requestExecution itself is still in flight", async () => {
+    // A narrower version of the race above: this time the cancel arrives *during* requestExecution
+    // (simulating its own internal awaits, e.g. getMission()/persistExecutions() in
+    // toolManager.ts) rather than before it's called - so the execution genuinely gets created.
+    // Without the post-call signal check, advance() would overwrite the "cancelled" status
+    // cancelTask() just set back to "waiting_confirmation" once requestExecution resolves.
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "bash", "arguments": []}']),
+    );
+    const record = fixtureExecution({ status: "pending_confirmation" });
+    mockRequestExecution.mockImplementation(async () => {
+      const [current] = listTasks("proj-cancel-race-3");
+      cancelTask(current.id);
+      return record;
+    });
+    mockGetExecution.mockReturnValue(record);
+
+    const task = await createTask("test-agent", "objective", "proj-cancel-race-3");
+
+    expect(task.status).toBe("cancelled");
+    expect(task.pendingExecutionId).toBeUndefined();
+    expect(mockRejectExecution).toHaveBeenCalledWith(record.id);
+  });
+});
+
+describe("mission deletion purges tasks (ghost-record regression coverage)", () => {
+  it("removes a deleted mission's tasks from listTasks/getTask", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+    const task = await createTask("test-agent", "objective", "proj-purge-tasks-a");
+    expect(getTask(task.id)).toBeDefined();
+
+    purgeMission("proj-purge-tasks-a");
+
+    expect(listTasks("proj-purge-tasks-a")).toEqual([]);
+    expect(getTask(task.id)).toBeUndefined();
+  });
+
+  it("does not touch another mission's tasks", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+    const untouched = await createTask("test-agent", "objective", "proj-purge-tasks-untouched");
+    await createTask("test-agent", "objective", "proj-purge-tasks-b");
+
+    purgeMission("proj-purge-tasks-b");
+
+    expect(getTask(untouched.id)).toBeDefined();
+    expect(listTasks("proj-purge-tasks-untouched")).toHaveLength(1);
+  });
+
+  it("aborts a task whose generation is still in flight when its mission is deleted", async () => {
+    // Same "createTask propagates RequestCancelledError as a rejection" contract as cancelTask's
+    // own in-flight-abort test above, not a resolved cancelled-status task.
+    const generationStarted = new Promise<void>((resolveStarted) => {
+      mockStreamAgentChat.mockImplementation(async function* (_req, signal) {
+        resolveStarted();
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new RequestCancelledError()));
+        });
+        // Unreachable once aborted, but present so this stays a valid AsyncGenerator if it weren't.
+        yield { model: "test-model", created_at: "", message: { role: "assistant", content: "" }, done: true };
+      });
+    });
+
+    const taskPromise = createTask("test-agent", "objective", "proj-purge-tasks-running");
+    taskPromise.catch(() => {});
+    await generationStarted;
+    const [inFlight] = listTasks("proj-purge-tasks-running");
+    expect(inFlight.status).toBe("running");
+
+    purgeMission("proj-purge-tasks-running");
+
+    await expect(taskPromise).rejects.toThrow(RequestCancelledError);
+    // Purged from the Map entirely (synchronously, inside the purge handler itself), not just
+    // left there marked cancelled.
+    expect(getTask(inFlight.id)).toBeUndefined();
   });
 });

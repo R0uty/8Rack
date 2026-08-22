@@ -7,7 +7,8 @@ import {
   listExecToolsWithStatus,
   requestExecution,
 } from "./toolManager.js";
-import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
+import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStore.js";
+import { onMissionDeleted } from "./missionManager.js";
 import {
   InvalidScanStateError,
   InvalidScanTargetError,
@@ -37,26 +38,38 @@ function stepLabel(step: ScanProfileStep): string {
   return step.label ?? getExecTool(step.toolId)?.name ?? step.toolId;
 }
 
-function projectScans(projectId: string): ScanRun[] {
-  return [...scans.values()].filter((s) => s.projectId === projectId).sort((a, b) => b.createdAt - a.createdAt);
+function missionScans(missionId: string): ScanRun[] {
+  return [...scans.values()].filter((s) => s.missionId === missionId).sort((a, b) => b.createdAt - a.createdAt);
 }
 
-async function persistScans(projectId: string): Promise<void> {
-  await writeProjectJson(projectId, SCANS_FILE, projectScans(projectId));
+async function persistScans(missionId: string): Promise<void> {
+  await writeMissionJson(missionId, SCANS_FILE, missionScans(missionId));
 }
+
+// See missionManager.ts#onMissionDeleted. The actual running subprocess for an active step is
+// already aborted by toolManager.ts's own purge handler (same missionId, independently
+// registered) - this just stops the scan record itself from lingering as a ghost.
+onMissionDeleted((missionId) => {
+  for (const [id, scan] of scans) {
+    if (scan.missionId !== missionId) continue;
+    cancelledScans.delete(id);
+    activeExecutionByScan.delete(id);
+    scans.delete(id);
+  }
+});
 
 /** Hydrates in-memory scan history from disk - called once at server startup so history survives
  * a restart, same pattern as toolManager.ts#loadExecutionsFromDisk / orchestrator.ts#loadTasksFromDisk. */
 export async function loadScansFromDisk(): Promise<void> {
-  const projectIds = await listProjectIds();
-  for (const projectId of projectIds) {
-    const records = await readProjectJson<ScanRun>(projectId, SCANS_FILE);
+  const missionIds = await listMissionIds();
+  for (const missionId of missionIds) {
+    const records = await readMissionJson<ScanRun>(missionId, SCANS_FILE);
     for (const record of records) scans.set(record.id, record);
   }
 }
 
-export function listScans(projectId: string): ScanRun[] {
-  return projectScans(projectId);
+export function listScans(missionId: string): ScanRun[] {
+  return missionScans(missionId);
 }
 
 export function getScan(id: string): ScanRun | undefined {
@@ -124,7 +137,7 @@ export type ScanEvent =
  * cancel skips the remaining steps.
  */
 export async function createScanRun(
-  projectId: string,
+  missionId: string,
   profileId: string,
   targetInput: string,
   onEvent?: (event: ScanEvent) => void,
@@ -134,7 +147,7 @@ export async function createScanRun(
 
   const run: ScanRun = {
     id: randomUUID(),
-    projectId,
+    missionId,
     profileId: profile.id,
     profileName: profile.name,
     target,
@@ -149,7 +162,7 @@ export async function createScanRun(
     startedAt: Date.now(),
   };
   scans.set(run.id, run);
-  await persistScans(projectId);
+  await persistScans(missionId);
   onEvent?.({ type: "scan", scan: run });
 
   for (const step of run.steps) {
@@ -164,7 +177,7 @@ export async function createScanRun(
     onEvent?.({ type: "step", scanId: run.id, step });
 
     try {
-      const record = await requestExecution({ projectId, tool: step.toolId, arguments: step.arguments });
+      const record = await requestExecution({ missionId, tool: step.toolId, arguments: step.arguments });
       step.resolvedCommand = record.resolvedCommand;
 
       if (record.status === "pending_confirmation") {
@@ -192,14 +205,14 @@ export async function createScanRun(
 
     step.finishedAt = Date.now();
     onEvent?.({ type: "step", scanId: run.id, step });
-    await persistScans(projectId);
+    await persistScans(missionId);
   }
 
   run.status = cancelledScans.has(run.id) ? "cancelled" : "completed";
   run.finishedAt = Date.now();
   cancelledScans.delete(run.id);
   activeExecutionByScan.delete(run.id);
-  await persistScans(projectId);
+  await persistScans(missionId);
   onEvent?.({ type: "scan", scan: run });
   return run;
 }

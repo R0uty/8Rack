@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { fetchExecutions, fetchTools, setToolEnabled } from "../services/toolsApi";
 import type { ExecToolWithStatus, ExecutionRecord } from "../types/execTool";
 
-/** Execution history is project-scoped; pass null when no project is selected yet (tools list
+/** Execution history is mission-scoped; pass null when no mission is selected yet (tools list
  * still loads, but there's nothing to fetch execution history for). */
-export function useTools(projectId: string | null) {
+export function useTools(missionId: string | null) {
   const [tools, setTools] = useState<ExecToolWithStatus[]>([]);
   const [executions, setExecutions] = useState<ExecutionRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -16,7 +16,7 @@ export function useTools(projectId: string | null) {
     try {
       const [toolList, executionList] = await Promise.all([
         fetchTools(),
-        projectId ? fetchExecutions(projectId) : Promise.resolve([]),
+        missionId ? fetchExecutions(missionId) : Promise.resolve([]),
       ]);
       setTools(toolList);
       setExecutions(executionList);
@@ -25,7 +25,7 @@ export function useTools(projectId: string | null) {
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [missionId]);
 
   useEffect(() => {
     refresh();

@@ -12,7 +12,7 @@ function loadBookmarks(): Set<string> {
   }
 }
 
-/** Bookmarking an execution is a personal UI preference, not project data — persisted to
+/** Bookmarking an execution is a personal UI preference, not mission data — persisted to
  * localStorage (like Settings/theme), not the backend, so it stays put across a reload without
  * needing any server-side changes. */
 export function useBookmarks() {

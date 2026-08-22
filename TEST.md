@@ -49,3 +49,4 @@ The Command Center UI gives no on-screen explanation of any of the above - there
 near the Projects panel telling the user that selecting a project changes what happens when they
 click an agent. Worth adding a short inline hint (e.g. "Select a project to give agents tool
 access and persist this chat") if this continues to cause confusion.
+      

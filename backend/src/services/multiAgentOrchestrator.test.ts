@@ -15,10 +15,10 @@ vi.mock("./orchestrator.js", () => ({
   cancelTask: vi.fn(),
   provideGuidance: vi.fn(),
 }));
-vi.mock("./projectStore.js", () => ({
-  listProjectIds: vi.fn(async () => []),
-  readProjectJson: vi.fn(async () => []),
-  writeProjectJson: vi.fn(async () => undefined),
+vi.mock("./missionStore.js", () => ({
+  listMissionIds: vi.fn(async () => []),
+  readMissionJson: vi.fn(async () => []),
+  writeMissionJson: vi.fn(async () => undefined),
 }));
 
 const mockGetAgent = vi.mocked(getAgent);
@@ -47,7 +47,7 @@ function fixtureAgent(id: string, name: string): AgentWithStatus {
 function fixtureTask(overrides: Partial<OrchestratorTask> = {}): OrchestratorTask {
   return {
     id: randomUUID(),
-    projectId: "proj-1",
+    missionId: "proj-1",
     agentId: "agent-a",
     objective: "do the thing",
     messages: [],

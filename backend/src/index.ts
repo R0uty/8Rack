@@ -7,13 +7,16 @@ import { chatRouter } from "./routes/chat.js";
 import { agentsRouter } from "./routes/agents.js";
 import { toolsRouter } from "./routes/tools.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
-import { projectsRouter } from "./routes/projects.js";
+import { missionsRouter } from "./routes/missions.js";
 import { plansRouter } from "./routes/plans.js";
 import { ragRouter } from "./routes/rag.js";
-import { findingsRouter, projectFindingsRouter } from "./routes/findings.js";
-import { projectScansRouter, scannersRouter } from "./routes/scanners.js";
-import { projectReportsRouter } from "./routes/reports.js";
+import { findingsRouter, missionFindingsRouter } from "./routes/findings.js";
+import { missionScansRouter, scannersRouter } from "./routes/scanners.js";
+import { missionReportsRouter } from "./routes/reports.js";
+import { missionAssetsRouter } from "./routes/assets.js";
+import { missionWorkOrdersRouter } from "./routes/workOrders.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { hostCheck } from "./middleware/hostCheck.js";
 import { loadAgents } from "./services/agentManager.js";
 import {
   listExecToolsWithStatus,
@@ -24,9 +27,12 @@ import {
 import { loadTasksFromDisk } from "./services/orchestrator.js";
 import { loadPlansFromDisk } from "./services/multiAgentOrchestrator.js";
 import { loadFindingsFromDisk } from "./services/findingsManager.js";
+import { loadAssetsFromDisk } from "./services/assetManager.js";
+import { loadWorkOrdersFromDisk } from "./services/workOrderManager.js";
 import { loadScansFromDisk } from "./services/scanRunner.js";
 import { loadReportsFromDisk } from "./services/reportManager.js";
-import { listProjects } from "./services/projectManager.js";
+import { loadActivityFromDisk } from "./services/activityLog.js";
+import { listMissions } from "./services/missionManager.js";
 import { getStatus as getRagStatus, loadIndexFromDisk } from "./services/ragIndex.js";
 import { builtinExecTools } from "./tools/exec/builtins.js";
 import { registerScanProfile } from "./extensions/scannerRegistry.js";
@@ -37,6 +43,7 @@ for (const profile of builtinScanProfiles) registerScanProfile(profile);
 
 const app = express();
 
+app.use(hostCheck);
 app.use(cors({ origin: env.corsOrigin }));
 app.use(express.json());
 
@@ -49,14 +56,16 @@ app.use("/api/chat", chatRouter);
 app.use("/api/agents", agentsRouter);
 app.use("/api/tools", toolsRouter);
 app.use("/api/orchestrator", orchestratorRouter);
-app.use("/api/projects", projectsRouter);
-app.use("/api/projects/:projectId/findings", projectFindingsRouter);
+app.use("/api/missions", missionsRouter);
+app.use("/api/missions/:missionId/findings", missionFindingsRouter);
 app.use("/api/findings", findingsRouter);
 app.use("/api/plans", plansRouter);
 app.use("/api/rag", ragRouter);
 app.use("/api/scanners", scannersRouter);
-app.use("/api/projects/:projectId/scans", projectScansRouter);
-app.use("/api/projects/:projectId/reports", projectReportsRouter);
+app.use("/api/missions/:missionId/scans", missionScansRouter);
+app.use("/api/missions/:missionId/reports", missionReportsRouter);
+app.use("/api/missions/:missionId/assets", missionAssetsRouter);
+app.use("/api/missions/:missionId/workorders", missionWorkOrdersRouter);
 
 app.use(errorHandler);
 
@@ -84,15 +93,18 @@ app.listen(env.port, env.host, async () => {
         `(workspace: ${env.workspaceRoot})`,
     );
 
-    const projects = await listProjects();
+    const missions = await listMissions();
     await loadExecutionsFromDisk();
     await loadTasksFromDisk();
     await loadPlansFromDisk();
     await loadFindingsFromDisk();
+    await loadAssetsFromDisk();
+    await loadWorkOrdersFromDisk();
     await loadScansFromDisk();
     await loadReportsFromDisk();
+    await loadActivityFromDisk();
     console.log(
-      `Loaded ${projects.length} project(s) with persisted execution/task/plan/finding/scan/report history`,
+      `Loaded ${missions.length} mission(s) with persisted execution/task/plan/finding/asset/work-order/scan/report/activity history`,
     );
 
     await loadIndexFromDisk();

@@ -1,8 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Cpu, MessageSquare, Search, Settings, ServerCog, ShieldAlert, Sun, Workflow } from "lucide-react";
+import {
+  Bot,
+  FactoryIcon,
+  FileText,
+  FolderKanban,
+  ListChecks,
+  Radar,
+  Search,
+  Settings,
+  ShieldAlert,
+  Sun,
+  Wrench,
+} from "lucide-react";
 import type { AgentWithStatus } from "../../types/agent";
-import type { OllamaModel } from "../../types/ollama";
 import { iconFor } from "../../lib/icons";
 import { cn } from "../../lib/cn";
 import { type AppView, VIEW_LABEL } from "./types";
@@ -11,7 +22,7 @@ interface Command {
   id: string;
   label: string;
   hint: string;
-  icon: typeof MessageSquare;
+  icon: typeof Bot;
   keywords: string;
   run: () => void;
 }
@@ -22,29 +33,29 @@ interface CommandPaletteProps {
   onChangeView: (view: AppView) => void;
   agents: AgentWithStatus[];
   onSelectAgent: (agent: AgentWithStatus) => void;
-  models: OllamaModel[];
-  onSelectModel: (model: string) => void;
   onOpenSettings: () => void;
   onToggleTheme: () => void;
 }
 
-const VIEW_ICON: Record<AppView, typeof MessageSquare> = {
-  chat: MessageSquare,
-  workbench: ServerCog,
-  plans: Workflow,
+const VIEW_ICON: Record<AppView, typeof Bot> = {
+  factory: FactoryIcon,
+  missions: FolderKanban,
+  assets: Radar,
+  workorders: ListChecks,
   findings: ShieldAlert,
+  reports: FileText,
+  agents: Bot,
+  tools: Wrench,
 };
 
-/** Cmd/Ctrl+K palette - real, client-side actions only (view switching, agent/model selection,
- * settings, theme). No fake "AI command" input: everything here maps to an existing setter. */
+/** Cmd/Ctrl+K palette - real, client-side actions only (view switching, agent editing, settings,
+ * theme). No fake "AI command" input: everything here maps to an existing setter. */
 export function CommandPalette({
   open,
   onClose,
   onChangeView,
   agents,
   onSelectAgent,
-  models,
-  onSelectModel,
   onOpenSettings,
   onToggleTheme,
 }: CommandPaletteProps) {
@@ -77,22 +88,11 @@ export function CommandPalette({
     agents.forEach((agent) => {
       list.push({
         id: `agent-${agent.id}`,
-        label: `Chat with ${agent.name}`,
+        label: `Edit ${agent.name}`,
         hint: agent.status === "online" ? "Agent · online" : "Agent · offline",
         icon: iconFor(agent.icon),
         keywords: `agent ${agent.name} ${agent.description} ${agent.model}`,
         run: () => onSelectAgent(agent),
-      });
-    });
-
-    models.forEach((model) => {
-      list.push({
-        id: `model-${model.name}`,
-        label: `Set manual chat model to ${model.name}`,
-        hint: "Model",
-        icon: Cpu,
-        keywords: `model ${model.name}`,
-        run: () => onSelectModel(model.name),
       });
     });
 
@@ -114,7 +114,7 @@ export function CommandPalette({
     });
 
     return list;
-  }, [agents, models, onChangeView, onOpenSettings, onSelectAgent, onSelectModel, onToggleTheme]);
+  }, [agents, onChangeView, onOpenSettings, onSelectAgent, onToggleTheme]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

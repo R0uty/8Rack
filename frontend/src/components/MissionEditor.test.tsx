@@ -2,29 +2,29 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MissionEditor } from "./MissionEditor";
-import type { Project } from "../types/project";
+import type { Mission } from "../types/mission";
 
-function project(overrides: Partial<Project> = {}): Project {
+function mission(overrides: Partial<Mission> = {}): Mission {
   return { id: "p1", name: "Acme", notes: "", createdAt: 0, ...overrides };
 }
 
 function setup(overrides: Partial<React.ComponentProps<typeof MissionEditor>> = {}) {
   const onSave = vi.fn().mockResolvedValue(undefined);
   const onClose = vi.fn();
-  const props = { open: true, project: project(), onSave, onClose, ...overrides };
+  const props = { open: true, mission: mission(), onSave, onClose, ...overrides };
   render(<MissionEditor {...props} />);
   return { onSave, onClose };
 }
 
 describe("MissionEditor", () => {
-  it("pre-fills the form from the project's existing fields", () => {
+  it("pre-fills the form from the mission's existing fields", () => {
     setup({
-      project: project({
+      mission: mission({
         description: "External assessment",
         scope: ["example.com", "*.example.com"],
         outOfScope: ["staging.example.com"],
         rules: "No DoS",
-        status: "active",
+        status: "recon",
       }),
     });
 
@@ -32,7 +32,7 @@ describe("MissionEditor", () => {
     expect(screen.getByLabelText("Scope")).toHaveValue("example.com\n*.example.com");
     expect(screen.getByLabelText("Out of scope")).toHaveValue("staging.example.com");
     expect(screen.getByLabelText("Rules of engagement")).toHaveValue("No DoS");
-    expect(screen.getByLabelText("Status")).toHaveValue("active");
+    expect(screen.getByLabelText("Status")).toHaveValue("recon");
   });
 
   it("splits scope/outOfScope textareas into arrays, one entry per non-empty line", async () => {
@@ -71,8 +71,8 @@ describe("MissionEditor", () => {
     expect(new Date(patch.startDate!).toISOString().slice(0, 10)).toBe("2026-01-15");
   });
 
-  it("closes without saving when there is nothing to edit yet (project is null)", () => {
-    setup({ project: null });
+  it("closes without saving when there is nothing to edit yet (mission is null)", () => {
+    setup({ mission: null });
     expect(screen.getByText("Edit Mission")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });

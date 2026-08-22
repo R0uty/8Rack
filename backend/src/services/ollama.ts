@@ -4,6 +4,7 @@ import {
   OllamaConnectionError,
   OllamaModelNotFoundError,
   OllamaRequestError,
+  OllamaTimeoutError,
   RequestCancelledError,
 } from "./errors.js";
 import { getTool } from "../extensions/toolRegistry.js";
@@ -18,10 +19,24 @@ import type {
 
 const BASE_URL = env.ollamaBaseUrl;
 
-async function ollamaFetch(path: string, init?: RequestInit): Promise<Response> {
+/**
+ * `timeoutMs`, when given, bounds the whole call and is combined with any caller-supplied
+ * `init.signal` via AbortSignal.any - used for the quick, non-generation endpoints (/api/tags,
+ * /api/embed) where an unbounded hang has no other guard. /api/chat deliberately doesn't pass one
+ * here - streamChat implements its own idle-based (not fixed-duration) timeout instead, since a
+ * single long generation can legitimately run well past any fixed bound.
+ */
+async function ollamaFetch(path: string, init?: RequestInit, timeoutMs?: number): Promise<Response> {
+  const signal =
+    timeoutMs !== undefined
+      ? init?.signal
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs)
+      : (init?.signal ?? undefined);
   try {
-    return await fetch(`${BASE_URL}${path}`, init);
+    return await fetch(`${BASE_URL}${path}`, { ...init, signal });
   } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") throw new OllamaTimeoutError(err);
     if (err instanceof Error && err.name === "AbortError") throw new RequestCancelledError();
     throw new OllamaConnectionError(err);
   }
@@ -48,7 +63,7 @@ async function throwForErrorResponse(res: Response, model?: string): Promise<nev
 
 /** List models currently installed in the local Ollama instance. */
 export async function listModels(): Promise<OllamaModel[]> {
-  const res = await ollamaFetch("/api/tags");
+  const res = await ollamaFetch("/api/tags", undefined, env.ollamaRequestTimeoutMs);
   if (!res.ok) await throwForErrorResponse(res);
 
   const data = (await res.json()) as { models: OllamaModel[] };
@@ -63,11 +78,15 @@ export async function listModels(): Promise<OllamaModel[]> {
  * instead of a raw Ollama error string.
  */
 export async function embed(model: string, input: string[]): Promise<number[][]> {
-  const res = await ollamaFetch("/api/embed", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, input }),
-  });
+  const res = await ollamaFetch(
+    "/api/embed",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, input }),
+    },
+    env.ollamaRequestTimeoutMs,
+  );
 
   if (!res.ok) {
     let message = `Ollama request failed with status ${res.status}`;
@@ -91,56 +110,86 @@ export async function embed(model: string, input: string[]): Promise<number[][]>
 /**
  * Stream a chat completion from Ollama.
  * Yields one ChatResponseChunk per NDJSON line as they arrive.
+ *
+ * Bounded by *inactivity*, not total duration (env.ollamaChatIdleTimeoutMs, default 5 minutes,
+ * same reasoning as the frontend's own IDLE_TIMEOUT_MS) - the timer resets on every chunk actually
+ * received (including the very first one), so a large local model that's still slowly producing
+ * tokens is never killed by this; only a connection gone genuinely silent (Ollama wedged mid
+ * model-load, or hung) is. Combined with the caller's own `signal` via AbortSignal.any so either
+ * one stops the stream - `idleController.signal.aborted` is checked in both catch blocks to tell
+ * "we timed out" apart from "the caller cancelled us", since both surface as the same AbortError
+ * once fetch/the reader actually throws.
  */
 export async function* streamChat(
   request: ChatRequest,
   signal?: AbortSignal,
 ): AsyncGenerator<ChatResponseChunk> {
-  const res = await ollamaFetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...request, stream: true }),
-    signal,
-  });
-
-  if (!res.ok) await throwForErrorResponse(res, request.model);
-  if (!res.body) throw new OllamaRequestError("Ollama returned an empty response body", 502);
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  const parseLine = (line: string): ChatResponseChunk => {
-    try {
-      return JSON.parse(line) as ChatResponseChunk;
-    } catch {
-      throw new OllamaRequestError("Received an invalid response from Ollama", 502);
-    }
+  const idleController = new AbortController();
+  const combinedSignal = signal ? AbortSignal.any([signal, idleController.signal]) : idleController.signal;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const armIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => idleController.abort(), env.ollamaChatIdleTimeoutMs);
   };
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    armIdleTimer();
+    let res: Response;
+    try {
+      res = await ollamaFetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...request, stream: true }),
+        signal: combinedSignal,
+      });
+    } catch (err) {
+      if (idleController.signal.aborted) throw new OllamaTimeoutError(err);
+      throw err;
+    }
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
+    if (!res.ok) await throwForErrorResponse(res, request.model);
+    if (!res.body) throw new OllamaRequestError("Ollama returned an empty response body", 502);
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        yield parseLine(trimmed);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    const parseLine = (line: string): ChatResponseChunk => {
+      try {
+        return JSON.parse(line) as ChatResponseChunk;
+      } catch {
+        throw new OllamaRequestError("Received an invalid response from Ollama", 502);
       }
+    };
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        armIdleTimer();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          yield parseLine(trimmed);
+        }
+      }
+      if (buffer.trim()) {
+        yield parseLine(buffer.trim());
+      }
+    } catch (err) {
+      if (idleController.signal.aborted) throw new OllamaTimeoutError(err);
+      if (err instanceof Error && err.name === "AbortError") throw new RequestCancelledError();
+      throw err;
+    } finally {
+      reader.releaseLock();
     }
-    if (buffer.trim()) {
-      yield parseLine(buffer.trim());
-    }
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw new RequestCancelledError();
-    throw err;
   } finally {
-    reader.releaseLock();
+    clearTimeout(idleTimer);
   }
 }
 

@@ -2,15 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import { createFinding, deleteFinding, fetchFindings, updateFinding } from "../services/findingsApi";
 import type { Finding, FindingCreateInput, FindingPatchInput } from "../types/finding";
 
-/** Findings are project-scoped, like useTools' executions - pass null when no project is selected
+/** Findings are mission-scoped, like useTools' executions - pass null when no mission is selected
  * yet (findings stay empty, nothing is fetched). */
-export function useFindings(projectId: string | null) {
+export function useFindings(missionId: string | null) {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    if (!projectId) {
+    if (!missionId) {
       setFindings([]);
       setLoading(false);
       return;
@@ -18,13 +18,13 @@ export function useFindings(projectId: string | null) {
     setLoading(true);
     setError(null);
     try {
-      setFindings(await fetchFindings(projectId));
+      setFindings(await fetchFindings(missionId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load findings");
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [missionId]);
 
   useEffect(() => {
     refresh();
@@ -32,12 +32,12 @@ export function useFindings(projectId: string | null) {
 
   const create = useCallback(
     async (input: FindingCreateInput) => {
-      if (!projectId) throw new Error("No project selected");
-      const finding = await createFinding(projectId, input);
+      if (!missionId) throw new Error("No mission selected");
+      const finding = await createFinding(missionId, input);
       await refresh();
       return finding;
     },
-    [projectId, refresh],
+    [missionId, refresh],
   );
 
   const update = useCallback(

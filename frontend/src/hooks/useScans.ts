@@ -9,12 +9,12 @@ export interface LiveScanOutputChunk {
 
 /**
  * Drives the Scan Profiles feature (see backend/src/services/scanRunner.ts): load the built-in
- * profile roster + this project's scan history, preview a profile resolved against a target, then
+ * profile roster + this mission's scan history, preview a profile resolved against a target, then
  * run it end to end with live step/output progress. One confirmation (the preview step) covers the
  * whole chained run — see DEVELOPMENT.md's "Security scanners" section for why, unlike the
- * Orchestrator's per-tool-call approval. Project-scoped, mirrors useTools.ts/useOrchestratorTask.ts.
+ * Orchestrator's per-tool-call approval. Mission-scoped, mirrors useTools.ts's conventions.
  */
-export function useScans(projectId: string | null) {
+export function useScans(missionId: string | null) {
   const [profiles, setProfiles] = useState<ScanProfile[]>([]);
   const [scans, setScans] = useState<ScanRun[]>([]);
   const [run, setRun] = useState<ScanRun | null>(null);
@@ -32,7 +32,7 @@ export function useScans(projectId: string | null) {
     try {
       const [profileList, scanList] = await Promise.all([
         fetchScanProfiles(),
-        projectId ? fetchScans(projectId) : Promise.resolve([]),
+        missionId ? fetchScans(missionId) : Promise.resolve([]),
       ]);
       setProfiles(profileList);
       setScans(scanList);
@@ -41,7 +41,7 @@ export function useScans(projectId: string | null) {
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [missionId]);
 
   useEffect(() => {
     refresh();
@@ -49,11 +49,11 @@ export function useScans(projectId: string | null) {
 
   const runPreview = useCallback(
     async (profileId: string, target: string) => {
-      if (!projectId) return;
+      if (!missionId) return;
       setPreviewing(true);
       setError(null);
       try {
-        setPreview(await previewScan(projectId, profileId, target));
+        setPreview(await previewScan(missionId, profileId, target));
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to preview the scan");
         setPreview(null);
@@ -61,13 +61,13 @@ export function useScans(projectId: string | null) {
         setPreviewing(false);
       }
     },
-    [projectId],
+    [missionId],
   );
 
   const clearPreview = useCallback(() => setPreview(null), []);
 
   const runScan = useCallback(async () => {
-    if (!projectId || !preview) return;
+    if (!missionId || !preview) return;
     const { profile, target } = preview;
 
     setRunning(true);
@@ -78,7 +78,7 @@ export function useScans(projectId: string | null) {
     nextStepIndexRef.current = 0;
 
     try {
-      const finished = await createScan(projectId, profile.id, target, (event) => {
+      const finished = await createScan(missionId, profile.id, target, (event) => {
         if (event.type === "scan") {
           setRun(event.scan);
           nextStepIndexRef.current = 0;
@@ -106,19 +106,19 @@ export function useScans(projectId: string | null) {
     } finally {
       setRunning(false);
     }
-  }, [projectId, preview]);
+  }, [missionId, preview]);
 
   /** Tells the backend to stop scheduling further steps — the in-flight `createScan` request stays
    * open and keeps streaming (skipped steps, then the final cancelled ScanRun), so this doesn't
    * touch local state itself; `runScan`'s own stream handling settles it. */
   const cancel = useCallback(async () => {
-    if (!projectId || !run) return;
+    if (!missionId || !run) return;
     try {
-      await cancelScan(projectId, run.id);
+      await cancelScan(missionId, run.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to cancel the scan");
     }
-  }, [projectId, run]);
+  }, [missionId, run]);
 
   const reset = useCallback(() => {
     setRun(null);

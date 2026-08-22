@@ -8,24 +8,24 @@ async function unwrapFinding(res: Response): Promise<Finding> {
   return data.finding;
 }
 
-export async function fetchFindings(projectId: string): Promise<Finding[]> {
-  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/findings`);
+export async function fetchFindings(missionId: string): Promise<Finding[]> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/findings`);
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { findings?: Finding[] } | null;
   if (!data?.findings) throw new ApiError("Received an invalid response from the server", 502);
   return data.findings;
 }
 
-export async function fetchFindingsGraph(projectId: string): Promise<FindingsGraph> {
-  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/findings/graph`);
+export async function fetchFindingsGraph(missionId: string): Promise<FindingsGraph> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/findings/graph`);
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { graph?: FindingsGraph } | null;
   if (!data?.graph) throw new ApiError("Received an invalid response from the server", 502);
   return data.graph;
 }
 
-export async function createFinding(projectId: string, input: FindingCreateInput): Promise<Finding> {
-  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/findings`, {
+export async function createFinding(missionId: string, input: FindingCreateInput): Promise<Finding> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/findings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),

@@ -21,7 +21,7 @@ export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
 /**
  * A standard bug-bounty triage vocabulary. Renamed wholesale from an earlier, more mechanical set
  * (discovered/updated/verified/dismissed) - see findingsManager.ts's status-migration logic for
- * the old->new mapping applied to every finding loaded from disk, so existing project data keeps
+ * the old->new mapping applied to every finding loaded from disk, so existing mission data keeps
  * working without a manual migration step.
  */
 export type FindingStatus = "potential" | "investigating" | "confirmed" | "false_positive" | "reported" | "duplicate";
@@ -40,14 +40,21 @@ export type EvidenceType =
   | "note";
 
 export interface EvidenceItem {
+  id: string;
   type: EvidenceType;
   content: string;
   createdAt: number;
+  /** The agent that produced this evidence item, if any (e.g. a validator's reasoning) - part of
+   * the Finding -> Evidence -> Agent -> Mission trace the factory spec asks for. */
+  agentId?: string;
+  /** The ExecutionRecord this evidence item came from, if any (e.g. raw tool output) - completes
+   * the same trace's Evidence -> ToolExecution link. */
+  executionId?: string;
 }
 
 export interface Finding {
   id: string;
-  projectId: string;
+  missionId: string;
   type: FindingType;
   severity: FindingSeverity;
   title: string;
@@ -83,13 +90,16 @@ export interface Finding {
   executionIds: string[];
   /** Agent ids that created or touched this finding, oldest first. */
   relatedAgents: string[];
+  /** The agent id that most recently validated this finding (see orchestrator.ts's validate_finding
+   * pseudo-tool) - undefined until a validator has actually reviewed it. */
+  validatedBy?: string;
   firstSeenAt: number;
   lastSeenAt: number;
   createdAt: number;
   updatedAt: number;
 }
 
-/** What a parser returns - findingsManager fills in id/projectId/status/history/timestamps/sourceCount
+/** What a parser returns - findingsManager fills in id/missionId/status/history/timestamps/sourceCount
  * on ingest, and wraps a raw `evidence` string into a single EvidenceItem. Parsers must never produce
  * type "confirmed_vulnerability" - only "potential_vulnerability"; promotion to confirmed is a
  * human/agent action via PATCH /api/findings/:id. */
@@ -99,7 +109,7 @@ export type ParsedFinding = Pick<
 > &
   Partial<Pick<Finding, "metadata" | "tags" | "parameter" | "impact" | "reproductionSteps">> & { evidence?: string };
 
-/** Manual finding creation via POST /api/projects/:id/findings, or an agent's create_finding
+/** Manual finding creation via POST /api/missions/:id/findings, or an agent's create_finding
  * pseudo-tool (see orchestrator.ts) - source is forced to "manual"/"agent" respectively by the
  * service, `evidence` (if given) becomes this finding's first EvidenceItem. */
 export type FindingCreateInput = Pick<Finding, "type" | "severity" | "title" | "description" | "target" | "value"> &
@@ -110,7 +120,16 @@ export type FindingCreateInput = Pick<Finding, "type" | "severity" | "title" | "
 export type FindingPatchInput = Partial<
   Pick<
     Finding,
-    "severity" | "status" | "tags" | "description" | "title" | "confidence" | "parameter" | "impact" | "reproductionSteps"
+    | "severity"
+    | "status"
+    | "tags"
+    | "description"
+    | "title"
+    | "confidence"
+    | "parameter"
+    | "impact"
+    | "reproductionSteps"
+    | "validatedBy"
   >
 >;
 

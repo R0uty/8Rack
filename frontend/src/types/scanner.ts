@@ -32,7 +32,7 @@ export type ScanRunStatus = "running" | "completed" | "cancelled";
 
 export interface ScanRun {
   id: string;
-  projectId: string;
+  missionId: string;
   profileId: string;
   profileName: string;
   target: string;

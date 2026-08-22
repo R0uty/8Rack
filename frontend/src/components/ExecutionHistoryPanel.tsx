@@ -118,12 +118,12 @@ function HistoryRow({
 }
 
 /**
- * Search + bookmark across a project's tool execution history - the redesign's design spec asked
+ * Search + bookmark across a mission's tool execution history - the redesign's design spec asked
  * for this in the Terminal section but it was deliberately deferred at the time (see TODO.md) as
  * needing real state design. Search is a plain client-side filter over the executions this view
  * already has (no new backend endpoint - `GET /api/tools/executions` already returns full
  * stdout/stderr per record); bookmarks are frontend-only (hooks/useBookmarks.ts, localStorage),
- * since which executions matter to *you* is a personal preference, not project data.
+ * since which executions matter to *you* is a personal preference, not mission data.
  */
 export function ExecutionHistoryPanel({ executions, loading, error, onRefresh, agents }: ExecutionHistoryPanelProps) {
   const [query, setQuery] = useState("");

@@ -1,16 +1,16 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, ShieldAlert, Sparkles } from "lucide-react";
-import { STATUS_TONE, STATUS_VERB } from "./FindingsTimeline";
 import { Button, Sheet, StatusDot, StatusPill, type Tone } from "./ui";
 import { streamChat } from "../services/api";
 import { lookupCves } from "../services/findingsApi";
+import { FINDING_STATUSES, STATUS_TONE, STATUS_VERB } from "../lib/findingStatus";
 import { relativeTime } from "../lib/relativeTime";
 import { cn } from "../lib/cn";
 import type { EvidenceType, Finding, FindingPatchInput, FindingSeverity, FindingStatus } from "../types/finding";
 
 interface FindingDetailsProps {
   finding: Finding | null;
-  /** The already-fetched project findings list, used to compute "Related Findings" client-side -
+  /** The already-fetched mission findings list, used to compute "Related Findings" client-side -
    * same target, different finding - without a dedicated backend round-trip. */
   findings: Finding[];
   onClose: () => void;
@@ -28,8 +28,6 @@ const SEVERITY_TONE: Record<FindingSeverity, Tone> = {
   high: "critical",
   critical: "critical",
 };
-
-const STATUSES: FindingStatus[] = ["potential", "investigating", "confirmed", "false_positive", "reported", "duplicate"];
 
 const EVIDENCE_TYPE_LABEL: Record<EvidenceType, string> = {
   http_request: "HTTP Request",
@@ -202,7 +200,7 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
           <div className="mb-4">
             <span className="mb-1.5 block text-[11px] font-medium text-muted">Status</span>
             <div className="flex flex-wrap gap-1.5">
-              {STATUSES.map((s) => (
+              {FINDING_STATUSES.map((s) => (
                 <Button
                   key={s}
                   variant={finding.status === s ? "primary" : "secondary"}

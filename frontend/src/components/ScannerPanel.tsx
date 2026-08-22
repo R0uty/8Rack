@@ -6,7 +6,7 @@ import { relativeTime } from "../lib/relativeTime";
 import type { ScanRunStatus, ScanStepStatus } from "../types/scanner";
 
 interface ScannerPanelProps {
-  projectId: string | null;
+  missionId: string | null;
 }
 
 const STEP_STATUS_LABEL: Record<ScanStepStatus, string> = {
@@ -38,7 +38,7 @@ const RUN_STATUS_TONE: Record<ScanRunStatus, Tone> = {
  * scanRunner.ts and DEVELOPMENT.md's "Security scanners" section for why this differs from the
  * Orchestrator's per-tool-call confirmation.
  */
-export function ScannerPanel({ projectId }: ScannerPanelProps) {
+export function ScannerPanel({ missionId }: ScannerPanelProps) {
   const {
     profiles,
     scans,
@@ -55,7 +55,7 @@ export function ScannerPanel({ projectId }: ScannerPanelProps) {
     runScan,
     cancel,
     reset,
-  } = useScans(projectId);
+  } = useScans(missionId);
 
   const [profileId, setProfileId] = useState("");
   const [target, setTarget] = useState("");
@@ -85,12 +85,12 @@ export function ScannerPanel({ projectId }: ScannerPanelProps) {
         Security Scan
       </SectionHeading>
 
-      {!projectId && <p className="mb-2 text-xs text-muted">Select or create a project above to run a scan.</p>}
+      {!missionId && <p className="mb-2 text-xs text-muted">Select or create a mission above to run a scan.</p>}
       {error && <p className="mb-2 text-xs text-critical">{error}</p>}
 
       {loading && profiles.length === 0 && <Skeleton className="h-24 w-full" />}
 
-      {projectId && showForm && (
+      {missionId && showForm && (
         <GlassPanel padding="lg" className="flex flex-col gap-3">
           <select
             value={profileId}

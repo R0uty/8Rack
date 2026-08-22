@@ -1,8 +1,8 @@
-import type { Report } from "../types/report";
+import type { Report, ReportStatus } from "../types/report";
 import { ApiError, apiFetch, readNdjsonStream, throwForErrorResponse } from "./httpClient";
 
-export async function fetchReports(projectId: string): Promise<Report[]> {
-  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/reports`);
+export async function fetchReports(missionId: string): Promise<Report[]> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/reports`);
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { reports?: Report[] } | null;
   if (!data?.reports) throw new ApiError("Received an invalid response from the server", 502);
@@ -22,13 +22,13 @@ interface ReportStreamLine {
  * persisted Report once generation completes.
  */
 export async function createReport(
-  projectId: string,
+  missionId: string,
   title: string,
   findingIds: string[],
   onChunk: (content: string) => void,
   signal?: AbortSignal,
 ): Promise<Report> {
-  const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/reports`, {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/reports`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title, findingIds }),
@@ -56,9 +56,20 @@ export async function createReport(
   return result;
 }
 
-export async function deleteReport(projectId: string, reportId: string): Promise<void> {
+export async function updateReportStatus(missionId: string, reportId: string, status: ReportStatus): Promise<Report> {
   const res = await apiFetch(
-    `/api/projects/${encodeURIComponent(projectId)}/reports/${encodeURIComponent(reportId)}`,
+    `/api/missions/${encodeURIComponent(missionId)}/reports/${encodeURIComponent(reportId)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) },
+  );
+  if (!res.ok) await throwForErrorResponse(res);
+  const data = (await res.json().catch(() => null)) as { report?: Report } | null;
+  if (!data?.report) throw new ApiError("Received an invalid response from the server", 502);
+  return data.report;
+}
+
+export async function deleteReport(missionId: string, reportId: string): Promise<void> {
+  const res = await apiFetch(
+    `/api/missions/${encodeURIComponent(missionId)}/reports/${encodeURIComponent(reportId)}`,
     { method: "DELETE" },
   );
   if (!res.ok) await throwForErrorResponse(res);

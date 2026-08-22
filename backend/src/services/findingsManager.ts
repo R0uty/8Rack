@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
+import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStore.js";
 import { parseExecutionOutput } from "../parsers/index.js";
 import { queryNvd } from "./cveLookup.js";
 import { FindingNotFoundError } from "./errors.js";
+import { onMissionDeleted } from "./missionManager.js";
+import { getAssetByValue, upsertAsset } from "./assetManager.js";
+import { logActivity } from "./activityLog.js";
+import type { AssetType } from "../types/asset.js";
 import type {
   EvidenceItem,
   EvidenceType,
@@ -10,6 +14,7 @@ import type {
   FindingCreateInput,
   FindingFilters,
   FindingPatchInput,
+  FindingSeverity,
   FindingStatus,
   FindingType,
   FindingsGraph,
@@ -27,7 +32,7 @@ const EVIDENCE_MAX_ITEMS = 20;
 
 /** Maps a finding's old status vocabulary (discovered/updated/verified/dismissed) onto the current
  * one (potential/investigating/confirmed/false_positive/reported/duplicate) - applied to every
- * finding and history entry loaded from disk, so pre-existing project data written under the old
+ * finding and history entry loaded from disk, so pre-existing mission data written under the old
  * vocabulary keeps working without a manual migration step. Values already in the new vocabulary
  * pass through unchanged (idempotent), which is what makes this safe to run on every load. */
 const STATUS_MIGRATION: Record<string, FindingStatus> = {
@@ -51,25 +56,40 @@ function migrateFinding(finding: Finding): Finding {
   finding.relatedAgents ??= [];
   const legacyEvidence = finding.evidence as unknown;
   if (typeof legacyEvidence === "string") {
-    finding.evidence = legacyEvidence ? [{ type: "note", content: legacyEvidence, createdAt: finding.createdAt }] : [];
+    finding.evidence = legacyEvidence
+      ? [{ id: randomUUID(), type: "note", content: legacyEvidence, createdAt: finding.createdAt }]
+      : [];
+  }
+  // Every evidence item written before the id/agentId/executionId fields existed is backfilled with
+  // a fresh id here - see types/finding.ts's EvidenceItem doc comment.
+  for (const item of finding.evidence) {
+    if (!item.id) item.id = randomUUID();
   }
   return finding;
 }
 
-function projectFindings(projectId: string): Finding[] {
-  return [...findings.values()].filter((f) => f.projectId === projectId).sort((a, b) => b.updatedAt - a.updatedAt);
+function missionFindings(missionId: string): Finding[] {
+  return [...findings.values()].filter((f) => f.missionId === missionId).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-async function persistFindings(projectId: string): Promise<void> {
-  await writeProjectJson(projectId, FINDINGS_FILE, projectFindings(projectId));
+async function persistFindings(missionId: string): Promise<void> {
+  await writeMissionJson(missionId, FINDINGS_FILE, missionFindings(missionId));
 }
+
+// See missionManager.ts#onMissionDeleted - a deleted mission's findings must stop returning from
+// queries/the Findings dashboard instead of lingering as ghost records.
+onMissionDeleted((missionId) => {
+  for (const [id, finding] of findings) {
+    if (finding.missionId === missionId) findings.delete(id);
+  }
+});
 
 /** Hydrates in-memory findings from disk - called once at server startup, mirrors
  * loadTasksFromDisk()/loadExecutionsFromDisk(). */
 export async function loadFindingsFromDisk(): Promise<void> {
-  const projectIds = await listProjectIds();
-  for (const projectId of projectIds) {
-    const onDisk = await readProjectJson<Finding>(projectId, FINDINGS_FILE);
+  const missionIds = await listMissionIds();
+  for (const missionId of missionIds) {
+    const onDisk = await readMissionJson<Finding>(missionId, FINDINGS_FILE);
     for (const finding of onDisk) findings.set(finding.id, migrateFinding(finding));
   }
 }
@@ -81,19 +101,19 @@ function defaultEvidenceType(source: Finding["source"]): EvidenceType {
   return "note";
 }
 
-function pushEvidence(finding: Finding, item: EvidenceItem): void {
+function pushEvidence(finding: Finding, item: Omit<EvidenceItem, "id">): void {
   if (finding.evidence.some((e) => e.content === item.content)) return;
-  finding.evidence.push(item);
+  finding.evidence.push({ id: randomUUID(), ...item });
   if (finding.evidence.length > EVIDENCE_MAX_ITEMS) finding.evidence.splice(0, finding.evidence.length - EVIDENCE_MAX_ITEMS);
 }
 
-function computeDedupeKey(f: { projectId: string; type: FindingType; target: string; value: string }): string {
-  return `${f.projectId}::${f.type}::${f.target.toLowerCase()}::${f.value.toLowerCase()}`;
+function computeDedupeKey(f: { missionId: string; type: FindingType; target: string; value: string }): string {
+  return `${f.missionId}::${f.type}::${f.target.toLowerCase()}::${f.value.toLowerCase()}`;
 }
 
-function findExistingByKey(projectId: string, type: FindingType, target: string, value: string): Finding | undefined {
-  const key = computeDedupeKey({ projectId, type, target, value });
-  return projectFindings(projectId).find((f) => computeDedupeKey(f) === key);
+function findExistingByKey(missionId: string, type: FindingType, target: string, value: string): Finding | undefined {
+  const key = computeDedupeKey({ missionId, type, target, value });
+  return missionFindings(missionId).find((f) => computeDedupeKey(f) === key);
 }
 
 interface UpsertOptions {
@@ -103,8 +123,59 @@ interface UpsertOptions {
   agentId?: string;
 }
 
+/** Only a subset of FindingTypes correspond to a physical/logical asset - the rest (credential,
+ * cookie, header, potential_vulnerability, cve, information, ...) describe something *about* an
+ * asset, not the asset itself, and are deliberately left out of the Asset Inventory. */
+const ASSET_TYPE_BY_FINDING_TYPE: Partial<Record<FindingType, AssetType>> = {
+  domain: "domain",
+  subdomain: "subdomain",
+  port: "port",
+  service: "service",
+  technology: "technology",
+  api: "api",
+};
+
 /**
- * Creates a new Finding or, if one already exists for the same (projectId, type, target, value),
+ * Mirrors a newly-(re)observed Finding into the Asset Inventory from this single ingest chokepoint
+ * (upsertFinding) rather than duplicating the mapping at every call site that can produce a finding
+ * (scanner ingest, manual create, the create_finding pseudo-tool) - see services/assetManager.ts and
+ * the factory spec's "centralized, not per-agent" requirement for asset discovery. Best-effort: a
+ * failure here must never break finding creation itself, so it's caught and logged, not propagated.
+ */
+async function mirrorAssetFromFinding(
+  missionId: string,
+  finding: Pick<Finding, "type" | "target" | "value" | "metadata" | "tool" | "source">,
+): Promise<void> {
+  const assetType = ASSET_TYPE_BY_FINDING_TYPE[finding.type];
+  if (!assetType) return;
+
+  try {
+    // Best-effort parent resolution: a subdomain's parent is its parent domain (same convention
+    // buildFindingsGraph already uses for its own subdomain edge); a port/service/technology/api
+    // finding's parent is whatever asset already exists for its `target` (a domain/subdomain/ip).
+    const parentValue =
+      finding.type === "subdomain"
+        ? ((finding.metadata?.parentDomain as string | undefined) ?? finding.target)
+        : finding.type !== "domain"
+          ? finding.target
+          : undefined;
+    const parent = parentValue ? getAssetByValue(missionId, parentValue) : undefined;
+
+    await upsertAsset(missionId, {
+      type: assetType,
+      value: finding.value,
+      discoveredBy: finding.tool,
+      source: finding.source,
+      status: "active",
+      parentId: parent?.id,
+    });
+  } catch (err) {
+    console.error(`[findingsManager] failed to mirror finding into the Asset Inventory (mission "${missionId}"):`, err);
+  }
+}
+
+/**
+ * Creates a new Finding or, if one already exists for the same (missionId, type, target, value),
  * updates it in place instead of creating a duplicate: bumps lastSeenAt/sourceCount/confidence,
  * merges evidence and metadata, links the triggering execution/agent, and logs a history entry.
  * A human/agent-set status past "potential" (investigating/confirmed/false_positive/reported/
@@ -112,13 +183,13 @@ interface UpsertOptions {
  * this is a no-op status-wise, but the history entry below still records the re-observation).
  */
 async function upsertFinding(
-  projectId: string,
+  missionId: string,
   parsed: ParsedFinding,
   source: Finding["source"],
   opts: UpsertOptions = {},
 ): Promise<Finding> {
   const now = Date.now();
-  const existing = findExistingByKey(projectId, parsed.type, parsed.target, parsed.value);
+  const existing = findExistingByKey(missionId, parsed.type, parsed.target, parsed.value);
 
   if (existing) {
     existing.lastSeenAt = now;
@@ -129,19 +200,28 @@ async function upsertFinding(
     if (parsed.parameter !== undefined) existing.parameter = parsed.parameter;
     if (parsed.impact !== undefined) existing.impact = parsed.impact;
     if (parsed.reproductionSteps !== undefined) existing.reproductionSteps = parsed.reproductionSteps;
-    if (parsed.evidence) pushEvidence(existing, { type: defaultEvidenceType(source), content: parsed.evidence, createdAt: now });
+    if (parsed.evidence) {
+      pushEvidence(existing, {
+        type: defaultEvidenceType(source),
+        content: parsed.evidence,
+        createdAt: now,
+        agentId: opts.agentId,
+        executionId: opts.executionId,
+      });
+    }
     if (opts.executionId && !existing.executionIds.includes(opts.executionId)) existing.executionIds.push(opts.executionId);
     if (opts.agentId && !existing.relatedAgents.includes(opts.agentId)) existing.relatedAgents.push(opts.agentId);
     if (existing.status === "potential") existing.status = "potential";
     existing.history.push({ status: existing.status, at: now });
     findings.set(existing.id, existing);
-    await persistFindings(projectId);
+    await persistFindings(missionId);
+    await mirrorAssetFromFinding(missionId, existing);
     return existing;
   }
 
   const created: Finding = {
     id: randomUUID(),
-    projectId,
+    missionId,
     type: parsed.type,
     severity: parsed.severity,
     title: parsed.title,
@@ -155,7 +235,18 @@ async function upsertFinding(
     impact: parsed.impact,
     reproductionSteps: parsed.reproductionSteps,
     metadata: parsed.metadata ?? {},
-    evidence: parsed.evidence ? [{ type: defaultEvidenceType(source), content: parsed.evidence, createdAt: now }] : [],
+    evidence: parsed.evidence
+      ? [
+          {
+            id: randomUUID(),
+            type: defaultEvidenceType(source),
+            content: parsed.evidence,
+            createdAt: now,
+            agentId: opts.agentId,
+            executionId: opts.executionId,
+          },
+        ]
+      : [],
     tags: parsed.tags ?? [],
     status: "potential",
     history: [{ status: "potential", at: now }],
@@ -168,12 +259,17 @@ async function upsertFinding(
     updatedAt: now,
   };
   findings.set(created.id, created);
-  await persistFindings(projectId);
+  await persistFindings(missionId);
+  await mirrorAssetFromFinding(missionId, created);
+  await logActivity(missionId, "finding_created", `Finding created: ${created.title} (${created.severity})`, {
+    findingId: created.id,
+    severity: created.severity,
+  });
   return created;
 }
 
 /**
- * Execution -> Parser -> Findings Engine -> Project Findings. Looks up a parser for the
+ * Execution -> Parser -> Findings Engine -> Mission Findings. Looks up a parser for the
  * execution's tool, extracts findings from its stdout, and upserts each one. Never throws - a
  * parsing failure must never break the actual tool-execution flow (see toolManager.ts's call site).
  * Returns `[]` for tools with no registered parser or a failed/unsuccessful execution.
@@ -184,7 +280,7 @@ export async function ingestExecution(record: ExecutionRecord): Promise<Finding[
   if (parsed.length === 0) return [];
 
   const touched: Finding[] = [];
-  for (const p of parsed) touched.push(await upsertFinding(record.projectId, p, "scanner", { executionId: record.id }));
+  for (const p of parsed) touched.push(await upsertFinding(record.missionId, p, "scanner", { executionId: record.id }));
   return touched;
 }
 
@@ -207,22 +303,22 @@ function parsedFromCreateInput(input: FindingCreateInput, defaultTool: string): 
   };
 }
 
-/** Manual finding creation (POST /api/projects/:id/findings) - still goes through the same dedup
+/** Manual finding creation (POST /api/missions/:id/findings) - still goes through the same dedup
  * upsert as scanner-sourced findings, so a manually-logged finding collapses into an existing one
  * rather than creating a parallel duplicate. */
-export async function createFinding(projectId: string, input: FindingCreateInput): Promise<Finding> {
-  return upsertFinding(projectId, parsedFromCreateInput(input, "manual"), "manual");
+export async function createFinding(missionId: string, input: FindingCreateInput): Promise<Finding> {
+  return upsertFinding(missionId, parsedFromCreateInput(input, "manual"), "manual");
 }
 
 /** Agent-tool path (see orchestrator.ts's create_finding pseudo-tool) - the task's headline ask for
  * this system: an agent can record a structured finding directly instead of only describing one in
  * plain text. Stamps `relatedAgents` with the creating agent, same dedup/upsert behavior as above. */
-export async function createAgentFinding(projectId: string, agentId: string, input: FindingCreateInput): Promise<Finding> {
-  return upsertFinding(projectId, parsedFromCreateInput(input, agentId), "agent", { agentId });
+export async function createAgentFinding(missionId: string, agentId: string, input: FindingCreateInput): Promise<Finding> {
+  return upsertFinding(missionId, parsedFromCreateInput(input, agentId), "agent", { agentId });
 }
 
 async function performCveLookup(
-  projectId: string,
+  missionId: string,
   keyword: string,
   target: string,
   sourceFindingId?: string,
@@ -247,7 +343,7 @@ async function performCveLookup(
       },
       evidence: r.description,
     };
-    touched.push(await upsertFinding(projectId, parsed, "scanner"));
+    touched.push(await upsertFinding(missionId, parsed, "scanner"));
   }
   return touched;
 }
@@ -259,13 +355,13 @@ async function performCveLookup(
 export async function lookupCvesForFinding(findingId: string): Promise<Finding[]> {
   const finding = findings.get(findingId);
   if (!finding) throw new FindingNotFoundError(findingId);
-  return performCveLookup(finding.projectId, finding.title, finding.target, finding.id);
+  return performCveLookup(finding.missionId, finding.title, finding.target, finding.id);
 }
 
 /** Agent-tool path (see orchestrator.ts's lookup_cves pseudo-tool) - no pre-existing finding to
  * link against, so the caller supplies the keyword and target directly. */
-export async function lookupCvesByKeyword(projectId: string, keyword: string, target: string): Promise<Finding[]> {
-  return performCveLookup(projectId, keyword, target);
+export async function lookupCvesByKeyword(missionId: string, keyword: string, target: string): Promise<Finding[]> {
+  return performCveLookup(missionId, keyword, target);
 }
 
 export async function updateFinding(id: string, patch: FindingPatchInput): Promise<Finding> {
@@ -273,7 +369,9 @@ export async function updateFinding(id: string, patch: FindingPatchInput): Promi
   if (!finding) throw new FindingNotFoundError(id);
 
   const now = Date.now();
+  let statusChange: { from: FindingStatus; to: FindingStatus } | undefined;
   if (patch.status !== undefined && patch.status !== finding.status) {
+    statusChange = { from: finding.status, to: patch.status };
     finding.status = patch.status;
     finding.history.push({ status: patch.status, at: now });
   }
@@ -288,7 +386,50 @@ export async function updateFinding(id: string, patch: FindingPatchInput): Promi
   finding.updatedAt = now;
 
   findings.set(finding.id, finding);
-  await persistFindings(finding.projectId);
+  await persistFindings(finding.missionId);
+  if (statusChange) {
+    await logActivity(finding.missionId, "finding_status_changed", `Finding "${finding.title}" status changed: ${statusChange.from} -> ${statusChange.to}`, {
+      findingId: finding.id,
+      ...statusChange,
+    });
+  }
+  return finding;
+}
+
+/**
+ * Agent-tool path (see orchestrator.ts's validate_finding pseudo-tool) - the Validation pipeline's
+ * terminal step (see the factory spec's Finding Validation flow): records a validator's verdict on
+ * a finding, complete with the reasoning that led to it as a traceable, agent-attributed
+ * EvidenceItem, rather than just flipping a status with no record of why.
+ */
+export async function validateFinding(
+  findingId: string,
+  agentId: string,
+  verdict: "confirmed" | "false_positive" | "duplicate",
+  notes: string,
+  severity?: FindingSeverity,
+): Promise<Finding> {
+  const finding = findings.get(findingId);
+  if (!finding) throw new FindingNotFoundError(findingId);
+
+  const now = Date.now();
+  if (finding.status !== verdict) {
+    finding.status = verdict;
+    finding.history.push({ status: verdict, at: now });
+  }
+  if (severity !== undefined) finding.severity = severity;
+  finding.validatedBy = agentId;
+  if (!finding.relatedAgents.includes(agentId)) finding.relatedAgents.push(agentId);
+  pushEvidence(finding, { type: "agent_reasoning", content: notes, createdAt: now, agentId });
+  finding.updatedAt = now;
+
+  findings.set(finding.id, finding);
+  await persistFindings(finding.missionId);
+  await logActivity(finding.missionId, "finding_validated", `Finding "${finding.title}" validated: ${verdict}`, {
+    findingId: finding.id,
+    verdict,
+    agentId,
+  });
   return finding;
 }
 
@@ -296,15 +437,15 @@ export async function deleteFinding(id: string): Promise<void> {
   const finding = findings.get(id);
   if (!finding) throw new FindingNotFoundError(id);
   findings.delete(id);
-  await persistFindings(finding.projectId);
+  await persistFindings(finding.missionId);
 }
 
 export function getFinding(id: string): Finding | undefined {
   return findings.get(id);
 }
 
-export function listFindings(projectId: string, filters: FindingFilters = {}): Finding[] {
-  return projectFindings(projectId).filter(
+export function listFindings(missionId: string, filters: FindingFilters = {}): Finding[] {
+  return missionFindings(missionId).filter(
     (f) =>
       (!filters.type || f.type === filters.type) &&
       (!filters.severity || f.severity === filters.severity) &&
@@ -316,22 +457,22 @@ export function listFindings(projectId: string, filters: FindingFilters = {}): F
   );
 }
 
-export function searchFindings(projectId: string, query: string): Finding[] {
+export function searchFindings(missionId: string, query: string): Finding[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
-  return projectFindings(projectId).filter((f) =>
+  return missionFindings(missionId).filter((f) =>
     [f.title, f.description, f.target, f.tool, f.value, ...f.tags].some((field) => field.toLowerCase().includes(q)),
   );
 }
 
 // --- Agent-facing query helpers (exact names from the spec) ---
 
-export const getProjectFindings = (projectId: string): Finding[] => projectFindings(projectId);
-export const getPorts = (projectId: string): Finding[] => listFindings(projectId, { type: "port" });
-export const getTechnologies = (projectId: string): Finding[] => listFindings(projectId, { type: "technology" });
-export const getDirectories = (projectId: string): Finding[] => listFindings(projectId, { type: "directory" });
-export const getVulnerabilities = (projectId: string): Finding[] =>
-  projectFindings(projectId).filter((f) => f.type === "potential_vulnerability" || f.type === "confirmed_vulnerability");
+export const getMissionFindings = (missionId: string): Finding[] => missionFindings(missionId);
+export const getPorts = (missionId: string): Finding[] => listFindings(missionId, { type: "port" });
+export const getTechnologies = (missionId: string): Finding[] => listFindings(missionId, { type: "technology" });
+export const getDirectories = (missionId: string): Finding[] => listFindings(missionId, { type: "directory" });
+export const getVulnerabilities = (missionId: string): Finding[] =>
+  missionFindings(missionId).filter((f) => f.type === "potential_vulnerability" || f.type === "confirmed_vulnerability");
 
 // --- Correlation graph (heuristic v1 - target-string matching, plus on-demand NVD CVE lookups) ---
 
@@ -359,8 +500,8 @@ const GRAPHABLE_TYPES: readonly FindingType[] = [
   "cve",
 ];
 
-export function buildFindingsGraph(projectId: string): FindingsGraph {
-  const graphable = projectFindings(projectId).filter((f) => GRAPHABLE_TYPES.includes(f.type));
+export function buildFindingsGraph(missionId: string): FindingsGraph {
+  const graphable = missionFindings(missionId).filter((f) => GRAPHABLE_TYPES.includes(f.type));
   const nodes = new Map<string, FindingsGraphNode>();
   const edges: FindingsGraph["edges"] = [];
   const portNodeIdByTargetPort = new Map<string, string>();

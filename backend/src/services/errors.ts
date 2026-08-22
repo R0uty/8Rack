@@ -30,6 +30,17 @@ export class RequestCancelledError extends Error {
   }
 }
 
+/** Distinct from OllamaConnectionError: the connection was made fine, but Ollama went silent for
+ * longer than the configured bound (env.ollamaRequestTimeoutMs/ollamaChatIdleTimeoutMs) - a wedged
+ * model load or a hung generation, not "isn't running". See services/ollama.ts#ollamaFetch. */
+export class OllamaTimeoutError extends Error {
+  constructor(cause?: unknown) {
+    super("Ollama did not respond in time - it may be wedged (e.g. mid model-load) or overloaded.");
+    this.name = "OllamaTimeoutError";
+    this.cause = cause;
+  }
+}
+
 export class AgentNotFoundError extends Error {
   constructor(agentId: string) {
     super(`Agent "${agentId}" was not found`);
@@ -128,6 +139,18 @@ export class OutOfScopeError extends Error {
   }
 }
 
+/** Global cap on concurrently-running real OS processes (env.maxConcurrentExecutions) - see
+ * services/toolManager.ts#runRecord. The execution stays at pending_confirmation, not consumed -
+ * confirming again once a slot frees up runs it normally. */
+export class TooManyConcurrentExecutionsError extends Error {
+  constructor(limit: number) {
+    super(
+      `Too many tools are running at once (limit: ${limit}). Wait for one to finish and confirm again.`,
+    );
+    this.name = "TooManyConcurrentExecutionsError";
+  }
+}
+
 export class TaskNotFoundError extends Error {
   constructor(taskId: string) {
     super(`Task "${taskId}" was not found`);
@@ -142,17 +165,17 @@ export class InvalidTaskStateError extends Error {
   }
 }
 
-export class ProjectNotFoundError extends Error {
-  constructor(projectId: string) {
-    super(`Project "${projectId}" was not found`);
-    this.name = "ProjectNotFoundError";
+export class MissionNotFoundError extends Error {
+  constructor(missionId: string) {
+    super(`Mission "${missionId}" was not found`);
+    this.name = "MissionNotFoundError";
   }
 }
 
-export class InvalidProjectIdError extends Error {
-  constructor(projectId: string) {
-    super(`"${projectId}" is not a valid project id`);
-    this.name = "InvalidProjectIdError";
+export class InvalidMissionIdError extends Error {
+  constructor(missionId: string) {
+    super(`"${missionId}" is not a valid mission id`);
+    this.name = "InvalidMissionIdError";
   }
 }
 
@@ -234,6 +257,27 @@ export class InvalidScanStateError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InvalidScanStateError";
+  }
+}
+
+export class AssetNotFoundError extends Error {
+  constructor(assetId: string) {
+    super(`Asset "${assetId}" was not found`);
+    this.name = "AssetNotFoundError";
+  }
+}
+
+export class WorkOrderNotFoundError extends Error {
+  constructor(workOrderId: string) {
+    super(`Work order "${workOrderId}" was not found`);
+    this.name = "WorkOrderNotFoundError";
+  }
+}
+
+export class InvalidWorkOrderStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidWorkOrderStateError";
   }
 }
 

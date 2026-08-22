@@ -37,7 +37,7 @@ const fixturePreview: ScanPreview = {
 function fixtureRun(overrides: Partial<ScanRun> = {}): ScanRun {
   return {
     id: "scan-1",
-    projectId: "proj-1",
+    missionId: "proj-1",
     profileId: "quick-recon",
     profileName: "Quick Recon",
     target: "example.com",
@@ -49,7 +49,7 @@ function fixtureRun(overrides: Partial<ScanRun> = {}): ScanRun {
 }
 
 describe("useScans", () => {
-  it("loads profiles and skips scan history when projectId is null", async () => {
+  it("loads profiles and skips scan history when missionId is null", async () => {
     mockFetchScanProfiles.mockResolvedValue([fixtureProfile]);
     const { result } = renderHook(() => useScans(null));
 
@@ -60,7 +60,7 @@ describe("useScans", () => {
     expect(mockFetchScans).not.toHaveBeenCalled();
   });
 
-  it("loads scan history scoped to a projectId", async () => {
+  it("loads scan history scoped to a missionId", async () => {
     mockFetchScanProfiles.mockResolvedValue([fixtureProfile]);
     mockFetchScans.mockResolvedValue([fixtureRun()]);
     const { result } = renderHook(() => useScans("proj-1"));
@@ -79,7 +79,7 @@ describe("useScans", () => {
     expect(result.current.error).toBe("boom");
   });
 
-  it("runPreview() is a no-op without a projectId", async () => {
+  it("runPreview() is a no-op without a missionId", async () => {
     mockFetchScanProfiles.mockResolvedValue([]);
     const { result } = renderHook(() => useScans(null));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -132,7 +132,7 @@ describe("useScans", () => {
     const doneStep = { ...runningStep, status: "completed" as const, resolvedCommand: "dig example.com" };
     const finished = fixtureRun({ status: "completed", steps: [doneStep] });
 
-    mockCreateScan.mockImplementation(async (_projectId, _profileId, _target, onEvent) => {
+    mockCreateScan.mockImplementation(async (_missionId, _profileId, _target, onEvent) => {
       onEvent({ type: "scan", scan: fixtureRun() });
       onEvent({ type: "step", step: runningStep });
       onEvent({ type: "output", toolId: "dig", stream: "stdout", data: "answer section..." });
@@ -159,7 +159,7 @@ describe("useScans", () => {
     expect(result.current.running).toBe(false);
   });
 
-  it("runScan() is a no-op without a projectId or a preview", async () => {
+  it("runScan() is a no-op without a missionId or a preview", async () => {
     mockFetchScanProfiles.mockResolvedValue([]);
     const { result } = renderHook(() => useScans(null));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -194,7 +194,7 @@ describe("useScans", () => {
     mockFetchScanProfiles.mockResolvedValue([fixtureProfile]);
     mockFetchScans.mockResolvedValue([]);
     mockPreviewScan.mockResolvedValue(fixturePreview);
-    mockCreateScan.mockImplementation(async (_projectId, _profileId, _target, onEvent) => {
+    mockCreateScan.mockImplementation(async (_missionId, _profileId, _target, onEvent) => {
       const running = fixtureRun();
       onEvent({ type: "scan", scan: running });
       return running;

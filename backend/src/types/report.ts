@@ -2,7 +2,7 @@
  * Report generation: turn a set of already-triaged Findings (see types/finding.ts) into one
  * cohesive Markdown write-up via the Report Writer agent (backend/data/agents/report-writer.json)
  * - an executive summary plus a section per finding (impact, reproduction, remediation). Persisted
- * per-project like every other project-scoped history (executions/tasks/plans/scans).
+ * per-mission like every other mission-scoped history (executions/tasks/plans/scans).
  */
 
 export interface ReportSection {
@@ -10,9 +10,20 @@ export interface ReportSection {
   content: string;
 }
 
+/**
+ * A report is always born from a real LLM generation (createReport calls the Report Writer agent
+ * synchronously) - there's no not-yet-generated placeholder state in this app, so "draft" isn't
+ * the starting status. `ai_generated` (the starting status) -> `human_review` -> `ready` ->
+ * `submitted` is the intended forward path; `draft` exists for a report a human wants to mark as
+ * needing a rewrite/regeneration before it's usable. No enforced transition graph (any status can
+ * move to any other via PATCH) - same rigor level as `Finding.status`
+ * (services/findingsManager.ts#updateFinding), which is equally unconstrained.
+ */
+export type ReportStatus = "draft" | "ai_generated" | "human_review" | "ready" | "submitted";
+
 export interface Report {
   id: string;
-  projectId: string;
+  missionId: string;
   title: string;
   /** Which findings (by id) this report was generated from - see types/finding.ts. */
   findingIds: string[];
@@ -24,6 +35,7 @@ export interface Report {
   /** `markdown` split on "## " headings - see services/reportManager.ts#splitSections for the
    * lenient parsing rationale (local models don't always follow structure perfectly). */
   sections: ReportSection[];
+  status: ReportStatus;
   createdAt: number;
 }
 
