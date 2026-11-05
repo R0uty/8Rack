@@ -1254,7 +1254,7 @@ boundary, not an oversight — reference this list again if that boundary should
 Found during live end-to-end verification of the transformation above (see DEVELOPMENT.md and
 `rework.md`), not fixed in that pass since none block the transformation itself:
 
-- [ ] **`CLAUDE.md`'s "Agents" section is stale/inaccurate.** It says agent configs are "Loaded
+- [x] **`CLAUDE.md`'s "Agents" section is stale/inaccurate.** (Since corrected.) It says agent configs are "Loaded
       fresh from disk on every GET /api/agents call - not cached at boot." `agentManager.ts` actually
       caches the agent list in a module-level variable after first load and only refreshes via
       `reloadAgents()` (hit by create/update/delete, or `POST /api/agents/reload`) — editing a
@@ -1262,7 +1262,7 @@ Found during live end-to-end verification of the transformation above (see DEVEL
       called. Pre-existing, not introduced by this session's work; surfaced by hand-editing an
       agent's `model` for live testing and seeing the old value keep winning until reload was called
       explicitly. One-line `CLAUDE.md` correction, whenever that section is next touched.
-- [ ] **The Factory Director never retries a work order once one exists for an agent, even if it
+- [x] (Retry button exists in `WorkOrdersView.tsx`, verified live 2026-11-05.) **The Factory Director never retries a work order once one exists for an agent, even if it
       failed.** `factoryDirector.ts#seedWorkOrders`'s dedup check (`existing.some((wo) => wo.agentId
       === RECON_AGENT_ID)`) matches regardless of status - a deliberate "human-attention signal, not
       something to paper over" per that file's own doc comment, but there's currently no UI
@@ -1296,7 +1296,7 @@ DEVELOPMENT.md's "Nav simplification" section) - not fixed in that pass, flagged
       `useSettings.ts`, `types/settings.ts`, the App wiring, the TopBar gear button, and the
       Command Palette's settings command (its values ruled nothing; every agent carries its own
       sampling config).
-- [ ] A failed Work Order has no in-UI retry affordance - `factoryDirector.ts` will seed a fresh one
+- [x] (Retry button exists, verified live 2026-11-05.) A failed Work Order has no in-UI retry affordance - `factoryDirector.ts` will seed a fresh one
       automatically once the blocking condition changes (e.g. scope gets added), but a work order
       that failed for an unrelated transient reason (model briefly offline, a flaky tool) currently
       needs a manual `POST /api/missions/:id/workorders` to retry. Worth a "Retry" button on a failed
@@ -1313,12 +1313,12 @@ fixed and why. Deliberately left open:
 - [ ] **Scope has no port or path granularity, and `rules` is only advisory.** Given scope `127.0.0.1`
       and rules naming one port, the recon agent scanned the host's top 1000 ports. Scope enforcement
       passed it, correctly by its own definition.
-- [ ] `ffuf` can't reach system wordlists (the workspace sandbox refuses them, correctly), so agents
-      stall on it. Ship a small wordlist in the workspace and name it in the usage hint, or hide `ffuf`
-      when none exists.
+- [x] `ffuf` can't reach system wordlists (the workspace sandbox refuses them, correctly), so agents
+      stalled on it. `backend/workspace/wordlists/common.txt` now ships and the usage hint names it.
 - [ ] `nomic-embed-text` isn't installed here, so knowledge-base search fails despite a loaded index.
 - [ ] `katana`, `subfinder`, `amass` aren't installed; `/usr/bin/httpx` is not the ProjectDiscovery tool.
-- [ ] The same port can land as two assets (`127.0.0.1:8765` from an agent, `8765/tcp` from the parser).
+- [x] The same port can land as two assets (`127.0.0.1:8765` from an agent, `8765/tcp` from the parser).
+      `upsertAsset` now merges them. A service still can (`8080` next to `8080/tcp:http`).
 - [ ] Time cap is checked between generations, not during one (the per-chunk idle timeout covers a
       hung model; a slow-but-streaming reply can overrun by one generation).
 - [ ] Scan and report `GET`/`PATCH` routes look ids up across missions without checking the id in the
@@ -1330,5 +1330,25 @@ fixed and why. Deliberately left open:
       confirmation gate on every real tool run remains the actual control.
 - [ ] Still open from POLISH.md: route-level integration tests (D1), a shared NDJSON helper (D2),
       status-code consistency (D3).
-- [ ] After the UI cleanup (DEVELOPMENT.md, "UI cleanup"), try the Findings filter bar and report bar
-      on a mission with real findings - they've only been exercised by tests since the rewrite.
+- [x] After the UI cleanup (DEVELOPMENT.md, "UI cleanup"), try the Findings filter bar and report bar
+      on a mission with real findings. Done live, see DEVELOPMENT.md's "End-to-end mission run".
+
+## End-to-end mission run (2026-11-05)
+
+Left open by the live run - see DEVELOPMENT.md's "End-to-end mission run":
+
+- [x] **Reports contain evidence the model made up.** Evidence and reproduction sections are now
+      built from recorded executions, and anything else is labelled unverified - see "Report evidence
+      from recorded runs" in DEVELOPMENT.md.
+- [ ] **A report's prose can still overstate a finding.** The model's impact text can treat an unverified
+      finding as real (live run: "the exposure of backup files" over a made-up response) or misread real
+      output. It now sits next to the label that says so, but nothing checks the prose itself.
+- [ ] **Report remediation loses code blocks.** Sanitizing removes all of them, so a genuine config
+      snippet goes too. Accepted for now - a lost snippet costs less than a fake scan result.
+- [ ] **Validators and other agents confirm too easily.** Same root as "The validator rubber-stamps"
+      above: "Outdated Python" was confirmed as high, and `backup` was marked duplicate. Non-validator
+      agents can also call `validate_finding` - the Web Analyzer confirmed a port finding and raised it
+      to medium. Offer that tool to the validator only.
+- [ ] A failed order still counts toward the dashboard's "work orders failed" banner after a successful
+      Retry.
+- [ ] Agents ask for scans already done, and a rejected tool is often just requested again.

@@ -17,11 +17,13 @@ import {
   getTask,
   listTasks,
   parseToolRequest,
+  parseToolRequests,
   provideGuidance,
   resumeTask,
 } from "./orchestrator.js";
 import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragIndex.js";
 import { createFinding, getMissionFindings } from "./findingsManager.js";
+import { listAssets } from "./assetManager.js";
 import { queryNvd } from "./cveLookup.js";
 import { getMission, onMissionDeleted } from "./missionManager.js";
 import type { AgentWithStatus } from "../types/agent.js";
@@ -1704,6 +1706,137 @@ describe("parseToolRequest with imperfect local-model output", () => {
     expect(parseToolRequest("Port 80 is open {see notes}.")).toBeUndefined();
     expect(parseToolRequest('{"summary": "done"}')).toBeUndefined();
     expect(parseToolRequest('{"tool": "x", "arguments": [null]}')).toBeUndefined();
+  });
+
+  it("returns every call in a reply, in order, without exact repeats", () => {
+    const dig = (host: string) => `\`\`\`json\n{"tool": "dig", "arguments": ["${host}"]}\n\`\`\``;
+    expect(parseToolRequests(`First ${dig("a.example.com")} then ${dig("b.example.com")} and ${dig("a.example.com")}`)).toEqual([
+      { tool: "dig", arguments: ["a.example.com"] },
+      { tool: "dig", arguments: ["b.example.com"] },
+    ]);
+  });
+
+  it("doesn't read a tool result the model wrote itself as a request", () => {
+    expect(parseToolRequest('<tool_response>\n{"tool":"upsert_asset","status":"completed","success":true,"exitCode":0}\n</tool_response>')).toBeUndefined();
+    expect(parseToolRequest('{"tool":"nmap","stdout":"80/tcp open"}')).toBeUndefined();
+  });
+});
+
+describe("replies with several tool calls", () => {
+  const asset = (value: string) => `{"tool": "upsert_asset", "arguments": [${JSON.stringify(JSON.stringify({ type: "port", value }))}]}`;
+  const bash = (script: string) => `{"tool": "bash", "arguments": ["-c", "${script}"]}`;
+
+  it("runs them all in order before asking the model again", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator([`${asset("3000")}\n${asset("3001")}`, "Done."]));
+
+    const task = await createTask("test-agent", "objective", "proj-multi-call");
+
+    expect(task.status).toBe("completed");
+    expect(task.finalResponse).toBe("Done.");
+    expect(task.toolCallCount).toBe(2);
+    expect(mockStreamAgentChat).toHaveBeenCalledTimes(2);
+    expect(listAssets("proj-multi-call").map((a) => a.value).sort()).toEqual(["3000", "3001"]);
+  });
+
+  it("finishes instead of looping when the model re-sends a batch it already recorded", async () => {
+    const batch = `${asset("4000")}\n${asset("4001")}`;
+    mockStreamAgentChat.mockImplementation(repliesGenerator([batch, batch, batch, "never reached"]));
+
+    const task = await createTask("test-agent", "objective", "proj-multi-repeat");
+
+    expect(task.status).toBe("completed");
+    expect(task.toolCallCount).toBe(2);
+  });
+
+  it("sends each queued real tool through its own approval", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator([`${bash("one")}\n${bash("two")}`, "Done."]));
+    const first = fixtureExecution({ status: "pending_confirmation" });
+    const second = fixtureExecution({ status: "pending_confirmation" });
+    mockRequestExecution.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+
+    const task = await createTask("test-agent", "objective", "proj-multi-approval");
+    expect(task.status).toBe("waiting_confirmation");
+    expect(task.pendingExecutionId).toBe(first.id);
+
+    mockGetExecution.mockReturnValue({ ...first, status: "completed" });
+    const resumed = await resumeTask(task.id);
+
+    expect(resumed.status).toBe("waiting_confirmation");
+    expect(resumed.pendingExecutionId).toBe(second.id);
+    expect(mockStreamAgentChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the rest of the batch when a human rejects one", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator([`${bash("one")}\n${bash("two")}`, "Skipping those."]));
+    const first = fixtureExecution({ status: "pending_confirmation" });
+    mockRequestExecution.mockResolvedValue(first);
+
+    const task = await createTask("test-agent", "objective", "proj-multi-reject");
+    mockGetExecution.mockReturnValue({ ...first, status: "rejected" });
+    const resumed = await resumeTask(task.id);
+
+    expect(resumed.status).toBe("completed");
+    expect(mockRequestExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the rest of the batch when a human steers a failed run", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator([`${bash("one")}\n${bash("two")}`, "Trying something else."]));
+    const first = fixtureExecution({ status: "pending_confirmation" });
+    mockRequestExecution.mockResolvedValue(first);
+
+    const task = await createTask("test-agent", "objective", "proj-multi-guidance");
+    mockGetExecution.mockReturnValue({ ...first, status: "failed" });
+    const paused = await resumeTask(task.id);
+    expect(paused.status).toBe("waiting_guidance");
+
+    const steered = await provideGuidance(task.id, "use dig instead");
+
+    expect(steered.status).toBe("completed");
+    expect(mockRequestExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends the task, keeping its work, when a model cycles through recording calls that keep failing", async () => {
+    const bad = (value: string) => `{"tool": "upsert_asset", "arguments": [${JSON.stringify(JSON.stringify({ type: "file", value }))}]}`;
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([asset("5000"), bad("admin"), bad("robots.txt"), bad("admin"), bad("robots.txt"), bad("admin"), "never reached"]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-stuck-recording");
+
+    expect(task.status).toBe("completed");
+    expect(task.finalResponse).toContain("Stopped after repeated failed upsert_asset calls");
+    expect(task.toolCallCount).toBe(5);
+    expect(listAssets("proj-stuck-recording").map((a) => a.value)).toEqual(["5000"]);
+  });
+
+  it("accepts a bare number as an asset's value", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "upsert_asset", "arguments": ["{\\"type\\":\\"port\\",\\"value\\":6000}"]}', "Done."]),
+    );
+
+    await createTask("test-agent", "objective", "proj-numeric-value");
+
+    expect(listAssets("proj-numeric-value").map((a) => a.value)).toEqual(["6000"]);
+  });
+
+  it("corrects a model that writes a tool's result itself instead of treating it as the answer", async () => {
+    const fabricated = '<tool_response>\n{"tool":"upsert_asset","status":"completed","success":true,"exitCode":0}\n</tool_response>';
+    mockStreamAgentChat.mockImplementation(repliesGenerator([fabricated, "Done."]));
+
+    const task = await createTask("test-agent", "objective", "proj-fabricated");
+
+    expect(task.status).toBe("completed");
+    expect(task.finalResponse).toBe("Done.");
+    expect(task.toolCallCount).toBe(1);
+    expect(task.messages.find((m) => m.role === "tool")?.content).toContain("nothing ran");
+  });
+
+  it("stops a model that keeps fabricating results at the tool-call cap", async () => {
+    mockStreamAgentChat.mockImplementation(repliesGenerator(['<tool_response>{"tool":"x","success":true}</tool_response>']));
+
+    const task = await createTask("test-agent", "objective", "proj-fabricated-loop");
+
+    expect(task.status).toBe("max_executions_reached");
   });
 });
 

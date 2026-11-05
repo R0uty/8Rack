@@ -1,5 +1,7 @@
+import { isIP } from "node:net";
 import { getMission, updateMission } from "./missionManager.js";
-import { listAssets } from "./assetManager.js";
+import { listAssets, upsertAsset } from "./assetManager.js";
+import { extractTargets, isTargetOutOfScope, tldsFromEntries } from "./scopeMatcher.js";
 import { getMissionFindings } from "./findingsManager.js";
 import { createWorkOrder, dependenciesSatisfied, listWorkOrders, resumeWorkOrderIfReady, startWorkOrder, workOrderNeedsGuidance } from "./workOrderManager.js";
 import { logActivity } from "./activityLog.js";
@@ -67,6 +69,35 @@ function hasBlockingWorkOrder(existing: WorkOrder[], predicate: (wo: WorkOrder) 
 }
 
 /**
+ * Recon reports what it finds on a host (ports, services) but rarely the host itself, which left
+ * Enumeration with nothing to run on - so once recon has found anything, each concrete in-scope host
+ * joins the inventory. Waiting until then keeps "no assets yet" meaning Recon goes first. A wildcard or
+ * CIDR entry names a range, not a host, and is left for recon to resolve.
+ */
+async function withScopeHosts(mission: Mission, assets: Asset[]): Promise<Asset[]> {
+  if (assets.length === 0) return assets;
+
+  const all = [...assets];
+  for (const entry of mission.scope ?? []) {
+    if (entry.includes("*") || /\/\d+$/.test(entry)) continue;
+    for (const host of extractTargets([entry], tldsFromEntries([entry]))) {
+      if (isTargetOutOfScope(mission.scope, mission.outOfScope, host)) continue;
+      if (all.some((asset) => asset.value.toLowerCase() === host)) continue;
+      all.push(
+        await upsertAsset(mission.id, {
+          type: isIP(host) ? "ip" : "domain",
+          value: host,
+          status: "unverified",
+          discoveredBy: "scope",
+          source: "manual",
+        }),
+      );
+    }
+  }
+  return all;
+}
+
+/**
  * Deterministic, rule-based work planning for v1 (see the plan's Design call #1) - reliable and
  * testable end-to-end without depending on an LLM planning call. Idempotent against *concurrent*
  * duplicates (never seeds a second work order while a matching one is still in progress).
@@ -97,6 +128,8 @@ async function seedWorkOrders(
     });
   }
 
+  const knownServices = assets.filter((a) => a.type === "port" || a.type === "service").map((a) => a.value);
+
   for (const asset of assets) {
     if (!ENUMERABLE_ASSET_TYPES.includes(asset.type)) continue;
     if (hasBlockingWorkOrder(existing, (wo) => wo.agentId === WEB_ANALYZER_AGENT_ID && wo.target === asset.value)) continue;
@@ -105,7 +138,8 @@ async function seedWorkOrders(
       objective:
         `Enumerate and analyze "${asset.value}" (${asset.type}) for this mission - identify running ` +
         "services, technologies, and potential attack surface. Record anything notable via " +
-        "create_finding, and any further assets you discover via upsert_asset.",
+        "create_finding, and any further assets you discover via upsert_asset." +
+        (knownServices.length ? ` Already discovered on this mission: ${knownServices.join(", ")} - start from these rather than scanning again.` : ""),
       target: asset.value,
       priority: 5,
       relatedAssets: [asset.id],
@@ -237,13 +271,13 @@ async function advanceChain(
       return {
         mission,
         workOrder: resumed,
-        blockedReason: `${resumed.agentId}'s last tool run failed and it needs a note before it can continue - open the order in Work Orders and use Inspect.`,
+        blockedReason: `${resumed.agentId}'s last tool request failed and it needs a note before it can continue - open the order in Work Orders and use Inspect.`,
       };
     }
   }
 
   // Read after resuming: the agents that just ran may have registered assets or findings.
-  const assets = listAssets(missionId);
+  const assets = await withScopeHosts(mission, listAssets(missionId));
   const findings = getMissionFindings(missionId);
 
   await seedWorkOrders(mission, assets, findings, workOrders, ranSoFar > 0);

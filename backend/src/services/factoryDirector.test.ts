@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getMission, updateMission } from "./missionManager.js";
-import { listAssets } from "./assetManager.js";
+import { listAssets, upsertAsset } from "./assetManager.js";
 import { getMissionFindings } from "./findingsManager.js";
 import { createWorkOrder, dependenciesSatisfied, listWorkOrders, resumeWorkOrderIfReady, startWorkOrder, workOrderNeedsGuidance } from "./workOrderManager.js";
 import { MissionNotFoundError } from "./errors.js";
@@ -12,7 +12,10 @@ import type { Finding } from "../types/finding.js";
 import type { WorkOrder } from "../types/workOrder.js";
 
 vi.mock("./missionManager.js", () => ({ getMission: vi.fn(), updateMission: vi.fn(), onMissionDeleted: vi.fn() }));
-vi.mock("./assetManager.js", () => ({ listAssets: vi.fn() }));
+vi.mock("./assetManager.js", () => ({
+  listAssets: vi.fn(),
+  upsertAsset: vi.fn(async (missionId: string, input: object) => ({ id: "scope-asset", missionId, ...input })),
+}));
 vi.mock("./findingsManager.js", () => ({ getMissionFindings: vi.fn() }));
 vi.mock("./workOrderManager.js", () => ({
   createWorkOrder: vi.fn(),
@@ -194,6 +197,33 @@ describe("advanceMission", () => {
       "mission-1",
       expect.objectContaining({ agentId: "web-analyzer", target: "example.com", relatedAssets: ["asset-1"] }),
     );
+  });
+
+  it("registers a concrete in-scope host once recon found something, and enumerates it", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ scope: ["https://app.example.com/", "*.example.com", "10.0.0.0/24", "10.1.1.1", "skip.example.com"], outOfScope: ["skip.example.com"] }));
+    mockListAssets.mockReturnValue([fixtureAsset({ id: "asset-1", type: "port", value: "80/tcp" })]);
+    mockGetMissionFindings.mockReturnValue([]);
+    mockListWorkOrders.mockReturnValue([]);
+
+    await advanceMission("mission-1");
+
+    expect(vi.mocked(upsertAsset).mock.calls.map(([, input]) => [input.type, input.value])).toEqual([
+      ["domain", "app.example.com"],
+      ["ip", "10.1.1.1"],
+    ]);
+    expect(mockCreateWorkOrder).toHaveBeenCalledWith("mission-1", expect.objectContaining({ agentId: "web-analyzer", target: "10.1.1.1" }));
+  });
+
+  it("leaves the inventory empty until recon has found something, so Recon still goes first", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ scope: ["example.com"] }));
+    mockListAssets.mockReturnValue([]);
+    mockGetMissionFindings.mockReturnValue([]);
+    mockListWorkOrders.mockReturnValue([]);
+
+    await advanceMission("mission-1");
+
+    expect(upsertAsset).not.toHaveBeenCalled();
+    expect(mockCreateWorkOrder).toHaveBeenCalledWith("mission-1", expect.objectContaining({ agentId: "recon-agent" }));
   });
 
   it("does not duplicate an Enumeration work order for an asset that already has one", async () => {
@@ -472,7 +502,8 @@ describe("advanceMission auto-chain termination", () => {
   });
 
   it("doesn't loop forever when Validation 'completes' without settling its finding", async () => {
-    mockGetMission.mockResolvedValue(fixtureMission({ status: "investigating" }));
+    // A range, so no scope host joins the inventory - only the Validation order is under test here.
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "investigating", scope: ["203.0.113.0/24"] }));
     mockListAssets.mockReturnValue([fixtureAsset({ type: "port", value: "80/tcp" })]);
     mockGetMissionFindings.mockReturnValue([fixtureFinding({ id: "f-1", status: "potential" })]);
     const orders = withLiveOrders((wo) => {
@@ -498,7 +529,7 @@ describe("advanceMission auto-chain termination", () => {
   });
 
   it("pauses after a bounded number of work orders in one call instead of running unattended forever", async () => {
-    mockGetMission.mockResolvedValue(fixtureMission({ status: "investigating" }));
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "investigating", scope: ["203.0.113.0/24"] }));
     // Every completed order "discovers" one more enumerable asset.
     const assets = [fixtureAsset({ value: "a0.example.com", type: "subdomain" })];
     mockListAssets.mockImplementation(() => [...assets]);

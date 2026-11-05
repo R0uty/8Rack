@@ -107,7 +107,7 @@ Key files under `backend/src/services/`:
 | `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `ragIndex.ts` | The knowledge-base indexer/search over `WORKSPACE_ROOT` |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
-| `reportManager.ts` | Report generation - one Report Writer agent call over a set of selected findings, tracked through a `status` field (`draft/ai_generated/human_review/ready/submitted`) |
+| `reportManager.ts` / `reportEvidence.ts` | Report generation - one Report Writer agent call over a set of selected findings, tracked through a `status` field (`draft/ai_generated/human_review/ready/submitted`). The agent writes only the summary, impact and remediation; evidence and reproduction are built from recorded executions, and anything else on a finding is labelled unverified |
 
 ```
 backend/data/
@@ -193,7 +193,8 @@ each other:
    real Tool Execution Framework (`toolManager.ts`'s ~20 ExecTools) *and* three pseudo-tools that
    record structured data instead of executing anything (`create_finding`, `upsert_asset`,
    `validate_finding` - each requires no human confirmation for exactly that reason). This is the
-   path every Work Order and every orchestrator task actually reaches.
+   path every Work Order and every orchestrator task actually reaches. A reply with several calls runs
+   them in order (`OrchestratorTask.queuedToolCalls`), each real tool behind its own approval.
 
 `chatService.ts#streamAgentChat` only activates native `tools` when `toolsPreamble` is absent
 (the Orchestrator's own tell that a request came from it) - see the comment there for why activating

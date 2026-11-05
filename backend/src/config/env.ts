@@ -68,7 +68,7 @@ export const env = {
    * and /api/embed rejects them outright. Default (nomic-embed-text) needs a manual `ollama pull`. */
   embeddingModel: process.env.EMBEDDING_MODEL ?? "nomic-embed-text",
   /** Orchestrator loop-prevention caps — see services/orchestrator.ts. */
-  maxOrchestratorToolCalls: numberFromEnv("MAX_ORCHESTRATOR_TOOL_CALLS", 10),
+  maxOrchestratorToolCalls: numberFromEnv("MAX_ORCHESTRATOR_TOOL_CALLS", 20),
   maxOrchestratorTaskTimeMs: numberFromEnv("MAX_ORCHESTRATOR_TASK_TIME_MS", 10 * 60 * 1000),
   /** Global cap on real OS processes spawned at once via the Tool Execution Framework - shared
    * across every caller (manual requests, Orchestrator tasks, Scan Profiles), since they all funnel

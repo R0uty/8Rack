@@ -1,7 +1,8 @@
 /**
  * Report generation: turn a set of already-triaged Findings (see types/finding.ts) into one
- * cohesive Markdown write-up via the Report Writer agent (backend/data/agents/report-writer.json)
- * - an executive summary plus a section per finding (impact, reproduction, remediation). Persisted
+ * cohesive Markdown write-up: the Report Writer agent (backend/data/agents/report-writer.json) writes
+ * an executive summary and each finding's impact and remediation, and evidence and reproduction are
+ * built from recorded tool runs. Persisted
  * per-mission like every other mission-scoped history (executions/tasks/plans/scans).
  */
 
@@ -29,8 +30,9 @@ export interface Report {
   findingIds: string[];
   agentId: string;
   model: string;
-  /** The full raw Markdown as generated - kept alongside `sections` so export/re-render never has
-   * to lossily reassemble it from the split sections. */
+  /** The full Markdown: the agent's analysis assembled with evidence built from recorded executions
+   * (services/reportEvidence.ts) - kept alongside `sections` so export/re-render never has to lossily
+   * reassemble it from the split sections. */
   markdown: string;
   /** `markdown` split on "## " headings - see services/reportManager.ts#splitSections for the
    * lenient parsing rationale (local models don't always follow structure perfectly). */

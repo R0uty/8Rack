@@ -35,10 +35,27 @@ export async function loadAssetsFromDisk(): Promise<void> {
   }
 }
 
+/** A port arrives as "8765" or "127.0.0.1:8765" from an agent and as "8765/tcp" from a scanner parser. */
+function parsePort(value: string): { host?: string; port: number; protocol: string } | undefined {
+  const match = /^(?:(.+):)?(\d{1,5})(?:\/(tcp|udp))?$/i.exec(value.trim());
+  if (!match) return undefined;
+  return { host: match[1]?.toLowerCase(), port: Number(match[2]), protocol: match[3]?.toLowerCase() ?? "tcp" };
+}
+
+/** Same port and protocol, with hosts that don't conflict - a scanner's "8765/tcp" carries no host, so
+ * it matches a host-qualified entry, while "a.com:80" and "b.com:80" stay separate assets. */
+function samePort(a: string, b: string): boolean {
+  const left = parsePort(a);
+  const right = parsePort(b);
+  if (!left || !right || left.port !== right.port || left.protocol !== right.protocol) return false;
+  return !left.host || !right.host || left.host === right.host;
+}
+
 function findExisting(missionId: string, type: Asset["type"], value: string): Asset | undefined {
   const key = value.toLowerCase();
   for (const a of assets.values()) {
-    if (a.missionId === missionId && a.type === type && a.value.toLowerCase() === key) return a;
+    if (a.missionId !== missionId || a.type !== type) continue;
+    if (a.value.toLowerCase() === key || (type === "port" && samePort(a.value, value))) return a;
   }
   return undefined;
 }

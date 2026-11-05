@@ -120,6 +120,21 @@ describe("WorkOrdersView", () => {
     await waitFor(() => expect(screen.getByText("Retried successfully.")).toBeInTheDocument());
   });
 
+  it("shows what went wrong on a paused order, so a human can write a useful note", async () => {
+    setup([fixtureWorkOrder({ status: "waiting_approval" })]);
+    mockFetchTask.mockResolvedValue(
+      fixtureTask({
+        status: "waiting_guidance",
+        messages: [{ role: "tool", content: JSON.stringify({ error: 'Tool "query_agents" was not found' }) }],
+      }),
+    );
+
+    render(<WorkOrdersView mission={mission} />);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Inspect" }));
+
+    await waitFor(() => expect(screen.getByText('Tool "query_agents" was not found')).toBeInTheDocument());
+  });
+
   it("shows a Retry button for a failed work order that recreates and starts it", async () => {
     const create = vi.fn().mockResolvedValue(fixtureWorkOrder({ id: "wo-2", status: "pending" }));
     const start = vi.fn().mockResolvedValue(fixtureWorkOrder({ id: "wo-2", status: "running" }));

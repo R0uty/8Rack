@@ -250,8 +250,9 @@ export const builtinExecTools: ExecTool[] = [
     description: "Fast web fuzzer for content/parameter discovery.",
     usageHint:
       "Use when the objective involves discovering hidden directories/files/parameters on a web " +
-      'target. Needs a FUZZ placeholder in the URL and a wordlist path. arguments: ["-u", ' +
-      '"https://example.com/FUZZ", "-w", "<wordlist path>"]',
+      "target. Needs a FUZZ placeholder in the URL and a wordlist path inside the workspace - " +
+      'wordlists/common.txt is provided. arguments: ["-u", "https://example.com/FUZZ", "-w", ' +
+      '"wordlists/common.txt"]',
     category: "fuzzing",
     executable: "ffuf",
     defaultArguments: [],

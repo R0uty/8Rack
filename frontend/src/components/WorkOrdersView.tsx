@@ -22,6 +22,19 @@ const STATUS_TONE: Record<WorkOrderStatus, Tone> = {
 
 const NON_TERMINAL: WorkOrder["status"][] = ["pending", "queued", "running", "waiting_approval"];
 
+/** What went wrong, from the tool result a paused task stopped on - a refused request carries `error`,
+ * a run that failed carries its `stderr`. */
+function lastToolProblem(task: OrchestratorTask): string | undefined {
+  const last = task.messages.findLast((m) => m.role === "tool");
+  if (!last) return undefined;
+  try {
+    const result = JSON.parse(last.content) as { error?: unknown; message?: unknown; stderr?: unknown };
+    return [result.error, result.message, result.stderr].find((v): v is string => typeof v === "string" && v.trim() !== "");
+  } catch {
+    return undefined;
+  }
+}
+
 interface WorkOrderCardProps {
   workOrder: WorkOrder;
   onRefreshStatus: (id: string) => Promise<WorkOrder>;
@@ -168,10 +181,10 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry, onCancel }: WorkOr
           {task?.status === "waiting_guidance" && (
             <div className="mb-2 flex flex-col gap-2">
               <p className="text-xs text-warning">
-                The agent's last tool request failed outright (an invalid or unavailable tool - see the transcript
-                below), so there's no execution to approve. Give it a note to steer the retry, or leave it blank to
-                just let it try again.
+                The agent's last tool request failed, so there's nothing to approve. Give it a note to steer the retry,
+                or leave it blank to just let it try again.
               </p>
+              {lastToolProblem(task) && <p className="font-mono text-xs text-critical">{lastToolProblem(task)}</p>}
               <textarea
                 value={note}
                 onChange={(e) => setNote(e.target.value)}

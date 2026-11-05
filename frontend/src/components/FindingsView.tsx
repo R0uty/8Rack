@@ -133,6 +133,7 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
               {selectedIds.size} finding{selectedIds.size === 1 ? "" : "s"} selected
             </span>
             <input
+              aria-label="Report title"
               value={reportTitle}
               onChange={(e) => setReportTitle(e.target.value)}
               placeholder="Report title, e.g. Security Assessment — example.com"

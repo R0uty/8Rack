@@ -105,6 +105,11 @@ export type TaskStatus =
   | "max_executions_reached"
   | "max_time_reached";
 
+export interface ToolRequest {
+  tool: string;
+  arguments: string[];
+}
+
 export interface OrchestratorTask {
   id: string;
   missionId: string;
@@ -118,6 +123,10 @@ export interface OrchestratorTask {
   status: TaskStatus;
   toolExecutionIds: string[];
   toolCallCount: number;
+  /** Further calls from a reply that requested several, run in order before the model is asked
+   * again. Dropped when a human rejects one, a run fails or a human steers the task, since those
+   * change what the agent should do next. */
+  queuedToolCalls?: ToolRequest[];
   pendingExecutionId?: string;
   finalResponse?: string;
   error?: string;
@@ -274,7 +283,8 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
     'array containing one JSON object encoded as a string, e.g. {"tool": "' +
     UPSERT_ASSET_TOOL +
     '", "arguments": ["{\\"type\\":\\"subdomain\\",\\"value\\":\\"api.example.com\\"}"]}. Required: ' +
-    `type, value. Valid types: ${VALID_ASSET_TYPES.join(", ")}. Optional: status ("active"|"inactive"|` +
+    `type, value. Valid types: ${VALID_ASSET_TYPES.join(", ")} - a path or file on a web server is a ` +
+    'url, e.g. "http://example.com/admin". Optional: status ("active"|"inactive"|' +
     '"unverified", defaults to "active"), metadata (object). Re-registering the same (type, value) ' +
     "updates the existing asset instead of duplicating it. Does not require approval - it records " +
     "data, it doesn't execute anything.";
@@ -305,6 +315,9 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
     "You have access to the following tools. To use one, respond with ONLY a single JSON object",
     'of the exact form {"tool": "<tool id>", "arguments": ["<arg1>", "<arg2>", ...]} and nothing',
     "else - no explanation, no markdown code fences, no extra text before or after it.",
+    "Results come back to you in the next message - never write a tool's result yourself.",
+    "Ports, services and paths a scanner reports are recorded as findings and assets automatically, so",
+    "don't record those again - use the recording tools for what you work out yourself.",
     "Every tool execution requires human approval before it runs, so only request a tool when you",
     "actually need its output to proceed.",
     "If you don't need a tool, respond normally in plain text with your answer - that ends the task.",
@@ -320,10 +333,16 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
   ].join("\n");
 }
 
-function tryParseCandidate(candidate: string): { tool: string; arguments: string[] } | undefined {
+/** The fields only a tool's result carries. A model that has seen a few results will sometimes write
+ * one itself - that names a tool too, but it's a claim about a run that never happened, not a request. */
+function isToolResultShape(parsed: object): boolean {
+  return "tool" in parsed && ["success", "exitCode", "stdout"].some((field) => field in parsed);
+}
+
+function tryParseCandidate(candidate: string): ToolRequest | undefined {
   try {
     const parsed = JSON.parse(candidate) as { tool?: unknown; arguments?: unknown };
-    if (typeof parsed.tool !== "string") return undefined;
+    if (typeof parsed.tool !== "string" || isToolResultShape(parsed)) return undefined;
     const rawArgs = parsed.arguments ?? [];
     if (!Array.isArray(rawArgs) || rawArgs.some((a) => a === null)) return undefined;
     // Local models routinely send ["-p", 80], or an unencoded object for create_finding's "JSON
@@ -363,21 +382,40 @@ function balancedObjectSpans(text: string): string[] {
 /**
  * Despite the preamble instructing "respond with ONLY the JSON object", models often still
  * prepend a sentence ("Sure, here's the call:") even when told not to. Try the strict case first
- * (whole reply, optionally fenced, is the JSON), then fall back to the first balanced object in the
- * reply that is a tool request - which also covers a model emitting several calls at once (the
- * first runs; it can ask again once it has the result).
+ * (whole reply, optionally fenced, is the JSON), then fall back to every balanced object in the reply
+ * that is a tool request - models also routinely emit several calls at once, and all of them are
+ * returned, in order and without exact repeats (see OrchestratorTask.queuedToolCalls).
  */
-export function parseToolRequest(text: string): { tool: string; arguments: string[] } | undefined {
+export function parseToolRequests(text: string): ToolRequest[] {
   const trimmed = text.trim();
   const fence = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   const strict = tryParseCandidate(fence ? fence[1].trim() : trimmed);
-  if (strict) return strict;
+  if (strict) return [strict];
 
+  const requests = new Map<string, ToolRequest>();
   for (const span of balancedObjectSpans(trimmed)) {
     const candidate = tryParseCandidate(span);
-    if (candidate) return candidate;
+    if (candidate) requests.set(JSON.stringify(candidate), candidate);
   }
-  return undefined;
+  return [...requests.values()];
+}
+
+export function parseToolRequest(text: string): ToolRequest | undefined {
+  return parseToolRequests(text)[0];
+}
+
+/** Whether a reply with no tool request in it is the model writing a tool's result itself - never a
+ * final answer, even though it would otherwise read as one. */
+function claimsToolResult(reply: string): boolean {
+  if (reply.includes("<tool_response>")) return true;
+  return balancedObjectSpans(reply).some((span) => {
+    try {
+      const parsed: unknown = JSON.parse(span);
+      return typeof parsed === "object" && parsed !== null && isToolResultShape(parsed);
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function collectAgentReply(
@@ -633,9 +671,15 @@ function parseUpsertAssetArgs(args: string[]): { input: AssetCreateInput } | { e
   const { type, value, status, metadata } = obj;
 
   if (typeof type !== "string" || !VALID_ASSET_TYPES.includes(type as AssetType)) {
-    return { error: `"type" must be one of: ${VALID_ASSET_TYPES.join(", ")}.` };
+    return {
+      error:
+        `"type" must be one of: ${VALID_ASSET_TYPES.join(", ")}. A path or file on a web server is a url with its full ` +
+        "address as the value - and paths a scanner found are already recorded, so they don't need this call.",
+    };
   }
-  if (typeof value !== "string" || !value.trim()) return { error: '"value" is required.' };
+  // Models routinely send a port as a bare number - the same unambiguous intent tryParseCandidate accepts.
+  const assetValue = typeof value === "number" ? String(value) : value;
+  if (typeof assetValue !== "string" || !assetValue.trim()) return { error: '"value" is required.' };
   if (status !== undefined && !VALID_ASSET_STATUSES.includes(status as Asset["status"])) {
     return { error: `"status" must be one of: ${VALID_ASSET_STATUSES.join(", ")}.` };
   }
@@ -646,7 +690,7 @@ function parseUpsertAssetArgs(args: string[]): { input: AssetCreateInput } | { e
   return {
     input: {
       type: type as AssetType,
-      value,
+      value: assetValue,
       status: status as Asset["status"] | undefined,
       metadata: metadata as Record<string, unknown> | undefined,
     },
@@ -869,30 +913,72 @@ async function advanceTask(task: OrchestratorTask, onChunk?: ChunkListener, call
  * Local models often answer a successful create_finding/upsert_asset/validate_finding by sending the
  * identical call again, instead of a closing message - left alone that runs to the tool-call cap and
  * fails a work order whose work is already done, re-recording the same thing each time. Re-running
- * these can't produce anything new, so an exact repeat means the agent is finished. Returns the earlier
- * call's result to close on, or undefined when this isn't such a repeat. Real tools aren't covered:
- * running one twice can be deliberate, and it stays behind its own confirmation.
+ * these can't produce anything new, so a reply made only of calls already recorded since the last
+ * real tool means the agent is finished. Returns the last such call's result to close on, or undefined
+ * when this isn't such a repeat. Real tools aren't covered: running one twice can be deliberate, and it
+ * stays behind its own confirmation.
  */
-function repeatOfRecordedCall(
-  messages: OrchestratorTask["messages"],
-  request: NonNullable<ReturnType<typeof parseToolRequest>>,
-): string | undefined {
-  if (!RECORDING_TOOLS.has(request.tool)) return undefined;
-  // [..., previous assistant call, its tool result, this assistant call]
-  const previousCall = messages.at(-3);
-  const previousResult = messages.at(-2);
-  if (previousCall?.role !== "assistant" || previousResult?.role !== "tool") return undefined;
+function repeatOfRecordedCalls(messages: OrchestratorTask["messages"], requests: ToolRequest[]): string | undefined {
+  if (!requests.every((request) => RECORDING_TOOLS.has(request.tool))) return undefined;
 
-  const previous = parseToolRequest(previousCall.content);
-  if (!previous || previous.tool !== request.tool || JSON.stringify(previous.arguments) !== JSON.stringify(request.arguments)) {
-    return undefined;
+  // [..., assistant call, its tool result, ..., assistant call, its tool result, this reply]
+  const recorded = new Map<string, string>();
+  for (let i = messages.length - 2; i > 0 && messages[i].role === "tool" && messages[i - 1].role === "assistant"; i -= 2) {
+    const call = parseToolRequest(messages[i - 1].content);
+    if (!call || !RECORDING_TOOLS.has(call.tool)) break;
+    try {
+      const result = JSON.parse(messages[i].content) as { success?: unknown; stdout?: unknown };
+      if (result.success === true && typeof result.stdout === "string") recorded.set(JSON.stringify(call), result.stdout);
+    } catch {
+      // Not a result this could close on - the call just doesn't count as recorded.
+    }
   }
-  try {
-    const result = JSON.parse(previousResult.content) as { success?: unknown; stdout?: unknown };
-    return result.success === true && typeof result.stdout === "string" ? result.stdout : undefined;
-  } catch {
-    return undefined;
+
+  const results = requests.map((request) => recorded.get(JSON.stringify({ tool: request.tool, arguments: request.arguments })));
+  return results.every((result) => result !== undefined) ? results.at(-1) : undefined;
+}
+
+/** How many times to let a model resend a recording call that keeps failing before ending the task. */
+const MAX_FAILED_RECORDING_REPEATS = 2;
+
+/**
+ * The failure to close on when a model is stuck resending a recording call the tool has already refused
+ * with the same arguments - it won't get a different answer, and left alone that burns the rest of the
+ * tool-call cap and fails an order whose real work is already done. Undefined when it isn't stuck.
+ */
+function stuckRecordingFailure(messages: OrchestratorTask["messages"], request: ToolRequest): string | undefined {
+  if (!RECORDING_TOOLS.has(request.tool)) return undefined;
+
+  const key = JSON.stringify({ tool: request.tool, arguments: request.arguments });
+  let failures = 0;
+  let lastFailure = "";
+  for (let i = 1; i < messages.length; i++) {
+    if (messages[i].role !== "tool" || messages[i - 1].role !== "assistant") continue;
+    const call = parseToolRequest(messages[i - 1].content);
+    if (!call || JSON.stringify(call) !== key) continue;
+    try {
+      const result = JSON.parse(messages[i].content) as { success?: unknown; message?: unknown };
+      if (result.success !== false) continue;
+      failures++;
+      lastFailure = typeof result.message === "string" ? result.message : "";
+    } catch {
+      // Not a result this could read - doesn't count as a failure.
+    }
   }
+  return failures >= MAX_FAILED_RECORDING_REPEATS ? lastFailure : undefined;
+}
+
+/** Every tool-call attempt counts against the cap, valid or not, so a model that keeps requesting
+ * malformed/unknown tools can't loop forever without ever incrementing toward the limit. */
+function spendToolCall(task: OrchestratorTask): boolean {
+  if (task.toolCallCount >= env.maxOrchestratorToolCalls) {
+    task.status = "max_executions_reached";
+    task.error = `Stopped after ${env.maxOrchestratorToolCalls} tool calls (MAX_ORCHESTRATOR_TOOL_CALLS).`;
+    touch(task);
+    return false;
+  }
+  task.toolCallCount++;
+  return true;
 }
 
 async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?: AbortSignal): Promise<OrchestratorTask> {
@@ -905,63 +991,89 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
 
   const agent = await getAgent(task.agentId);
 
-  let reply: string;
-  try {
-    reply = await collectAgentReply(task.agentId, agent, task.missionId, task.messages, task.model, onChunk, signal);
-  } catch (err) {
-    if (err instanceof RequestCancelledError) {
+  let toolRequest: ToolRequest;
+  if (task.queuedToolCalls?.length) {
+    if (signal?.aborted) {
       task.status = "cancelled";
       touch(task);
-      throw err;
+      return task;
     }
-    task.status = "failed";
-    task.error = err instanceof Error ? err.message : "Agent call failed";
-    touch(task);
-    return task;
+    // Written out as its own assistant turn so each result in the transcript directly follows the
+    // call it answers, the same shape a one-call-per-reply model produces.
+    toolRequest = task.queuedToolCalls.shift()!;
+    task.messages.push({ role: "assistant", content: JSON.stringify(toolRequest) });
+  } else {
+    let reply: string;
+    try {
+      reply = await collectAgentReply(task.agentId, agent, task.missionId, task.messages, task.model, onChunk, signal);
+    } catch (err) {
+      if (err instanceof RequestCancelledError) {
+        task.status = "cancelled";
+        touch(task);
+        throw err;
+      }
+      task.status = "failed";
+      task.error = err instanceof Error ? err.message : "Agent call failed";
+      touch(task);
+      return task;
+    }
+
+    // A cancel that landed right as the stream finished: nothing threw, but the task is already
+    // terminal and must not be overwritten as "completed" below.
+    if (signal?.aborted) {
+      task.status = "cancelled";
+      touch(task);
+      return task;
+    }
+
+    if (!reply.trim()) {
+      task.status = "failed";
+      task.error = "The model returned an empty response.";
+      touch(task);
+      return task;
+    }
+
+    task.messages.push({ role: "assistant", content: reply });
+
+    const requests = parseToolRequests(reply);
+    if (requests.length === 0) {
+      if (claimsToolResult(reply)) {
+        if (!spendToolCall(task)) return task;
+        task.messages.push({
+          role: "tool",
+          content: JSON.stringify({
+            error: "That was a tool result you wrote yourself - nothing ran. Request a tool to run it, or answer in plain text if you're finished.",
+          }),
+        });
+        return advance(task, onChunk, signal);
+      }
+      task.status = "completed";
+      task.finalResponse = reply;
+      touch(task);
+      return task;
+    }
+
+    const recorded = repeatOfRecordedCalls(task.messages, requests);
+    if (recorded !== undefined) {
+      task.status = "completed";
+      task.finalResponse = recorded;
+      touch(task);
+      return task;
+    }
+
+    toolRequest = requests[0];
+    task.queuedToolCalls = requests.slice(1);
   }
 
-  // A cancel that landed right as the stream finished: nothing threw, but the task is already
-  // terminal and must not be overwritten as "completed" below.
-  if (signal?.aborted) {
-    task.status = "cancelled";
-    touch(task);
-    return task;
-  }
-
-  if (!reply.trim()) {
-    task.status = "failed";
-    task.error = "The model returned an empty response.";
-    touch(task);
-    return task;
-  }
-
-  task.messages.push({ role: "assistant", content: reply });
-
-  const toolRequest = parseToolRequest(reply);
-  if (!toolRequest) {
+  const stuckOn = stuckRecordingFailure(task.messages, toolRequest);
+  if (stuckOn !== undefined) {
     task.status = "completed";
-    task.finalResponse = reply;
+    task.finalResponse = `Stopped after repeated failed ${toolRequest.tool} calls: ${stuckOn} Anything recorded before this still stands.`;
     touch(task);
     return task;
   }
 
-  const recorded = repeatOfRecordedCall(task.messages, toolRequest);
-  if (recorded !== undefined) {
-    task.status = "completed";
-    task.finalResponse = recorded;
-    touch(task);
-    return task;
-  }
-
-  // Every tool-call attempt counts against the cap, valid or not, so a model that keeps requesting
-  // malformed/unknown tools can't loop forever without ever incrementing toward the limit.
-  if (task.toolCallCount >= env.maxOrchestratorToolCalls) {
-    task.status = "max_executions_reached";
-    task.error = `Stopped after ${env.maxOrchestratorToolCalls} tool calls (MAX_ORCHESTRATOR_TOOL_CALLS).`;
-    touch(task);
-    return task;
-  }
-  task.toolCallCount++;
+  if (!spendToolCall(task)) return task;
 
   if (toolRequest.tool === SEARCH_KNOWLEDGE_BASE_TOOL) {
     task.messages.push({ role: "tool", content: await runKnowledgeBaseSearch(toolRequest.arguments) });
@@ -1205,6 +1317,7 @@ export async function resumeTask(id: string, onChunk?: ChunkListener, signal?: A
         };
 
   task.messages.push(resultMessage);
+  if (execution.status !== "completed") task.queuedToolCalls = undefined;
 
   // A failed or forcibly-cancelled execution pauses for human guidance instead of letting the
   // agent guess what to do next on its own - see provideGuidance below. A successful run or an
@@ -1250,6 +1363,7 @@ export async function provideGuidance(
   }
 
   if (note?.trim()) task.messages.push({ role: "user", content: note.trim() });
+  task.queuedToolCalls = undefined;
   task.pendingExecutionId = undefined;
   task.status = "running";
   try {

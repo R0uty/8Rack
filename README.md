@@ -147,7 +147,7 @@ All backend configuration is via `backend/.env` (see `backend/.env.example`):
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Where Ollama is running |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed frontend origin |
 | `WORKSPACE_ROOT` | `backend/workspace` | Root that filesystem exec tools and the knowledge base are confined to |
-| `MAX_ORCHESTRATOR_TOOL_CALLS` | `10` | Orchestrator loop-prevention cap |
+| `MAX_ORCHESTRATOR_TOOL_CALLS` | `20` | Orchestrator loop-prevention cap |
 | `MAX_ORCHESTRATOR_TASK_TIME_MS` | `600000` | Orchestrator loop-prevention cap |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Model used to embed the knowledge base — pull it first: `ollama pull nomic-embed-text` |
 | `NVD_API_KEY` | _(unset)_ | Optional key for CVE lookups against the NVD database — raises the rate limit from 5 req/30s to 50 req/30s; lookups work fine unauthenticated if left unset |

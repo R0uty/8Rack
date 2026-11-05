@@ -14,6 +14,18 @@ Creation Date: 1995-08-14T04:00:00Z
 Name Server: NS1.EXAMPLE.COM
 `;
 
+describe("parseExecutionOutput terminal output", () => {
+  it("strips terminal control sequences before parsing, so they can't end up in finding values", () => {
+    const stdout = "\r\u001b[2Kbackup                  [Status: 301, Size: 0, Words: 1, Lines: 1, Duration: 0ms]\u001b[0m\n";
+
+    const [finding] = parseExecutionOutput("ffuf", ["-u", "http://127.0.0.2:8080/FUZZ", "-w", "wordlists/common.txt"], stdout);
+
+    expect(finding.value).toBe("backup");
+    expect(finding.title).toBe("backup (301)");
+    expect(finding.type).toBe("interesting_file");
+  });
+});
+
 describe("parseExecutionOutput target attribution", () => {
   it("attributes dig findings to the first non-flag arg, not the query type in last position", () => {
     const findings = parseExecutionOutput("dig", ["example.com", "A"], DIG_OUTPUT);

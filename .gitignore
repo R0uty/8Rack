@@ -9,6 +9,7 @@ dist-ssr/
 # Exec tool workspace (read_file/write_file/bash/etc. sandbox root) - runtime scratch space
 backend/workspace/*
 !backend/workspace/.gitkeep
+!backend/workspace/wordlists/
 
 # User-created missions (tool execution + orchestrator task history) - runtime data, not shipped
 # config like backend/data/agents/*.json, and mission notes may contain sensitive target/scope info

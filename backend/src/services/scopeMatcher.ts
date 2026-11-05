@@ -43,7 +43,7 @@ function tldOf(domain: string): string {
 /** The TLDs of a mission's own scope entries. Targets on those are recognized whatever they are, or
  * a scope of "corp.internal" could never be run against, and an out-of-scope "admin.acme.gg" would
  * only draw an "unknown" warning. */
-function tldsFromEntries(entries: string[]): Set<string> {
+export function tldsFromEntries(entries: string[]): Set<string> {
   const tlds = new Set<string>();
   for (const entry of entries) {
     for (const match of normalizeHost(entry).matchAll(DOMAIN_RE)) tlds.add(tldOf(match[0].toLowerCase()));

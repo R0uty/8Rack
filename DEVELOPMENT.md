@@ -3518,3 +3518,76 @@ page and Tools tab, create with scope, selection surviving a reload, switching c
 two-step delete falling through to the next mission, all API calls 200. Advance, approval, and report
 generation were not re-run live here (the handlers were kept as they were, with unit tests); neither
 was a mission with real findings, so the filter bar and report bar were only exercised by tests.
+
+## End-to-end mission run (2026-11-05)
+
+First live run of a whole mission since the UI cleanup, using throwaway missions against a local
+`http.server` on `127.0.0.2:8080` (bound there so `nmap` couldn't reach anything else on the machine),
+on `qwen2.5-coder:7b`. Each failure below was found by a real run and fixed before the next one.
+
+- **Replies with several tool calls.** The parser ran the first call and silently dropped the rest. The
+  model then wrote a `<tool_response>` for the dropped call, which was parsed as a new request, failed,
+  and restarted the cycle until the cap. Now `parseToolRequests` returns every call and the rest wait in
+  `OrchestratorTask.queuedToolCalls`, each written out as its own assistant turn, each real tool behind
+  its own approval. A rejection, failure or human note drops the queue, because that changes what the
+  agent should do. Result-shaped JSON is never a request, and a reply that only claims a result gets a
+  correction instead of becoming the final answer.
+- **Recording loops.** `repeatOfRecordedCalls` now covers a whole re-sent batch, not just the previous
+  call. A third identical failed recording call completes the task (`stuckRecordingFailure`): the real
+  work is already done, and failing the order would block the chain. Raising the cap alone did not fix
+  this - a run hit 20 just as it had hit 10. The cap default still went to 20, since the guard needs room
+  to fire and a real recon run spends about 10 calls.
+- **Enumeration never ran for most missions.** The Director only enumerates `ip`/`domain`/`subdomain`
+  assets, and recon reports ports and services. Once recon has found anything, `withScopeHosts` adds each
+  concrete in-scope host. Wildcards and CIDRs are ranges, so they're skipped. The Web Analyzer's objective
+  now lists known ports and services, because without them it guessed (`ls -la`).
+- **Smaller fixes.** ffuf's terminal escapes ended up in finding values (`[2Kbackup`), now stripped in
+  `parseExecutionOutput`. `ffuf` has a shipped wordlist. Port spellings merge in `upsertAsset`, keeping
+  different hosts and protocols apart. A numeric asset `value` is accepted. A paused order now shows the
+  actual error rather than pointing at a transcript the UI no longer has.
+
+Verified live: mission creation, Advance, approve and reject, the queue resuming after each, Web Analyzer
+and validators running, `ffuf` findings, guidance note, Findings filter and drawer, report bar, report
+generation, Reports view, Retry on a cancelled order. Not exercised: Retry on a failed order (same code
+path), Export, moving a report between statuses, phone width. The approval gate held throughout: the only
+confirm calls came from the Approve button.
+
+Still wrong, and tracked in TODO.md: the plumbing works but the output can't be trusted yet. Reports
+contain made-up evidence and validators confirm too easily. In a hidden Browser pane, screenshots and
+animations lag badly - read the DOM before concluding the UI is stale.
+
+## Report evidence from recorded runs (2026-11-06)
+
+The end-to-end run's worst finding: asked for evidence, the Report Writer wrote `nmap` output and HTTP
+responses that never happened (Nmap 7.92, when the real run was 7.993). Asking it nicely can't fix that
+on a small local model, so the model no longer writes those sections at all.
+
+- **The model** writes the executive summary and each finding's impact and remediation.
+  `sanitizeNarrative` removes code blocks and any reproduction/evidence/PoC section it adds anyway, and
+  demotes its `#`/`##` headings so they can't open a new report section. Sanitizing is enforcement, not
+  a safety net for a good prompt - the prompt says the same thing and small models ignore it.
+- **8Rack** (`services/reportEvidence.ts`) writes evidence and reproduction from `ExecutionRecord`s in
+  the same mission, and `reportManager.ts` assembles the final Markdown.
+- **What counts as recorded:** evidence linked to an execution that really exists, or text found in a
+  run's stdout/stderr after stripping terminal codes and collapsing whitespace. Agent `create_finding`
+  evidence has no execution link, so the text check is what can verify it. Quotes under 12 characters
+  never match, since "200 OK" appears everywhere.
+- **Everything else** goes under "Unverified statements", and an "Evidence Check" section counts the
+  findings with no recorded output. A finding's `reproductionSteps` are shown labelled as unchecked.
+- **Target-controlled text:** tool output is fenced with a backtick run longer than any inside it, and
+  titles are forced to one line, so neither can forge a report section.
+- Findings are numbered in the headings (`## Finding 3: ...`) because the model refers to them that way.
+
+Verified live on a throwaway mission against a local site on `127.0.0.2`: real `nmap -sV` output, one
+scanner finding, one agent-style finding quoting that output (counted as recorded) and one with a made-up
+response (labelled unverified, counted in Evidence Check). The report rendered correctly in the app.
+`curl` was not used because it's disabled in the Tool Registry.
+
+Known limits:
+
+- The prose isn't checked. In the live run the model described "the exposure of backup files" for the
+  made-up finding, right above the label saying nothing backs it. See TODO.md.
+- A text match proves the output is real, not that it means what the finding says.
+- While a report generates, the view streams the model's raw reply, including anything sanitizing later
+  removes. It's replaced by the assembled report when generation finishes, and only that is stored.
+- Reports generated before this change keep their old Markdown - regenerate them.

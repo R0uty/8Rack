@@ -69,6 +69,25 @@ describe("upsertAsset", () => {
     expect(listAssets(missionId)).toHaveLength(1);
   });
 
+  it("treats an agent's and a scanner's spelling of the same port as one asset", async () => {
+    const missionId = randomUUID();
+    const scanner = await upsertAsset(missionId, { type: "port", value: "8765/tcp", discoveredBy: "nmap" });
+
+    expect((await upsertAsset(missionId, { type: "port", value: "8765" })).id).toBe(scanner.id);
+    expect((await upsertAsset(missionId, { type: "port", value: "127.0.0.1:8765" })).id).toBe(scanner.id);
+    expect(listAssets(missionId)).toHaveLength(1);
+  });
+
+  it("keeps ports apart when the host or protocol differs", async () => {
+    const missionId = randomUUID();
+    await upsertAsset(missionId, { type: "port", value: "a.example.com:80" });
+    await upsertAsset(missionId, { type: "port", value: "b.example.com:80" });
+    await upsertAsset(missionId, { type: "port", value: "53/tcp" });
+    await upsertAsset(missionId, { type: "port", value: "53/udp" });
+
+    expect(listAssets(missionId)).toHaveLength(4);
+  });
+
   it("dedup matching is case-insensitive on value", async () => {
     const missionId = randomUUID();
     const first = await upsertAsset(missionId, { type: "subdomain", value: "Api.Example.com" });

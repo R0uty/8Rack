@@ -27,6 +27,10 @@ const PARSERS: Record<string, { parse: ParserFn; target: (args: string[]) => str
   whois: { parse: parseWhois, target: firstPositionalArg },
 };
 
+/** Terminal control sequences, plus the carriage returns that go with them - ffuf wraps every result
+ * line in them even when it isn't writing to a terminal, which otherwise ends up inside finding values. */
+const TERMINAL_CONTROL = /\u001b\[[0-9;?]*[ -/]*[@-~]|\r/g;
+
 /** Parses a completed execution's stdout into findings for the given tool, or `[]` if there's no
  * parser registered for it, no arguments-derivable target, or the parser itself throws. */
 export function parseExecutionOutput(toolId: string, args: string[], stdout: string): ParsedFinding[] {
@@ -37,7 +41,7 @@ export function parseExecutionOutput(toolId: string, args: string[], stdout: str
   if (!target) return [];
 
   try {
-    return entry.parse(stdout, target);
+    return entry.parse(stdout.replace(TERMINAL_CONTROL, ""), target);
   } catch (err) {
     console.error(`[parsers] parser for "${toolId}" threw:`, err);
     return [];
