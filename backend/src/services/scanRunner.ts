@@ -3,6 +3,7 @@ import { getScanProfile } from "../extensions/scannerRegistry.js";
 import {
   cancelExecution,
   confirmExecution,
+  rejectExecution,
   getExecTool,
   listExecToolsWithStatus,
   requestExecution,
@@ -64,8 +65,23 @@ export async function loadScansFromDisk(): Promise<void> {
   const missionIds = await listMissionIds();
   for (const missionId of missionIds) {
     const records = await readMissionJson<ScanRun>(missionId, SCANS_FILE);
-    for (const record of records) scans.set(record.id, record);
+    for (const record of records) scans.set(record.id, recoverInterruptedScan(record));
   }
+}
+
+/** The loop driving a "running" scan died with the old process - left as is, it would read as running
+ * forever, and cancelling it would only set a flag nothing checks any more. */
+function recoverInterruptedScan(run: ScanRun): ScanRun {
+  if (run.status !== "running") return run;
+  run.status = "cancelled";
+  run.finishedAt = Date.now();
+  for (const step of run.steps) {
+    if (step.status === "pending" || step.status === "running") {
+      step.status = "skipped";
+      step.error = "The backend restarted during this scan.";
+    }
+  }
+  return run;
 }
 
 export function listScans(missionId: string): ScanRun[] {
@@ -129,7 +145,7 @@ export type ScanEvent =
  * Runs every step of a profile against a target, sequentially, through the existing
  * requestExecution/confirmExecution pipeline - so workspace path containment, executable
  * availability checks, and Execution -> Parser -> Findings ingestion all apply exactly as they do
- * for a manually-run Workbench tool. Each step is auto-confirmed the instant it's requested: the
+ * for a manually-run tool. Each step is auto-confirmed the instant it's requested: the
  * human already confirmed the whole chain by starting this scan (see the "Confirm & Run All" UX),
  * unlike the Orchestrator where an LLM picks tools/arguments at runtime and each one needs its own
  * approval. A step that fails doesn't abort the scan - later steps still run, since a real recon
@@ -181,11 +197,29 @@ export async function createScanRun(
       step.resolvedCommand = record.resolvedCommand;
 
       if (record.status === "pending_confirmation") {
+        // A cancel can land while requestExecution is awaiting - this step must not start after it.
+        if (cancelledScans.has(run.id)) {
+          rejectExecution(record.id);
+          step.executionId = record.id;
+          step.status = "skipped";
+          step.finishedAt = Date.now();
+          onEvent?.({ type: "step", scanId: run.id, step });
+          continue;
+        }
         activeExecutionByScan.set(run.id, record.id);
-        const finished = await confirmExecution(record.id, (chunk: OutputChunk) => {
-          onEvent?.({ type: "output", scanId: run.id, toolId: step.toolId, stream: chunk.stream, data: chunk.data });
-        });
-        activeExecutionByScan.delete(run.id);
+        let finished;
+        try {
+          finished = await confirmExecution(record.id, (chunk: OutputChunk) => {
+            onEvent?.({ type: "output", scanId: run.id, toolId: step.toolId, stream: chunk.stream, data: chunk.data });
+          });
+        } catch (err) {
+          // Refused before it ran (e.g. the concurrency cap) - a scan has no human to retry it, so
+          // don't leave it sitting in the mission's Approval Queue.
+          rejectExecution(record.id);
+          throw err;
+        } finally {
+          activeExecutionByScan.delete(run.id);
+        }
         step.executionId = finished.id;
         step.status =
           finished.status === "completed" ? "completed" : finished.status === "cancelled" ? "skipped" : "failed";
@@ -218,9 +252,7 @@ export async function createScanRun(
 }
 
 /** Flags a running scan to stop scheduling further steps and aborts whichever step is currently
- * in flight (best effort - if the abort lands in the brief window between requesting and
- * confirming a step's execution, that one step still runs to completion, but no further steps
- * will start). */
+ * in flight. */
 export function cancelScanRun(id: string): ScanRun {
   const run = scans.get(id);
   if (!run) throw new ScanRunNotFoundError(id);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createReport, deleteReport, fetchReports, updateReportStatus } from "../services/reportsApi";
 import type { Report, ReportStatus } from "../types/report";
 
@@ -13,6 +13,13 @@ export function useReports(missionId: string | null) {
   const [streamingText, setStreamingText] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  /** Guard against a stale previous-mission response landing after a quick mission switch - see
+   * useTools.ts's identical ref for the pattern and why it matters. */
+  const missionIdRef = useRef(missionId);
+  useEffect(() => {
+    missionIdRef.current = missionId;
+  }, [missionId]);
+
   const refresh = useCallback(async () => {
     if (!missionId) {
       setReports([]);
@@ -22,11 +29,14 @@ export function useReports(missionId: string | null) {
     setLoading(true);
     setError(null);
     try {
-      setReports(await fetchReports(missionId));
+      const data = await fetchReports(missionId);
+      if (missionIdRef.current !== missionId) return;
+      setReports(data);
     } catch (err) {
+      if (missionIdRef.current !== missionId) return;
       setError(err instanceof Error ? err.message : "Failed to load reports");
     } finally {
-      setLoading(false);
+      if (missionIdRef.current === missionId) setLoading(false);
     }
   }, [missionId]);
 
@@ -44,9 +54,11 @@ export function useReports(missionId: string | null) {
         const report = await createReport(missionId, title, findingIds, (chunk) =>
           setStreamingText((prev) => prev + chunk),
         );
+        if (missionIdRef.current !== missionId) return undefined;
         setReports((prev) => [report, ...prev.filter((r) => r.id !== report.id)]);
         return report;
       } catch (err) {
+        if (missionIdRef.current !== missionId) return undefined;
         setError(err instanceof Error ? err.message : "Failed to generate the report");
         return undefined;
       } finally {
@@ -63,9 +75,11 @@ export function useReports(missionId: string | null) {
       setError(null);
       try {
         await deleteReport(missionId, reportId);
-        setReports((prev) => prev.filter((r) => r.id !== reportId));
+        if (missionIdRef.current === missionId)
+          setReports((prev) => prev.filter((r) => r.id !== reportId));
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to delete the report");
+        if (missionIdRef.current === missionId)
+          setError(err instanceof Error ? err.message : "Failed to delete the report");
       }
     },
     [missionId],
@@ -77,9 +91,11 @@ export function useReports(missionId: string | null) {
       setError(null);
       try {
         const updated = await updateReportStatus(missionId, reportId, status);
-        setReports((prev) => prev.map((r) => (r.id === reportId ? updated : r)));
+        if (missionIdRef.current === missionId)
+          setReports((prev) => prev.map((r) => (r.id === reportId ? updated : r)));
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to update the report status");
+        if (missionIdRef.current === missionId)
+          setError(err instanceof Error ? err.message : "Failed to update the report status");
       }
     },
     [missionId],

@@ -154,3 +154,35 @@ describe("checkScope", () => {
     expect(result).toEqual({ verdict: "out_of_scope", offending: ["staging.example.com"] });
   });
 });
+
+describe("targets on a TLD outside the built-in list", () => {
+  it("still blocks an out-of-scope host whose TLD only the mission's own entries know", () => {
+    expect(checkScope(["acme.gg"], ["admin.acme.gg"], ["curl", "admin.acme.gg"]).verdict).toBe("out_of_scope");
+  });
+
+  it("recognizes in-scope targets on an internal TLD", () => {
+    expect(checkScope(["*.corp.internal"], undefined, ["nmap", "app.corp.internal"]).verdict).toBe("in_scope");
+  });
+
+  it("blocks a sibling on that same TLD that isn't in scope", () => {
+    expect(checkScope(["*.corp.internal"], undefined, ["nmap", "evil.internal"]).verdict).toBe("out_of_scope");
+  });
+
+  it("doesn't treat a filename as a target just because scope is configured", () => {
+    expect(extractTargets(["cat", "notes.txt"], new Set(["gg"]))).toEqual([]);
+  });
+});
+
+describe("host normalization", () => {
+  it("treats a fully-qualified trailing dot as the same host", () => {
+    expect(isTargetOutOfScope(undefined, ["admin.example.com"], "admin.example.com.")).toBe(true);
+    expect(isInScope("app.example.com.", ["*.example.com"])).toBe(true);
+    expect(checkScope(["example.com"], ["admin.example.com"], ["curl", "https://admin.example.com./x"]).verdict).toBe("out_of_scope");
+  });
+
+  it("doesn't read code-like tokens as IPv6 targets", () => {
+    expect(extractTargets(["std::cout"])).toEqual([]);
+    expect(extractTargets(["curl", "http://[2001:db8::1]/"])).toContain("2001:db8::1");
+    expect(extractTargets(["nmap", "2001:db8::1"])).toContain("2001:db8::1");
+  });
+});

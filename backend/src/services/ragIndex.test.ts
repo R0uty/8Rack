@@ -3,19 +3,26 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("node:fs/promises", () => ({
   readFile: vi.fn(),
   writeFile: vi.fn(),
+  rename: vi.fn(),
+  unlink: vi.fn(),
   mkdir: vi.fn(),
   readdir: vi.fn(),
   stat: vi.fn(),
 }));
 vi.mock("./ollama.js", () => ({ embed: vi.fn() }));
 
-import { chunkText, cosineSimilarity, loadIndexFromDisk, search } from "./ragIndex.js";
+import { chunkText, cosineSimilarity, loadIndexFromDisk, reindex, search } from "./ragIndex.js";
 import { embed } from "./ollama.js";
+import { RagReindexInProgressError } from "./errors.js";
+import { env } from "../config/env.js";
 import * as fsPromises from "node:fs/promises";
+import path from "node:path";
 import type { RagChunk } from "../types/rag.js";
 
 const mockEmbed = vi.mocked(embed);
 const mockReadFile = vi.mocked(fsPromises.readFile);
+const mockReaddir = vi.mocked(fsPromises.readdir);
+const mockStat = vi.mocked(fsPromises.stat);
 
 function fixtureChunk(overrides: Partial<RagChunk> = {}): RagChunk {
   return {
@@ -125,5 +132,50 @@ describe("search - ranking (index populated via loadIndexFromDisk)", () => {
     const results = await search("query", 1);
 
     expect(results).toHaveLength(1);
+  });
+});
+
+describe("reindex coordination", () => {
+  it("refuses a second reindex while one is in flight", async () => {
+    mockReaddir.mockResolvedValueOnce([
+      { name: "notes.txt", isDirectory: () => false, isFile: () => true } as never,
+    ]);
+    mockStat.mockResolvedValueOnce({ size: 10 } as never);
+    mockReadFile.mockResolvedValueOnce("line one\nline two\n");
+
+    let releaseEmbed: (v: number[][]) => void;
+    mockEmbed.mockReturnValueOnce(
+      new Promise<number[][]>((resolve) => {
+        releaseEmbed = resolve;
+      }),
+    );
+
+    const first = reindex();
+    await expect(reindex()).rejects.toThrow(RagReindexInProgressError);
+
+    releaseEmbed!([[1, 0, 0]]);
+    await first;
+  });
+});
+
+describe("reindex app-data exclusion", () => {
+  it("never indexes anything under the app's own data dir, even when it's inside the workspace", async () => {
+    // WORKSPACE_ROOT pointed at the repo root for a moment - the walk must not descend into
+    // backend/data. readdir only returns the "data" entry at the root; isInsideAppData skips it.
+    const original = env.workspaceRoot;
+    env.workspaceRoot = path.resolve(env.workspaceRoot, "..");
+    try {
+      mockEmbed.mockClear();
+      mockReaddir.mockResolvedValueOnce([
+        { name: "data", isDirectory: () => true, isFile: () => false } as never,
+      ]);
+
+      const status = await reindex();
+
+      expect(status.fileCount).toBe(0);
+      expect(mockEmbed).not.toHaveBeenCalled();
+    } finally {
+      env.workspaceRoot = original;
+    }
   });
 });

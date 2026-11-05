@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
 import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
-import { cancelExecution, getExecution, listExecTools, rejectExecution, requestExecution } from "./toolManager.js";
+import { cancelExecution, getExecution, listExecToolsWithStatus, rejectExecution, requestExecution } from "./toolManager.js";
 import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragIndex.js";
 import {
   createAgentFinding,
@@ -90,6 +90,7 @@ const UPSERT_ASSET_TOOL = "upsert_asset";
  * plain text. Never automatically applied to an agent's own create_finding output - a human/validator
  * action, matching the factory spec's "do not automatically mark AI-generated claims as confirmed". */
 const VALIDATE_FINDING_TOOL = "validate_finding";
+const RECORDING_TOOLS = new Set([CREATE_FINDING_TOOL, UPSERT_ASSET_TOOL, VALIDATE_FINDING_TOOL]);
 
 /** Called with each piece of the agent's reply text as it streams in, for a live "thinking" UX. */
 export type ChunkListener = (content: string) => void;
@@ -120,6 +121,10 @@ export interface OrchestratorTask {
   pendingExecutionId?: string;
   finalResponse?: string;
   error?: string;
+  /** Time spent actually generating, accumulated across every advance() run - what
+   * env.maxOrchestratorTaskTimeMs bounds. Wall-clock age would count however long the task sat
+   * waiting on a human: a tool approved 11 minutes after it was requested could never continue. */
+  activeMs?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -133,6 +138,13 @@ const TASKS_FILE = "orchestrator-tasks.json";
  * different connection, or cancelPlan, previously had no way to reach a running generation at
  * all). See advanceTask below and the "cancelTask doesn't abort in-flight generation" audit finding. */
 const runningTaskControllers = new Map<string, AbortController>();
+/** When the current advanceTask run started, per task - see OrchestratorTask.activeMs. */
+const runStartedAt = new Map<string, number>();
+
+function activeTimeMs(task: OrchestratorTask): number {
+  const started = runStartedAt.get(task.id);
+  return (task.activeMs ?? 0) + (started === undefined ? 0 : Date.now() - started);
+}
 
 function missionTasks(missionId: string): OrchestratorTask[] {
   return [...tasks.values()].filter((t) => t.missionId === missionId).sort((a, b) => b.createdAt - a.createdAt);
@@ -160,7 +172,15 @@ export async function loadTasksFromDisk(): Promise<void> {
   const missionIds = await listMissionIds();
   for (const missionId of missionIds) {
     const missionTasksOnDisk = await readMissionJson<OrchestratorTask>(missionId, TASKS_FILE);
-    for (const task of missionTasksOnDisk) tasks.set(task.id, task);
+    for (const task of missionTasksOnDisk) {
+      // Whatever was driving a "running" task died with the old process, and nothing else would
+      // ever settle it. A task paused on a human stays resumable as-is.
+      if (task.status === "running") {
+        task.status = "failed";
+        task.error = "The backend restarted while this task was running.";
+      }
+      tasks.set(task.id, task);
+    }
   }
 }
 
@@ -196,8 +216,10 @@ function buildMissionContextLines(mission: Mission | undefined): string[] {
 
 async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId: string): Promise<string> {
   const allowed = agent?.execTools;
-  const lines = listExecTools()
-    .filter((t) => t.enabled)
+  // Only what can really run: a local model offered a tool that isn't installed will pick it, and the
+  // failed request pauses the whole task for a human.
+  const lines = listExecToolsWithStatus()
+    .filter((t) => t.enabled && t.availability === "available")
     .filter((t) => allowed === undefined || allowed.includes(t.id))
     .map((t) => `- ${t.id}: ${t.description}${t.usageHint ? ` ${t.usageHint}` : ""}`);
 
@@ -301,25 +323,49 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
 function tryParseCandidate(candidate: string): { tool: string; arguments: string[] } | undefined {
   try {
     const parsed = JSON.parse(candidate) as { tool?: unknown; arguments?: unknown };
-    if (
-      typeof parsed.tool === "string" &&
-      Array.isArray(parsed.arguments) &&
-      parsed.arguments.every((a) => typeof a === "string")
-    ) {
-      return { tool: parsed.tool, arguments: parsed.arguments as string[] };
-    }
+    if (typeof parsed.tool !== "string") return undefined;
+    const rawArgs = parsed.arguments ?? [];
+    if (!Array.isArray(rawArgs) || rawArgs.some((a) => a === null)) return undefined;
+    // Local models routinely send ["-p", 80], or an unencoded object for create_finding's "JSON
+    // object encoded as a string" argument. The intent is unambiguous, and not recognizing it would
+    // silently turn the tool call into the task's "final answer".
+    const args = rawArgs.map((a: unknown) => (typeof a === "string" ? a : typeof a === "object" ? JSON.stringify(a) : String(a)));
+    return { tool: parsed.tool, arguments: args };
   } catch {
     // Not valid JSON, or not a tool-request shape.
   }
   return undefined;
 }
 
+/** Every top-level balanced {...} span in the text, in order - brace-counting that ignores braces
+ * inside JSON strings. Not a JSON parser: tryParseCandidate decides whether a span is actually one. */
+function balancedObjectSpans(text: string): string[] {
+  const spans: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === "\\") i++;
+      else if (c === '"') inString = false;
+    } else if (depth > 0 && c === '"') {
+      inString = true;
+    } else if (c === "{") {
+      if (depth++ === 0) start = i;
+    } else if (c === "}" && depth > 0 && --depth === 0) {
+      spans.push(text.slice(start, i + 1));
+    }
+  }
+  return spans;
+}
+
 /**
  * Despite the preamble instructing "respond with ONLY the JSON object", models often still
  * prepend a sentence ("Sure, here's the call:") even when told not to. Try the strict case first
- * (whole reply, optionally fenced, is the JSON), then fall back to the substring between the
- * first "{" and last "}" in the reply — handles the common one-JSON-object-plus-prose case
- * without trying to be a general-purpose JSON extractor.
+ * (whole reply, optionally fenced, is the JSON), then fall back to the first balanced object in the
+ * reply that is a tool request - which also covers a model emitting several calls at once (the
+ * first runs; it can ask again once it has the result).
  */
 export function parseToolRequest(text: string): { tool: string; arguments: string[] } | undefined {
   const trimmed = text.trim();
@@ -327,10 +373,11 @@ export function parseToolRequest(text: string): { tool: string; arguments: strin
   const strict = tryParseCandidate(fence ? fence[1].trim() : trimmed);
   if (strict) return strict;
 
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return undefined;
-  return tryParseCandidate(trimmed.slice(start, end + 1));
+  for (const span of balancedObjectSpans(trimmed)) {
+    const candidate = tryParseCandidate(span);
+    if (candidate) return candidate;
+  }
+  return undefined;
 }
 
 async function collectAgentReply(
@@ -377,7 +424,7 @@ async function runKnowledgeBaseSearch(args: string[]): Promise<string> {
       tool: SEARCH_KNOWLEDGE_BASE_TOOL,
       status: "failed",
       success: false,
-      message: "The knowledge base hasn't been indexed yet - reindex it from the Workbench first.",
+      message: "The knowledge base hasn't been indexed yet - reindex it from the Tools view first.",
     });
   }
   if (!query) {
@@ -434,6 +481,22 @@ const VALID_SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "c
 const VALID_ASSET_TYPES: AssetType[] = ["domain", "subdomain", "url", "ip", "port", "service", "api", "technology"];
 const VALID_ASSET_STATUSES: Asset["status"][] = ["active", "inactive", "unverified"];
 
+/** Parses a pseudo-tool's single JSON-string argument. `JSON.parse("null")`/`"[]"` succeed but aren't
+ * the object every caller destructures - null would throw out of the tool-result error path. */
+function parseJsonObjectArg(toolId: string, raw: string | undefined): { obj: Record<string, unknown> } | { error: string } {
+  if (!raw) return { error: `${toolId} requires a single-element array containing a JSON object string.` };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: `${toolId}'s argument is not valid JSON.` };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { error: `${toolId}'s argument must be a JSON object.` };
+  }
+  return { obj: parsed as Record<string, unknown> };
+}
+
 function formatFindingsResults(results: Finding[]): string {
   if (results.length === 0) return "(no findings recorded yet)";
   return results
@@ -476,15 +539,9 @@ function runFindingsQuery(missionId: string, args: string[]): string {
  * FindingCreateInput, or returns an error string explaining exactly what's wrong - fed back to the
  * agent as a tool result, same recover-and-retry loop as an invalid ExecTool argument. */
 function parseCreateFindingArgs(args: string[]): { input: FindingCreateInput } | { error: string } {
-  const raw = args[0];
-  if (!raw) return { error: `${CREATE_FINDING_TOOL} requires a single-element array containing a JSON object string.` };
-
-  let obj: Record<string, unknown>;
-  try {
-    obj = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return { error: `${CREATE_FINDING_TOOL}'s argument is not valid JSON.` };
-  }
+  const parsedArg = parseJsonObjectArg(CREATE_FINDING_TOOL, args[0]);
+  if ("error" in parsedArg) return parsedArg;
+  const { obj } = parsedArg;
 
   const { type, severity, title, description, target, value, parameter, impact, reproductionSteps, evidence, confidence, tags } =
     obj;
@@ -569,15 +626,9 @@ async function runCreateFinding(missionId: string, agentId: string, args: string
 /** Parses/validates the upsert_asset pseudo-tool's single JSON-string argument, mirroring
  * parseCreateFindingArgs's shape/error-reporting convention exactly. */
 function parseUpsertAssetArgs(args: string[]): { input: AssetCreateInput } | { error: string } {
-  const raw = args[0];
-  if (!raw) return { error: `${UPSERT_ASSET_TOOL} requires a single-element array containing a JSON object string.` };
-
-  let obj: Record<string, unknown>;
-  try {
-    obj = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return { error: `${UPSERT_ASSET_TOOL}'s argument is not valid JSON.` };
-  }
+  const parsedArg = parseJsonObjectArg(UPSERT_ASSET_TOOL, args[0]);
+  if ("error" in parsedArg) return parsedArg;
+  const { obj } = parsedArg;
 
   const { type, value, status, metadata } = obj;
 
@@ -646,15 +697,9 @@ interface ValidateFindingInput {
 /** Parses/validates the validate_finding pseudo-tool's single JSON-string argument, mirroring
  * parseCreateFindingArgs/parseUpsertAssetArgs's shape/error-reporting convention exactly. */
 function parseValidateFindingArgs(args: string[]): { input: ValidateFindingInput } | { error: string } {
-  const raw = args[0];
-  if (!raw) return { error: `${VALIDATE_FINDING_TOOL} requires a single-element array containing a JSON object string.` };
-
-  let obj: Record<string, unknown>;
-  try {
-    obj = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return { error: `${VALIDATE_FINDING_TOOL}'s argument is not valid JSON.` };
-  }
+  const parsedArg = parseJsonObjectArg(VALIDATE_FINDING_TOOL, args[0]);
+  if ("error" in parsedArg) return parsedArg;
+  const { obj } = parsedArg;
 
   const { findingId, verdict, severity, notes } = obj;
 
@@ -696,6 +741,17 @@ async function runValidateFinding(missionId: string, agentId: string, args: stri
       status: "failed",
       success: false,
       message: `No finding "${parsed.input.findingId}" was found for this mission.`,
+    });
+  }
+  // create_finding stamps the creating agent as `tool` - an agent grading its own claim is exactly
+  // the "AI marks its own output confirmed" the validation pipeline exists to prevent, and a
+  // prompt-injected agent could otherwise log and confirm a finding in two steps.
+  if (existing.source === "agent" && existing.tool === agentId) {
+    return JSON.stringify({
+      tool: VALIDATE_FINDING_TOOL,
+      status: "failed",
+      success: false,
+      message: "An agent can't validate a finding it created itself - leave it for the validator or a human.",
     });
   }
 
@@ -791,16 +847,58 @@ async function advanceTask(task: OrchestratorTask, onChunk?: ChunkListener, call
   const controller = new AbortController();
   runningTaskControllers.set(task.id, controller);
   const signal = callerSignal ? AbortSignal.any([controller.signal, callerSignal]) : controller.signal;
+  runStartedAt.set(task.id, Date.now());
   try {
     return await advance(task, onChunk, signal);
+  } catch (err) {
+    if (err instanceof RequestCancelledError) throw err;
+    // Anything advance() didn't anticipate must still settle the task - left at "running" it would
+    // read as in progress forever, with nothing driving it.
+    task.status = "failed";
+    task.error = err instanceof Error ? err.message : "Task step failed";
+    touch(task);
+    return task;
   } finally {
+    task.activeMs = activeTimeMs(task);
+    runStartedAt.delete(task.id);
     runningTaskControllers.delete(task.id);
   }
 }
 
+/**
+ * Local models often answer a successful create_finding/upsert_asset/validate_finding by sending the
+ * identical call again, instead of a closing message - left alone that runs to the tool-call cap and
+ * fails a work order whose work is already done, re-recording the same thing each time. Re-running
+ * these can't produce anything new, so an exact repeat means the agent is finished. Returns the earlier
+ * call's result to close on, or undefined when this isn't such a repeat. Real tools aren't covered:
+ * running one twice can be deliberate, and it stays behind its own confirmation.
+ */
+function repeatOfRecordedCall(
+  messages: OrchestratorTask["messages"],
+  request: NonNullable<ReturnType<typeof parseToolRequest>>,
+): string | undefined {
+  if (!RECORDING_TOOLS.has(request.tool)) return undefined;
+  // [..., previous assistant call, its tool result, this assistant call]
+  const previousCall = messages.at(-3);
+  const previousResult = messages.at(-2);
+  if (previousCall?.role !== "assistant" || previousResult?.role !== "tool") return undefined;
+
+  const previous = parseToolRequest(previousCall.content);
+  if (!previous || previous.tool !== request.tool || JSON.stringify(previous.arguments) !== JSON.stringify(request.arguments)) {
+    return undefined;
+  }
+  try {
+    const result = JSON.parse(previousResult.content) as { success?: unknown; stdout?: unknown };
+    return result.success === true && typeof result.stdout === "string" ? result.stdout : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?: AbortSignal): Promise<OrchestratorTask> {
-  if (Date.now() - task.createdAt > env.maxOrchestratorTaskTimeMs) {
+  if (activeTimeMs(task) > env.maxOrchestratorTaskTimeMs) {
     task.status = "max_time_reached";
+    task.error = `Stopped after ${Math.round(env.maxOrchestratorTaskTimeMs / 60_000)} minutes of agent time (MAX_ORCHESTRATOR_TASK_TIME_MS).`;
     touch(task);
     return task;
   }
@@ -822,6 +920,21 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
     return task;
   }
 
+  // A cancel that landed right as the stream finished: nothing threw, but the task is already
+  // terminal and must not be overwritten as "completed" below.
+  if (signal?.aborted) {
+    task.status = "cancelled";
+    touch(task);
+    return task;
+  }
+
+  if (!reply.trim()) {
+    task.status = "failed";
+    task.error = "The model returned an empty response.";
+    touch(task);
+    return task;
+  }
+
   task.messages.push({ role: "assistant", content: reply });
 
   const toolRequest = parseToolRequest(reply);
@@ -832,10 +945,19 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
     return task;
   }
 
+  const recorded = repeatOfRecordedCall(task.messages, toolRequest);
+  if (recorded !== undefined) {
+    task.status = "completed";
+    task.finalResponse = recorded;
+    touch(task);
+    return task;
+  }
+
   // Every tool-call attempt counts against the cap, valid or not, so a model that keeps requesting
   // malformed/unknown tools can't loop forever without ever incrementing toward the limit.
   if (task.toolCallCount >= env.maxOrchestratorToolCalls) {
     task.status = "max_executions_reached";
+    task.error = `Stopped after ${env.maxOrchestratorToolCalls} tool calls (MAX_ORCHESTRATOR_TOOL_CALLS).`;
     touch(task);
     return task;
   }
@@ -962,6 +1084,9 @@ export async function createTask(
   onChunk?: ChunkListener,
   signal?: AbortSignal,
   model?: string,
+  /** Called with the task as soon as it exists, before the first generation - this function only
+   * resolves once that generation settles, too late for a caller that needs to be able to cancel it. */
+  onCreated?: (task: OrchestratorTask) => void,
 ): Promise<OrchestratorTask> {
   const agent = await getAgent(agentId);
   if (!agent) throw new AgentNotFoundError(agentId);
@@ -980,6 +1105,7 @@ export async function createTask(
     updatedAt: Date.now(),
   };
   tasks.set(task.id, task);
+  onCreated?.(task);
   try {
     const result = await advanceTask(task, onChunk, signal);
     await persistTasks(task.missionId);
@@ -1171,6 +1297,9 @@ export async function continueTask(
 export function cancelTask(id: string): OrchestratorTask {
   const task = tasks.get(id);
   if (!task) throw new TaskNotFoundError(id);
+  if (!["running", "waiting_confirmation", "waiting_guidance"].includes(task.status)) {
+    throw new InvalidTaskStateError(`Task "${id}" has already finished (status: ${task.status})`);
+  }
   // Abort a same-task advance() loop that's actually running right now - e.g. this cancel arrived
   // from a different connection than the one that created/resumed the task, or in the window
   // between the agent's generation finishing and that request's own disconnect being observed.

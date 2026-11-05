@@ -1,7 +1,7 @@
 import { getMission, updateMission } from "./missionManager.js";
 import { listAssets } from "./assetManager.js";
 import { getMissionFindings } from "./findingsManager.js";
-import { createWorkOrder, dependenciesSatisfied, listWorkOrders, startWorkOrder } from "./workOrderManager.js";
+import { createWorkOrder, dependenciesSatisfied, listWorkOrders, resumeWorkOrderIfReady, startWorkOrder, workOrderNeedsGuidance } from "./workOrderManager.js";
 import { logActivity } from "./activityLog.js";
 import { MissionNotFoundError } from "./errors.js";
 import type { ChunkListener } from "./orchestrator.js";
@@ -50,6 +50,13 @@ function hasInProgressWorkOrder(existing: WorkOrder[], predicate: (wo: WorkOrder
   return existing.some((wo) => IN_PROGRESS_WORK_ORDER_STATUSES.includes(wo.status) && predicate(wo));
 }
 
+/** Statuses a human parks a mission at - the Director runs nothing for these until moved back. */
+const HALTED_MISSION_STATUSES: (MissionStatus | undefined)[] = ["paused", "cancelled", "review", "completed"];
+
+/** Bounds one advance call's auto-chain. Each order can register assets that seed more orders, and a
+ * local model can invent assets indefinitely - this keeps that from running unattended forever. */
+const MAX_WORK_ORDERS_PER_ADVANCE = 25;
+
 /** Enumeration has no equivalent outer "didn't work yet" signal - a `completed` Enumeration work
  * order for a given asset generally did produce real analysis (findings, even if no *new* assets),
  * so unlike Recon/Validation it must stay permanently deduped once completed - re-seeding it on
@@ -64,8 +71,20 @@ function hasBlockingWorkOrder(existing: WorkOrder[], predicate: (wo: WorkOrder) 
  * testable end-to-end without depending on an LLM planning call. Idempotent against *concurrent*
  * duplicates (never seeds a second work order while a matching one is still in progress).
  */
-async function seedWorkOrders(mission: Mission, assets: Asset[], findings: Finding[], existing: WorkOrder[]): Promise<void> {
-  if (assets.length === 0 && mission.scope?.length && !hasInProgressWorkOrder(existing, (wo) => wo.agentId === RECON_AGENT_ID)) {
+async function seedWorkOrders(
+  mission: Mission,
+  assets: Asset[],
+  findings: Finding[],
+  existing: WorkOrder[],
+  isFollowUp: boolean,
+): Promise<void> {
+  // Re-trying a settled Recon/Validation order is what a human's fresh advance call asks for (see
+  // IN_PROGRESS_WORK_ORDER_STATUSES) - never the auto-chain's follow-up passes. A model that answers
+  // in prose instead of calling a tool "completes" without changing the outcome, so re-seeding there
+  // would loop forever, burning the local model with no human in the picture.
+  const blocksReseed = isFollowUp ? hasBlockingWorkOrder : hasInProgressWorkOrder;
+
+  if (assets.length === 0 && mission.scope?.length && !blocksReseed(existing, (wo) => wo.agentId === RECON_AGENT_ID)) {
     await createWorkOrder(mission.id, {
       agentId: RECON_AGENT_ID,
       objective:
@@ -95,7 +114,7 @@ async function seedWorkOrders(mission: Mission, assets: Asset[], findings: Findi
 
   for (const finding of findings) {
     if (!UNSETTLED_FINDING_STATUSES.includes(finding.status)) continue;
-    if (hasInProgressWorkOrder(existing, (wo) => wo.agentId === VALIDATOR_AGENT_ID && wo.relatedFindings.includes(finding.id))) continue;
+    if (blocksReseed(existing, (wo) => wo.agentId === VALIDATOR_AGENT_ID && wo.relatedFindings.includes(finding.id))) continue;
     await createWorkOrder(mission.id, {
       agentId: VALIDATOR_AGENT_ID,
       objective:
@@ -167,7 +186,7 @@ export interface FactoryAdvanceResult {
   workOrder?: WorkOrder;
   /** Set when advanceMission did nothing and there's a specific, actionable reason a human should
    * see rather than just silence - currently only "no scope configured yet", the exact confusion
-   * this field was added to fix (a mission created via the quick-create name+notes form has no
+   * this field was added to fix (a mission created with only a name has no
    * scope, so the Director correctly refuses to seed a Recon work order at all rather than sending
    * an agent out with no target - previously it seeded one anyway with a "no scope configured"
    * placeholder objective, which produced a useless completed work order and looked identical to a
@@ -184,32 +203,77 @@ export interface FactoryAdvanceResult {
  * that's a signal worth a human's attention, not something to paper over by moving on.
  */
 export async function advanceMission(missionId: string, onChunk?: ChunkListener, signal?: AbortSignal): Promise<FactoryAdvanceResult> {
+  return advanceChain(missionId, onChunk, signal, 0);
+}
+
+function failureReason(wo: WorkOrder): string | undefined {
+  if (wo.status !== "failed") return undefined;
+  return `A work order for ${wo.agentId} failed${wo.result ? `: ${wo.result}` : "."} Retry it from Work Orders once that's resolved.`;
+}
+
+async function advanceChain(
+  missionId: string,
+  onChunk: ChunkListener | undefined,
+  signal: AbortSignal | undefined,
+  ranSoFar: number,
+): Promise<FactoryAdvanceResult> {
   const mission = await getMission(missionId);
   if (!mission) throw new MissionNotFoundError(missionId);
 
-  const assets = listAssets(missionId);
-  const findings = getMissionFindings(missionId);
+  if (HALTED_MISSION_STATUSES.includes(mission.status)) {
+    return { mission, blockedReason: `This mission is ${mission.status} - move it back to an active status to run more work.` };
+  }
+
   let workOrders = listWorkOrders(missionId);
 
-  await seedWorkOrders(mission, assets, findings, workOrders);
+  // Orders a human has just unblocked come first - their agents are waiting on a tool's result.
+  for (const wo of workOrders) {
+    if (wo.status !== "waiting_approval") continue;
+    const resumed = await resumeWorkOrderIfReady(wo.id, onChunk, signal);
+    if (resumed.status === "failed" || resumed.status === "cancelled") {
+      return { mission, workOrder: resumed, blockedReason: failureReason(resumed) };
+    }
+    if (workOrderNeedsGuidance(resumed)) {
+      return {
+        mission,
+        workOrder: resumed,
+        blockedReason: `${resumed.agentId}'s last tool run failed and it needs a note before it can continue - open the order in Work Orders and use Inspect.`,
+      };
+    }
+  }
+
+  // Read after resuming: the agents that just ran may have registered assets or findings.
+  const assets = listAssets(missionId);
+  const findings = getMissionFindings(missionId);
+
+  await seedWorkOrders(mission, assets, findings, workOrders, ranSoFar > 0);
   workOrders = listWorkOrders(missionId);
 
-  const settledMission = await maybeAdvanceMissionStatus(mission, computeStage(assets, findings, workOrders));
+  const needsScope = assets.length === 0 && !mission.scope?.length;
+  const settledMission = needsScope ? mission : await maybeAdvanceMissionStatus(mission, computeStage(assets, findings, workOrders));
 
   const runnable = workOrders
     .filter((wo) => wo.status === "pending" && dependenciesSatisfied(wo))
     .sort((a, b) => b.priority - a.priority || a.createdAt - b.createdAt);
   const next = runnable[0];
   if (!next) {
-    const blockedReason =
-      assets.length === 0 && !mission.scope?.length
-        ? "This mission has no scope configured yet - add at least one in-scope target before starting the factory."
-        : undefined;
+    const blockedReason = needsScope
+      ? "This mission has no scope configured yet - add at least one in-scope target before starting the factory."
+      : undefined;
     return { mission: settledMission, blockedReason };
   }
 
-  const started = await startWorkOrder(next.id, onChunk, signal);
-  if (started.status !== "completed") return { mission: settledMission, workOrder: started };
+  if (ranSoFar >= MAX_WORK_ORDERS_PER_ADVANCE) {
+    return {
+      mission: settledMission,
+      blockedReason: `Paused after ${MAX_WORK_ORDERS_PER_ADVANCE} work orders in one run - review the results, then advance again to continue.`,
+    };
+  }
 
-  return advanceMission(missionId, onChunk, signal);
+  const started = await startWorkOrder(next.id, onChunk, signal);
+  if (started.status !== "completed") {
+    return { mission: settledMission, workOrder: started, blockedReason: failureReason(started) };
+  }
+
+  return advanceChain(missionId, onChunk, signal, ranSoFar + 1);
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchAssets } from "../services/assetsApi";
 import type { Asset } from "../types/asset";
 
@@ -9,6 +9,13 @@ export function useAssets(missionId: string | null) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  /** Guard against a stale previous-mission response landing after a quick mission switch - see
+   * useTools.ts's identical ref for the pattern and why it matters. */
+  const missionIdRef = useRef(missionId);
+  useEffect(() => {
+    missionIdRef.current = missionId;
+  }, [missionId]);
+
   const refresh = useCallback(async () => {
     if (!missionId) {
       setAssets([]);
@@ -18,11 +25,14 @@ export function useAssets(missionId: string | null) {
     setLoading(true);
     setError(null);
     try {
-      setAssets(await fetchAssets(missionId));
+      const data = await fetchAssets(missionId);
+      if (missionIdRef.current !== missionId) return;
+      setAssets(data);
     } catch (err) {
+      if (missionIdRef.current !== missionId) return;
       setError(err instanceof Error ? err.message : "Failed to load assets");
     } finally {
-      setLoading(false);
+      if (missionIdRef.current === missionId) setLoading(false);
     }
   }, [missionId]);
 

@@ -75,15 +75,17 @@ export async function listModels(): Promise<OllamaModel[]> {
  * don't declare Ollama's "embedding" capability and get flatly rejected (confirmed live against
  * this project's own installed models) - that specific failure is surfaced as
  * EmbeddingModelUnavailableError so callers (services/ragIndex.ts) can give an actionable message
- * instead of a raw Ollama error string.
+ * instead of a raw Ollama error string. An optional caller signal (e.g. a whole-reindex budget)
+ * is combined with the per-call request timeout so either one aborts the fetch.
  */
-export async function embed(model: string, input: string[]): Promise<number[][]> {
+export async function embed(model: string, input: string[], signal?: AbortSignal): Promise<number[][]> {
   const res = await ollamaFetch(
     "/api/embed",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model, input }),
+      ...(signal ? { signal } : {}),
     },
     env.ollamaRequestTimeoutMs,
   );
@@ -155,11 +157,17 @@ export async function* streamChat(
     let buffer = "";
 
     const parseLine = (line: string): ChatResponseChunk => {
+      let chunk: ChatResponseChunk & { error?: unknown };
       try {
-        return JSON.parse(line) as ChatResponseChunk;
+        chunk = JSON.parse(line) as ChatResponseChunk & { error?: unknown };
       } catch {
         throw new OllamaRequestError("Received an invalid response from Ollama", 502);
       }
+      // A failure after streaming began (e.g. the model runner dying mid-generation) arrives as a
+      // {"error"} line on a 200 response. Passed through it has no message content, so the partial
+      // reply would read as a normally finished answer.
+      if (typeof chunk.error === "string") throw new OllamaRequestError(chunk.error, 502);
+      return chunk;
     };
 
     try {

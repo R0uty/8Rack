@@ -17,8 +17,6 @@ import type {
   FindingSeverity,
   FindingStatus,
   FindingType,
-  FindingsGraph,
-  FindingsGraphNode,
   ParsedFinding,
 } from "../types/finding.js";
 import type { ExecutionRecord } from "../types/execTool.js";
@@ -29,6 +27,9 @@ const FINDINGS_FILE = "findings.json";
  * dropped first, so this is a rolling window, not a hard loss of the finding's origin (the first
  * item, from creation, is what usually matters most; see pushEvidence). */
 const EVIDENCE_MAX_ITEMS = 20;
+/** Same rolling cap for history - every re-detection appends an entry, so a scan re-run on a schedule
+ * would otherwise grow each finding (and the whole-file findings.json rewrite) without bound. */
+const HISTORY_MAX_ENTRIES = 50;
 
 /** Maps a finding's old status vocabulary (discovered/updated/verified/dismissed) onto the current
  * one (potential/investigating/confirmed/false_positive/reported/duplicate) - applied to every
@@ -113,7 +114,10 @@ function computeDedupeKey(f: { missionId: string; type: FindingType; target: str
 
 function findExistingByKey(missionId: string, type: FindingType, target: string, value: string): Finding | undefined {
   const key = computeDedupeKey({ missionId, type, target, value });
-  return missionFindings(missionId).find((f) => computeDedupeKey(f) === key);
+  for (const f of findings.values()) {
+    if (computeDedupeKey(f) === key) return f;
+  }
+  return undefined;
 }
 
 interface UpsertOptions {
@@ -150,8 +154,7 @@ async function mirrorAssetFromFinding(
   if (!assetType) return;
 
   try {
-    // Best-effort parent resolution: a subdomain's parent is its parent domain (same convention
-    // buildFindingsGraph already uses for its own subdomain edge); a port/service/technology/api
+    // Best-effort parent resolution: a subdomain's parent is its parent domain; a port/service/technology/api
     // finding's parent is whatever asset already exists for its `target` (a domain/subdomain/ip).
     const parentValue =
       finding.type === "subdomain"
@@ -211,8 +214,8 @@ async function upsertFinding(
     }
     if (opts.executionId && !existing.executionIds.includes(opts.executionId)) existing.executionIds.push(opts.executionId);
     if (opts.agentId && !existing.relatedAgents.includes(opts.agentId)) existing.relatedAgents.push(opts.agentId);
-    if (existing.status === "potential") existing.status = "potential";
     existing.history.push({ status: existing.status, at: now });
+    if (existing.history.length > HISTORY_MAX_ENTRIES) existing.history.splice(0, existing.history.length - HISTORY_MAX_ENTRIES);
     findings.set(existing.id, existing);
     await persistFindings(missionId);
     await mirrorAssetFromFinding(missionId, existing);
@@ -284,6 +287,14 @@ export async function ingestExecution(record: ExecutionRecord): Promise<Finding[
   return touched;
 }
 
+/** Confidence renders as a percentage and feeds minConfidence filters - agents and API callers can
+ * send anything. Out-of-range values clamp; a non-finite one falls back to full confidence, the same
+ * as omitting it. */
+function clampConfidence(confidence: number | undefined): number {
+  if (confidence === undefined || !Number.isFinite(confidence)) return 1;
+  return Math.min(1, Math.max(0, confidence));
+}
+
 function parsedFromCreateInput(input: FindingCreateInput, defaultTool: string): ParsedFinding {
   return {
     type: input.type,
@@ -291,7 +302,7 @@ function parsedFromCreateInput(input: FindingCreateInput, defaultTool: string): 
     title: input.title,
     description: input.description,
     tool: input.tool ?? defaultTool,
-    confidence: input.confidence ?? 1,
+    confidence: clampConfidence(input.confidence),
     target: input.target,
     value: input.value,
     parameter: input.parameter,
@@ -349,9 +360,8 @@ async function performCveLookup(
 }
 
 /** UI-button path (POST /api/findings/:id/cve-lookup) - links each discovered CVE back to the
- * finding that triggered the lookup via metadata.sourceFindingId (so buildFindingsGraph can
- * connect them), and shares `target` with it (so they surface in its "Related Findings" too,
- * with zero extra frontend logic). */
+ * finding that triggered the lookup via metadata.sourceFindingId, and shares `target` with it (so
+ * they surface in its "Related Findings" too, with zero extra frontend logic). */
 export async function lookupCvesForFinding(findingId: string): Promise<Finding[]> {
   const finding = findings.get(findingId);
   if (!finding) throw new FindingNotFoundError(findingId);
@@ -379,7 +389,7 @@ export async function updateFinding(id: string, patch: FindingPatchInput): Promi
   if (patch.tags !== undefined) finding.tags = patch.tags;
   if (patch.description !== undefined) finding.description = patch.description;
   if (patch.title !== undefined) finding.title = patch.title;
-  if (patch.confidence !== undefined) finding.confidence = patch.confidence;
+  if (patch.confidence !== undefined) finding.confidence = clampConfidence(patch.confidence);
   if (patch.parameter !== undefined) finding.parameter = patch.parameter;
   if (patch.impact !== undefined) finding.impact = patch.impact;
   if (patch.reproductionSteps !== undefined) finding.reproductionSteps = patch.reproductionSteps;
@@ -473,84 +483,3 @@ export const getTechnologies = (missionId: string): Finding[] => listFindings(mi
 export const getDirectories = (missionId: string): Finding[] => listFindings(missionId, { type: "directory" });
 export const getVulnerabilities = (missionId: string): Finding[] =>
   missionFindings(missionId).filter((f) => f.type === "potential_vulnerability" || f.type === "confirmed_vulnerability");
-
-// --- Correlation graph (heuristic v1 - target-string matching, plus on-demand NVD CVE lookups) ---
-
-// Every FindingType is graphable - the frontend graph renderer (FindingsGraphView.tsx#NODE_TONE)
-// already has a colour for all 16, so anything discovered for a target belongs on its mind map.
-// A whois/DNS-only recon pass produces solely "information"/"domain" findings; excluding those
-// (as an earlier revision did) left the graph empty despite real findings existing. Types without
-// special edge handling below fall through to the catch-all target->finding "contains" edge.
-const GRAPHABLE_TYPES: readonly FindingType[] = [
-  "port",
-  "service",
-  "technology",
-  "domain",
-  "subdomain",
-  "directory",
-  "endpoint",
-  "credential",
-  "cookie",
-  "api",
-  "header",
-  "interesting_file",
-  "potential_vulnerability",
-  "confirmed_vulnerability",
-  "information",
-  "cve",
-];
-
-export function buildFindingsGraph(missionId: string): FindingsGraph {
-  const graphable = missionFindings(missionId).filter((f) => GRAPHABLE_TYPES.includes(f.type));
-  const nodes = new Map<string, FindingsGraphNode>();
-  const edges: FindingsGraph["edges"] = [];
-  const portNodeIdByTargetPort = new Map<string, string>();
-
-  const ensureTargetNode = (target: string): string => {
-    const id = `target:${target}`;
-    if (!nodes.has(id)) nodes.set(id, { id, type: "target", label: target });
-    return id;
-  };
-  const ensureToolNode = (tool: string): string => {
-    const id = `tool:${tool}`;
-    if (!nodes.has(id)) nodes.set(id, { id, type: "tool", label: tool });
-    return id;
-  };
-
-  // Every graphable finding gets a node up front, in one pass, before any edges are built - a cve
-  // finding's edge needs to reference its source finding's node (metadata.sourceFindingId), and
-  // that source finding isn't guaranteed to sort earlier in `graphable` (findings are ordered by
-  // updatedAt desc, and a freshly-looked-up CVE is typically *more* recently updated than the
-  // technology finding that triggered the lookup).
-  for (const f of graphable) nodes.set(f.id, { id: f.id, type: f.type, label: f.title });
-
-  // Ports next, so service/technology findings below can link to the specific port they run on.
-  for (const f of graphable.filter((f) => f.type === "port")) {
-    edges.push({ source: ensureTargetNode(f.target), target: f.id, relation: "runs_on" });
-    const port = f.metadata?.port as number | undefined;
-    if (port !== undefined) portNodeIdByTargetPort.set(`${f.target}:${port}`, f.id);
-  }
-
-  for (const f of graphable.filter((f) => f.type !== "port")) {
-    if (f.type === "service" || f.type === "technology") {
-      const port = f.metadata?.port as number | undefined;
-      const portNodeId = port !== undefined ? portNodeIdByTargetPort.get(`${f.target}:${port}`) : undefined;
-      edges.push({ source: portNodeId ?? ensureTargetNode(f.target), target: f.id, relation: "uses" });
-    } else if (f.type === "potential_vulnerability" || f.type === "confirmed_vulnerability") {
-      edges.push({ source: ensureTargetNode(f.target), target: f.id, relation: "related_to" });
-    } else if (f.type === "cve") {
-      const sourceFindingId = f.metadata?.sourceFindingId as string | undefined;
-      const sourceNodeId = sourceFindingId && nodes.has(sourceFindingId) ? sourceFindingId : ensureTargetNode(f.target);
-      edges.push({ source: sourceNodeId, target: f.id, relation: "related_to" });
-    } else if (f.type === "subdomain") {
-      const parent = (f.metadata?.parentDomain as string | undefined) ?? f.target;
-      edges.push({ source: ensureTargetNode(parent), target: f.id, relation: "connected_to" });
-    } else {
-      edges.push({ source: ensureTargetNode(f.target), target: f.id, relation: "contains" });
-    }
-  }
-
-  for (const f of graphable) edges.push({ source: f.id, target: ensureToolNode(f.tool), relation: "discovered_by" });
-
-  return { nodes: [...nodes.values()], edges };
-}

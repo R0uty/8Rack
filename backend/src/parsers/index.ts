@@ -1,4 +1,4 @@
-import { extractFlagValue, lastPositionalArg } from "./shared.js";
+import { extractFlagValue, firstPositionalArg, lastPositionalArg } from "./shared.js";
 import { parse as parseNmap } from "./nmapParser.js";
 import { parse as parseHttpx } from "./httpxParser.js";
 import { parse as parseFfuf } from "./ffufParser.js";
@@ -21,8 +21,10 @@ const PARSERS: Record<string, { parse: ParserFn; target: (args: string[]) => str
   katana: { parse: parseKatana, target: (args) => extractFlagValue(args, "-u") ?? lastPositionalArg(args) },
   nuclei: { parse: parseNuclei, target: (args) => extractFlagValue(args, "-u") },
   subfinder: { parse: parseSubfinder, target: (args) => extractFlagValue(args, "-d") ?? lastPositionalArg(args) },
-  dig: { parse: parseDig, target: lastPositionalArg },
-  whois: { parse: parseWhois, target: lastPositionalArg },
+  // dig/whois name the target first and put other positionals after it (`dig example.com A` - the
+  // last positional is the query type, not the target), so the *first* non-flag arg is the target.
+  dig: { parse: parseDig, target: firstPositionalArg },
+  whois: { parse: parseWhois, target: firstPositionalArg },
 };
 
 /** Parses a completed execution's stdout into findings for the given tool, or `[]` if there's no

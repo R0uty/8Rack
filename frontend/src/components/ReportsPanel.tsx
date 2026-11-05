@@ -29,7 +29,7 @@ function exportMarkdown(report: Report): void {
 
 /**
  * Report history for a mission - list, full-document viewer, export, delete. Generation itself
- * happens from FindingsView's "Generate Report" bar (select findings in the Table view first);
+ * happens from FindingsView's "Generate Report" bar (select findings there first);
  * this component is purely presentational, taking already-loaded state as props the same way
  * ToolRegistry/ExecutionHistoryPanel take `tools`/`executions` from ToolsView's single owned
  * `useTools()` call, rather than each fetching its own copy.
@@ -43,7 +43,7 @@ export function ReportsPanel({ reports, loading, error, onDelete, onChangeStatus
   if (reports.length === 0) {
     return (
       <p className="text-xs text-muted">
-        No reports yet - select findings in the Table view and click "Generate Report".
+        No reports yet - select findings on the Findings page to generate one.
       </p>
     );
   }

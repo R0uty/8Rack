@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
-import { MissionPanel } from "./MissionPanel";
 import { Markdown } from "./Markdown";
-import { Button, GlassPanel, IconButton, SectionHeading, SkeletonRows, StatusPill, type Tone } from "./ui";
-import { useMissions } from "../hooks/useMissions";
+import { NoMission } from "./NoMission";
+import { Button, GlassPanel, SkeletonRows, StatusPill, type Tone } from "./ui";
 import { useWorkOrders } from "../hooks/useWorkOrders";
+import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
 import { fetchTask, provideGuidance } from "../services/orchestratorApi";
 import { relativeTime } from "../lib/relativeTime";
 import type { Mission } from "../types/mission";
@@ -27,15 +26,19 @@ interface WorkOrderCardProps {
   workOrder: WorkOrder;
   onRefreshStatus: (id: string) => Promise<WorkOrder>;
   onRetry: (input: WorkOrderCreateInput) => Promise<void>;
+  onCancel: (id: string) => Promise<WorkOrder>;
 }
 
-function WorkOrderCard({ workOrder, onRefreshStatus, onRetry }: WorkOrderCardProps) {
+function WorkOrderCard({ workOrder, onRefreshStatus, onRetry, onCancel }: WorkOrderCardProps) {
   const [task, setTask] = useState<OrchestratorTask | null>(null);
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
   const [sendingGuidance, setSendingGuidance] = useState(false);
   const [guidanceError, setGuidanceError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [taskError, setTaskError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -45,12 +48,21 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry }: WorkOrderCardPro
     // underlying task settles into a state nothing has re-synced yet (e.g. it later hit
     // max_time_reached long after this work order last showed "waiting_approval") - re-check
     // before deciding what to show, not just what the card was rendered with.
-    (NON_TERMINAL.includes(workOrder.status) ? onRefreshStatus(workOrder.id) : Promise.resolve()).finally(() => {
-      if (cancelled || !workOrder.orchestratorTaskId) return;
-      fetchTask(workOrder.orchestratorTaskId).then((t) => {
+    const taskId = workOrder.orchestratorTaskId;
+    setTaskError(null);
+    (async () => {
+      try {
+        if (NON_TERMINAL.includes(workOrder.status)) await onRefreshStatus(workOrder.id);
+      } catch {
+        // Only a freshness check - the task itself may still load below.
+      }
+      try {
+        const t = await fetchTask(taskId);
         if (!cancelled) setTask(t);
-      });
-    });
+      } catch (err) {
+        if (!cancelled) setTaskError(err instanceof Error ? err.message : "Failed to load the task");
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -78,6 +90,7 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry }: WorkOrderCardPro
   const handleRetry = async () => {
     if (retrying) return;
     setRetrying(true);
+    setActionError(null);
     try {
       await onRetry({
         agentId: workOrder.agentId,
@@ -87,8 +100,23 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry }: WorkOrderCardPro
         relatedAssets: workOrder.relatedAssets,
         relatedFindings: workOrder.relatedFindings,
       });
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to retry the work order");
     } finally {
       setRetrying(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (cancelling) return;
+    setCancelling(true);
+    setActionError(null);
+    try {
+      await onCancel(workOrder.id);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to cancel the work order");
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -98,22 +126,21 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry }: WorkOrderCardPro
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <StatusPill tone={STATUS_TONE[workOrder.status]}>{workOrder.status.replace(/_/g, " ")}</StatusPill>
-            <span className="text-[11px] text-muted">priority {workOrder.priority}</span>
             <span className="text-[11px] text-muted">{workOrder.agentId}</span>
           </div>
-          <p className="mt-1.5 text-sm text-text">{workOrder.objective}</p>
+          <p className={`mt-1.5 text-sm text-text ${open ? "" : "line-clamp-2"}`}>{workOrder.objective}</p>
           {workOrder.target && <p className="mt-0.5 font-mono text-xs text-muted">target: {workOrder.target}</p>}
-          <div className="mt-1.5 flex flex-wrap gap-2 text-[11px] text-muted">
-            {workOrder.dependencies.length > 0 && <span>{workOrder.dependencies.length} dependencies</span>}
-            {workOrder.relatedAssets.length > 0 && <span>{workOrder.relatedAssets.length} related assets</span>}
-            {workOrder.relatedFindings.length > 0 && <span>{workOrder.relatedFindings.length} related findings</span>}
-            <span>created {relativeTime(workOrder.createdAt)}</span>
-          </div>
+          <p className="mt-1.5 text-[11px] text-muted">created {relativeTime(workOrder.createdAt)}</p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {(workOrder.status === "failed" || workOrder.status === "cancelled") && (
             <Button variant="secondary" size="sm" onClick={handleRetry} disabled={retrying}>
               {retrying ? "Retrying…" : "Retry"}
+            </Button>
+          )}
+          {NON_TERMINAL.includes(workOrder.status) && (
+            <Button variant="secondary" size="sm" onClick={handleCancel} disabled={cancelling}>
+              {cancelling ? "Cancelling…" : "Cancel"}
             </Button>
           )}
           {workOrder.orchestratorTaskId && (
@@ -124,14 +151,17 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry }: WorkOrderCardPro
         </div>
       </div>
 
+      {actionError && <p className="mt-2 text-xs text-critical">{actionError}</p>}
+
       {open && (
         <div className="mt-3 border-t border-border pt-2.5">
-          {!task && <SkeletonRows count={2} />}
+          {!task && !taskError && <SkeletonRows count={2} />}
+          {taskError && <p className="text-xs text-critical">{taskError}</p>}
 
           {task?.status === "waiting_confirmation" && (
             <p className="mb-2 text-xs text-warning">
               This work order is waiting on a tool confirmation - approve or reject it from the Factory Dashboard's
-              Approval Queue, then advance the factory again.
+              Approval Queue, and the factory picks it back up from there.
             </p>
           )}
 
@@ -168,37 +198,14 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry }: WorkOrderCardPro
 }
 
 /**
- * The Work Orders nav view: every Security Work Order for the selected mission, grouped by status.
- * A running/completed order's underlying OrchestratorTask is fetched read-only for a quick preview
- * (its final response) on demand; its status is re-synced from that task on open, since the list
- * endpoint alone can go stale. A paused order branches on the task's real status - a pending tool
- * confirmation points at the Approval Queue, while a failed tool *request* (no execution ever
- * created) gets a real inline guidance action, since there's no other UI surface for that state any
- * more. A failed/cancelled order can be retried directly, recreating it with the same agent/
- * objective/target.
+ * Every Security Work Order for the mission, grouped by status. A paused order branches on its task's
+ * real status - a pending tool confirmation points at the Approval Queue, while a failed tool request
+ * (no execution ever created) gets an inline guidance action here. A failed/cancelled order can be
+ * retried, recreating it with the same agent/objective/target.
  */
-export function WorkOrdersView() {
-  const {
-    missions,
-    loading: missionsLoading,
-    error: missionsError,
-    refresh: refreshMissions,
-    create: createMission,
-    update: updateMission,
-    remove: removeMission,
-  } = useMissions();
-  const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
-  const { workOrders, loading, error, refresh, refreshOne, create, start } = useWorkOrders(selectedMissionId);
-
-  useEffect(() => {
-    if (selectedMissionId && !missionsLoading && !missions.some((m) => m.id === selectedMissionId)) {
-      setSelectedMissionId(null);
-    }
-  }, [missions, missionsLoading, selectedMissionId]);
-
-  const handleSelectMission = (mission: Mission) => {
-    setSelectedMissionId((current) => (current === mission.id ? null : mission.id));
-  };
+export function WorkOrdersView({ mission, active = true }: { mission: Mission | null; active?: boolean }) {
+  const { workOrders, loading, error, refresh, refreshOne, create, start, cancel } = useWorkOrders(mission?.id ?? null);
+  useRefreshOnActivate(active, refresh);
 
   const handleRetry = async (input: WorkOrderCreateInput) => {
     const created = await create(input);
@@ -209,51 +216,29 @@ export function WorkOrdersView() {
     .map((status) => ({ status, items: workOrders.filter((w) => w.status === status) }))
     .filter((g) => g.items.length > 0);
 
+  if (!mission) return <NoMission />;
+
   return (
     <div className="flex flex-col gap-4">
-      <MissionPanel
-        missions={missions}
-        loading={missionsLoading}
-        error={missionsError}
-        selectedMissionId={selectedMissionId}
-        onSelect={handleSelectMission}
-        onCreate={createMission}
-        onUpdate={updateMission}
-        onDelete={removeMission}
-        onRefresh={refreshMissions}
-      />
-
-      {!selectedMissionId && <p className="text-xs text-muted">Select or create a mission above to view its work orders.</p>}
-
-      {selectedMissionId && (
-        <>
-          <SectionHeading actions={<IconButton icon={RefreshCw} label="Refresh" size="sm" onClick={refresh} />}>
-            Work Orders
-          </SectionHeading>
-          {error && <p className="text-xs text-critical">{error}</p>}
-          {loading && workOrders.length === 0 && <SkeletonRows count={4} />}
-          {!loading && workOrders.length === 0 && (
-            <p className="text-xs text-muted">
-              No work orders yet - use "Start / Advance Factory" on the Factory Dashboard to have the Director create
-              some.
-            </p>
-          )}
-          <div className="flex flex-col gap-4">
-            {grouped.map((group) => (
-              <div key={group.status}>
-                <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
-                  {group.status.replace(/_/g, " ")} ({group.items.length})
-                </p>
-                <div className="flex flex-col gap-2">
-                  {group.items.map((w) => (
-                    <WorkOrderCard key={w.id} workOrder={w} onRefreshStatus={refreshOne} onRetry={handleRetry} />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
+      {error && <p className="text-xs text-critical">{error}</p>}
+      {loading && workOrders.length === 0 && <SkeletonRows count={4} />}
+      {!loading && workOrders.length === 0 && (
+        <p className="text-xs text-muted">No work orders yet - advance the factory to have the Director create some.</p>
       )}
+      <div className="flex flex-col gap-4">
+        {grouped.map((group) => (
+          <div key={group.status}>
+            <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+              {group.status.replace(/_/g, " ")} ({group.items.length})
+            </p>
+            <div className="flex flex-col gap-2">
+              {group.items.map((w) => (
+                <WorkOrderCard key={w.id} workOrder={w} onRefreshStatus={refreshOne} onRetry={handleRetry} onCancel={cancel} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

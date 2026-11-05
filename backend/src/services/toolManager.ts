@@ -27,6 +27,7 @@ import type {
   ExecTool,
   ExecToolWithStatus,
   ExecutionRecord,
+  ExecutionResult,
   OutputParserKind,
   ToolRequestBody,
 } from "../types/execTool.js";
@@ -61,6 +62,7 @@ const TOOL_OVERRIDES_FILE = path.resolve(__dirname, "../../data/tools/overrides.
 
 export function registerExecTool(tool: ExecTool): void {
   tools.set(tool.id, tool);
+  invalidateStatusCache();
 }
 
 export function getExecTool(id: string): ExecTool | undefined {
@@ -103,6 +105,7 @@ export async function loadToolOverridesFromDisk(): Promise<void> {
     const tool = tools.get(id);
     if (tool) tool.enabled = enabled;
   }
+  invalidateStatusCache();
 }
 
 /** Runtime enable/disable toggle for a registered tool - persisted so it survives a restart. */
@@ -110,6 +113,7 @@ export async function setToolEnabled(id: string, enabled: boolean): Promise<Exec
   const tool = tools.get(id);
   if (!tool) throw new ExecToolNotFoundError(id);
   tool.enabled = enabled;
+  invalidateStatusCache();
   await persistToolOverrides();
   return tool;
 }
@@ -173,19 +177,40 @@ function matchesIdentity(tool: ExecTool, probeOutput: string): boolean {
   return new RegExp(tool.identitySignature, "i").test(probeOutput);
 }
 
+/** Cached result of the last listExecToolsWithStatus() probe pass. Probing is expensive (~20 tools
+ * up to two spawnSync each, including 3s version timeouts), and the endpoint is polled on every
+ * tool-view load plus every scan preview, so a short TTL turns a ~dozens-of-millisecond blocking
+ * spawn burst per request into one burst per TTL window. TTL is deliberately short: a tool shipped
+ * or updated mid-session shows up within one window without a server restart. */
+const STATUS_CACHE_TTL_MS = 10_000;
+let statusCache: { at: number; tools: ExecToolWithStatus[] } | undefined;
+
+/** Drop the cached status list - called whenever the tool roster or a tool's `enabled` flag
+ * changes, so a toggle / re-register / override-reload is visible immediately rather than stale for
+ * the rest of the TTL window. */
+function invalidateStatusCache(): void {
+  statusCache = undefined;
+}
+
 /** Checks every registered tool's executable against PATH — mirrors agentManager's model-availability
  * check. resolveToolExecutable already applies the identity signature, so a resolved path is by
  * definition the genuine tool; a wrong same-named program (e.g. python-httpx instead of
  * MissionDiscovery httpx) resolves to nothing and reports unavailable rather than "available but
- * every run fails". */
+ * every run fails". Cached for STATUS_CACHE_TTL_MS and invalidated on any roster/enabled change -
+ * see statusCache above. */
 export function listExecToolsWithStatus(): ExecToolWithStatus[] {
-  return listExecTools().map((tool) => {
+  if (statusCache && Date.now() - statusCache.at < STATUS_CACHE_TTL_MS) {
+    return statusCache.tools;
+  }
+  const tools = listExecTools().map((tool): ExecToolWithStatus => {
     const resolvedPath = resolveToolExecutable(tool);
     if (!resolvedPath) {
       return { ...tool, availability: "unavailable", resolvedPath: undefined, version: undefined };
     }
     return { ...tool, availability: "available", resolvedPath, version: versionFromProbe(probeVersionOutput(tool, resolvedPath)) };
   });
+  statusCache = { at: Date.now(), tools };
+  return tools;
 }
 
 /** Resolves `p` to its real (symlink-free) absolute path. `p` itself may not exist yet (e.g. a
@@ -265,10 +290,15 @@ function buildResolvedCommand(tool: ExecTool, args: string[]): string {
   return [tool.executable, ...tool.defaultArguments, ...args].join(" ");
 }
 
-/** Matches sudo/su/doas/pkexec as a whole word, wherever it appears in the resolved command —
- * covers both a tool whose own executable is one of these and a shell tool (bash -c "...") that
- * invokes one inside its command string. */
-const PRIVILEGED_COMMAND_RE = /\b(sudo|doas|pkexec|su)\b/;
+/** Matches privilege-escalation verbs as a whole word, case-insensitively (so SUDO/Sudo/Doas/PkExec
+ * can't slip past an exact-case check), wherever they appear in the resolved command - covers both a
+ * tool whose own executable is one of these and a shell tool (bash -c "...") that invokes one inside
+ * its command string. `setsid` is included because it detaches the child into a new process group and
+ * session, escaping the whole-tree kill toolExecutor now performs on cancel/timeout (see A4) - a
+ * setsid-wrapped escalation would survive cancellation. `env` is deliberately NOT listed: an
+ * env-wrapped escalation (`env PATH=... sudo ...`) still contains the verb itself, so the /i verb
+ * match already catches it, and a bare `env VAR=x cmd` is legitimate. */
+const PRIVILEGED_COMMAND_RE = /(?<![\w.-])(sudo|doas|pkexec|su|setsid)(?![\w.-])/i;
 
 /** Every process is spawned via toolExecutor without a TTY or a way to answer a password prompt
  * (see runExecutable in toolExecutor.ts), so a privileged command can never succeed here — it
@@ -285,8 +315,12 @@ function assertNotPrivileged(resolvedCommand: string): void {
 function trimHistory(missionId: string): void {
   const missionRecords = [...executions.values()].filter((r) => r.missionId === missionId);
   if (missionRecords.length <= MAX_HISTORY) return;
-  const oldestFirst = missionRecords.sort((a, b) => a.createdAt - b.createdAt);
-  for (const record of oldestFirst.slice(0, missionRecords.length - MAX_HISTORY)) {
+  // Only settled records are history: dropping a pending one would strand the task waiting on it
+  // (and leak its stdin), dropping a running one would orphan its process's controller entry.
+  const settledOldestFirst = missionRecords
+    .filter((r) => r.status !== "pending_confirmation" && r.status !== "running")
+    .sort((a, b) => a.createdAt - b.createdAt);
+  for (const record of settledOldestFirst.slice(0, missionRecords.length - MAX_HISTORY)) {
     executions.delete(record.id);
   }
 }
@@ -305,8 +339,30 @@ export async function loadExecutionsFromDisk(): Promise<void> {
   const missionIds = await listMissionIds();
   for (const missionId of missionIds) {
     const records = await readMissionJson<ExecutionRecord>(missionId, EXECUTIONS_FILE);
-    for (const record of records) executions.set(record.id, record);
+    for (const record of records) executions.set(record.id, recoverInterruptedExecution(record));
   }
+}
+
+function failedResult(message: string): ExecutionResult {
+  return { stdout: "", stderr: message, exitCode: null, executionTimeMs: 0, success: false, timedOut: false, cancelled: false, truncated: false };
+}
+
+/** Nothing survives a restart but the record itself: a "running" one has no process or controller
+ * any more (it would stay "running" forever), and a pending one that carried stdin has lost that
+ * content (kept out of the record on purpose, see pendingStdin) - confirming it would truncate its
+ * target file to nothing. Both settle as failed, which pauses any waiting task for human guidance. */
+function recoverInterruptedExecution(record: ExecutionRecord): ExecutionRecord {
+  const interrupted = record.status === "running";
+  const lostStdin = record.status === "pending_confirmation" && / \(stdin: \d+ bytes\)$/.test(record.resolvedCommand);
+  if (!interrupted && !lostStdin) return record;
+  record.status = "failed";
+  record.finishedAt = Date.now();
+  record.result = failedResult(
+    interrupted
+      ? "The backend restarted while this was running - the outcome is unknown."
+      : "The backend restarted before this was confirmed, and its stdin content was lost.",
+  );
+  return record;
 }
 
 function applyParser(parser: OutputParserKind, stdout: string): unknown {
@@ -326,6 +382,13 @@ function applyParser(parser: OutputParserKind, stdout: string): unknown {
   return undefined;
 }
 
+/** Agent-controlled argv can carry ANSI escapes and newlines - harmless to the argv-based spawn, but
+ * able to forge or hide lines in the server log. */
+function loggable(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x1f\x7f]/g, " ");
+}
+
 async function runRecord(
   record: ExecutionRecord,
   tool: ExecTool,
@@ -341,8 +404,11 @@ async function runRecord(
     throw new TooManyConcurrentExecutionsError(env.maxConcurrentExecutions);
   }
 
+  pendingStdin.delete(record.id);
   record.status = "running";
   record.startedAt = Date.now();
+  // On disk too, so a crash mid-run can't leave this looking re-confirmable after a restart.
+  void persistExecutions(record.missionId).catch((err) => console.error("[tools] persist failed:", err));
 
   const controller = new AbortController();
   runningControllers.set(record.id, controller);
@@ -368,7 +434,7 @@ async function runRecord(
   record.status = result.cancelled ? "cancelled" : result.success ? "completed" : "failed";
 
   console.log(
-    `[tools] ${record.status}: ${record.resolvedCommand} (exit ${result.exitCode}, ${result.executionTimeMs}ms)`,
+    `[tools] ${record.status}: ${loggable(record.resolvedCommand)} (exit ${result.exitCode}, ${result.executionTimeMs}ms)`,
   );
 
   // Execution -> Parser -> Findings Engine -> Mission Findings. A parsing failure must never
@@ -384,6 +450,12 @@ async function runRecord(
   return record;
 }
 
+/** Tools that only touch the local workspace and can never reach a target over the network - mission
+ * scope has nothing to say about them. Without this, any mission with a scope allowlist (and the
+ * Director refuses to start without one) rejected every read_file/write_file/grep with "no
+ * identifiable target", and a filename like `notes.example.org.txt` read as an out-of-scope host. */
+const LOCAL_ONLY_TOOL_IDS = new Set(["read_file", "write_file", "list_directory", "search_files", "grep"]);
+
 /**
  * Best-effort mission scope check (see scopeMatcher.ts's module doc comment for why argv has no
  * reliable "target"). Three outcomes for the confirming human: a clear violation blocks outright
@@ -396,7 +468,9 @@ async function runRecord(
  * with no trace; now it always surfaces as a warning rather than looking identical to "no scope
  * configured".
  */
-async function checkExecutionScope(missionId: string, args: string[]): Promise<string | undefined> {
+async function checkExecutionScope(missionId: string, toolId: string, args: string[]): Promise<string | undefined> {
+  if (LOCAL_ONLY_TOOL_IDS.has(toolId)) return undefined;
+
   let mission;
   try {
     mission = await getMission(missionId);
@@ -462,7 +536,7 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
     (body.stdin !== undefined ? ` (stdin: ${Buffer.byteLength(body.stdin, "utf-8")} bytes)` : "");
   assertNotPrivileged(resolvedCommand);
 
-  const scopeWarning = await checkExecutionScope(body.missionId, body.arguments);
+  const scopeWarning = await checkExecutionScope(body.missionId, tool.id, body.arguments);
 
   const record: ExecutionRecord = {
     id: randomUUID(),
@@ -480,7 +554,7 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
   trimHistory(record.missionId);
   await persistExecutions(record.missionId);
 
-  console.log(`[tools] requested: ${record.resolvedCommand} (execution ${record.id})`);
+  console.log(`[tools] requested: ${loggable(record.resolvedCommand)} (execution ${record.id})`);
 
   if (!tool.requiresConfirmation) {
     return runRecord(record, tool, body.stdin);
@@ -489,27 +563,43 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
   return record;
 }
 
+/** Execution ids with a confirm currently past its status check - see confirmExecution. */
+const confirmingExecutions = new Set<string>();
+
 export async function confirmExecution(
   id: string,
   onOutput?: (chunk: OutputChunk) => void,
 ): Promise<ExecutionRecord> {
   const record = executions.get(id);
   if (!record) throw new ExecutionNotFoundError(id);
-  if (record.status !== "pending_confirmation") {
+  if (record.status !== "pending_confirmation" || confirmingExecutions.has(id)) {
     throw new InvalidToolArgumentsError(`Execution "${id}" is not pending confirmation (status: ${record.status})`);
   }
   const tool = tools.get(record.toolId);
   if (!tool) throw new ExecToolNotFoundError(record.toolId);
 
-  // Re-check mission scope at confirm time too - the mission's scope could have been edited (or
-  // the mission deleted) in the window between request and confirm, and this is the last point
-  // before the command actually runs. A now-out-of-scope target throws and leaves the execution
-  // parked at pending_confirmation for the human to explicitly reject.
-  record.scopeWarning = await checkExecutionScope(record.missionId, record.arguments);
+  // The record stays pending_confirmation across the scope re-check's await below, so without this
+  // a double-clicked Approve could run the command twice.
+  confirmingExecutions.add(id);
+  try {
+    // Re-check mission scope at confirm time too - the mission's scope could have been edited (or
+    // the mission deleted) in the window between request and confirm, and this is the last point
+    // before the command actually runs. A now-out-of-scope target throws and leaves the execution
+    // parked at pending_confirmation for the human to explicitly reject.
+    record.scopeWarning = await checkExecutionScope(record.missionId, record.toolId, record.arguments);
 
-  const stdin = pendingStdin.get(id);
-  pendingStdin.delete(id);
-  return runRecord(record, tool, stdin, onOutput);
+    // A reject or a mission delete that landed during that await wins - nothing has run yet.
+    if (record.status !== "pending_confirmation" || !executions.has(id)) {
+      throw new InvalidToolArgumentsError(`Execution "${id}" is not pending confirmation (status: ${record.status})`);
+    }
+
+    // Not removed from pendingStdin until runRecord is past its concurrency check: a rejected
+    // confirm leaves the record pending for a retry, and retrying write_file with its content gone
+    // would truncate the target file to nothing.
+    return await runRecord(record, tool, pendingStdin.get(id), onOutput);
+  } finally {
+    confirmingExecutions.delete(id);
+  }
 }
 
 export function rejectExecution(id: string): ExecutionRecord {
@@ -536,6 +626,13 @@ export function cancelExecution(id: string): ExecutionRecord {
   }
   controller.abort();
   return record;
+}
+
+/** Aborts every running process - called on backend shutdown. toolExecutor spawns each tool as its
+ * own detached process group so a cancel can reach its whole tree, which also means a signal to the
+ * backend no longer reaches them on its own: without this they'd outlive it as orphans. */
+export function abortAllExecutions(): void {
+  for (const controller of runningControllers.values()) controller.abort();
 }
 
 export function getExecution(id: string): ExecutionRecord | undefined {

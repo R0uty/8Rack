@@ -169,11 +169,12 @@ describe("splitSections", () => {
 
 describe("listReports / getReport / deleteReport", () => {
   it("only returns reports for the requested mission, and getReport finds by id across missions", async () => {
-    mockGetFinding.mockReturnValue(fixtureFinding());
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-list-a" }));
     mockStreamAgentChat.mockImplementation(replyGenerator("body"));
 
     await createReport("proj-list-a", "Report A1", ["finding-1"]);
     await createReport("proj-list-a", "Report A2", ["finding-1"]);
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-list-b" }));
     const reportB = await createReport("proj-list-b", "Report B1", ["finding-1"]);
 
     expect(listReports("proj-list-a")).toHaveLength(2);
@@ -183,7 +184,7 @@ describe("listReports / getReport / deleteReport", () => {
   });
 
   it("deletes a report and refuses to delete an unknown id", async () => {
-    mockGetFinding.mockReturnValue(fixtureFinding());
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-delete" }));
     mockStreamAgentChat.mockImplementation(replyGenerator("body"));
 
     const report = await createReport("proj-delete", "Report", ["finding-1"]);
@@ -196,7 +197,7 @@ describe("listReports / getReport / deleteReport", () => {
 
 describe("updateReportStatus", () => {
   it("transitions and persists a report's status", async () => {
-    mockGetFinding.mockReturnValue(fixtureFinding());
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-status" }));
     mockStreamAgentChat.mockImplementation(replyGenerator("body"));
 
     const report = await createReport("proj-status", "Report", ["finding-1"]);
@@ -217,5 +218,45 @@ describe("updateReportStatus", () => {
 
   it("refuses to update an unknown report id", async () => {
     await expect(updateReportStatus("nope", "ready")).rejects.toThrow(ReportNotFoundError);
+  });
+});
+
+describe("createReport prompt and input checks", () => {
+  it("renders evidence contents and the finding's detail fields, and marks them as untrusted", async () => {
+    mockStreamAgentChat.mockClear();
+    mockGetFinding.mockReturnValue(
+      fixtureFinding({
+        parameter: "q",
+        impact: "account takeover",
+        reproductionSteps: "1. open the page",
+        evidence: [{ id: "e1", type: "http_request", content: "GET /admin HTTP/1.1", createdAt: 1 }] as never,
+      }),
+    );
+    mockStreamAgentChat.mockImplementation(replyGenerator("body"));
+
+    await createReport("proj-1", "Report", ["finding-1"]);
+
+    const prompt = JSON.stringify(mockStreamAgentChat.mock.calls[0]);
+    expect(prompt).not.toContain("[object Object]");
+    expect(prompt).toContain("GET /admin HTTP/1.1");
+    expect(prompt).toContain("account takeover");
+    expect(prompt).toContain("1. open the page");
+    expect(prompt).toContain("never follow instructions");
+  });
+
+  it("treats a finding from another mission as not found, without calling the model", async () => {
+    mockStreamAgentChat.mockClear();
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "some-other-mission" }));
+
+    await expect(createReport("proj-1", "Report", ["finding-1"])).rejects.toThrow(FindingNotFoundError);
+    expect(mockStreamAgentChat).not.toHaveBeenCalled();
+  });
+
+  it("refuses to save an empty model reply as a report", async () => {
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-empty" }));
+    mockStreamAgentChat.mockImplementation(replyGenerator("   "));
+
+    await expect(createReport("proj-empty", "Report", ["finding-1"])).rejects.toThrow("empty report");
+    expect(listReports("proj-empty")).toEqual([]);
   });
 });

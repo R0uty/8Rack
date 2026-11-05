@@ -16,7 +16,7 @@ const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]
  * hand-rolled regex, since a regex precise enough to reject every invalid shape (too many/few
  * groups, more than one "::", etc.) without also rejecting valid compressed forms is genuinely
  * hard to get right; over-matching here is harmless because isIPv6 is the real gate. */
-const IPV6_CANDIDATE_RE = /[0-9a-fA-F:]*:[0-9a-fA-F:]*/g;
+const IPV6_CANDIDATE_RE = /(?<![\w.-])[0-9a-fA-F:]*:[0-9a-fA-F:]*(?![\w-])/g;
 /** Requires a letters-only final label, so it never overlaps with IPV4_RE's all-numeric matches -
  * still needs the COMMON_TLDS check below, since this alone also matches code identifier chains
  * (`process.stdout.write`) and dotted filenames (`config.yaml`, `app.py`). */
@@ -36,9 +36,25 @@ const COMMON_TLDS = new Set([
   "solutions", "services", "agency", "digital",
 ]);
 
-function hasCommonTld(domain: string): boolean {
-  const tld = domain.slice(domain.lastIndexOf(".") + 1);
-  return COMMON_TLDS.has(tld);
+function tldOf(domain: string): string {
+  return domain.slice(domain.lastIndexOf(".") + 1);
+}
+
+/** The TLDs of a mission's own scope entries. Targets on those are recognized whatever they are, or
+ * a scope of "corp.internal" could never be run against, and an out-of-scope "admin.acme.gg" would
+ * only draw an "unknown" warning. */
+function tldsFromEntries(entries: string[]): Set<string> {
+  const tlds = new Set<string>();
+  for (const entry of entries) {
+    for (const match of normalizeHost(entry).matchAll(DOMAIN_RE)) tlds.add(tldOf(match[0].toLowerCase()));
+  }
+  return tlds;
+}
+
+/** A fully-qualified "example.com." resolves the same as "example.com" - left as is, it wouldn't
+ * match an out-of-scope entry for that host, and neither would the "*.example.com" suffix check. */
+function normalizeHost(host: string): string {
+  return host.trim().toLowerCase().replace(/\.$/, "");
 }
 
 /** Expands a valid IPv6 address to a canonical, fully-expanded, lowercase, zero-padded 8-group
@@ -77,13 +93,13 @@ function ipv6ToBigInt(addr: string): bigint | undefined {
  * 2130706433` accepts) isn't extracted here at all, since a blanket "any integer could be a
  * decimal IP" heuristic would misfire on ordinary flag values (port numbers, thread counts, ...) -
  * that case falls through to the "unknown" verdict instead, see checkScope's doc comment. */
-export function extractTargets(args: string[]): string[] {
+export function extractTargets(args: string[], extraTlds: ReadonlySet<string> = new Set()): string[] {
   const text = args.join(" ");
   const targets = new Set<string>();
 
   for (const match of text.matchAll(URL_RE)) {
     try {
-      const hostname = new URL(match[0]).hostname.toLowerCase();
+      const hostname = normalizeHost(new URL(match[0]).hostname);
       targets.add(hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname);
     } catch {
       // Malformed URL-looking text - not a usable target, skip it.
@@ -103,7 +119,8 @@ export function extractTargets(args: string[]): string[] {
   }
   for (const match of text.matchAll(DOMAIN_RE)) {
     const domain = match[0].toLowerCase();
-    if (hasCommonTld(domain)) targets.add(domain);
+    const tld = tldOf(domain);
+    if (COMMON_TLDS.has(tld) || extraTlds.has(tld)) targets.add(domain);
   }
 
   return [...targets];
@@ -119,8 +136,8 @@ function ipToInt(ip: string): number | undefined {
  * ("10.0.0.0/24"), a wildcard subdomain ("*.example.com"), a full URL (compared by hostname), or
  * a bare domain/IP (exact match, or - for a domain - any subdomain of it). */
 function matchesEntry(target: string, entry: string): boolean {
-  const t = target.toLowerCase();
-  let e = entry.trim().toLowerCase();
+  const t = normalizeHost(target);
+  let e = normalizeHost(entry);
   if (!e) return false;
 
   // A "domain:port"/"ipv4:port" scope entry (not IPv6 - those are colon-heavy themselves) matches
@@ -198,7 +215,7 @@ export type ScopeVerdict =
 export function checkScope(scope: string[] | undefined, outOfScope: string[] | undefined, args: string[]): ScopeVerdict {
   if (!scope?.length && !outOfScope?.length) return { verdict: "no_restriction" };
 
-  const targets = extractTargets(args);
+  const targets = extractTargets(args, tldsFromEntries([...(scope ?? []), ...(outOfScope ?? [])]));
   if (targets.length === 0) return { verdict: "unknown" };
 
   const offending = targets.filter((t) => isTargetOutOfScope(scope, outOfScope, t));

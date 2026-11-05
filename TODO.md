@@ -122,6 +122,9 @@ write-up of each pass. Only the Plugin system (see "Later" below) remains genuin
       `types/plugin.ts` are still the real "written once, never connected, never revisited"
       leftovers - either wire them up when the Plugin system (see "Later" below) actually gets
       built, or delete them now.
+      **Resolved: deleted in commit a65fb26** (per the "Later" decision - not wired up; the Plugin
+      system that would need them remains unbuilt, see below). CLAUDE.md/POLISH.md were updated to
+      stay accurate.
 - [x] Test coverage gaps: `services/ollama.ts` had no `.test.ts` at all despite being genuinely
       complex (the Ollama REST client + native tool-calling round trip). Fixed: new
       `ollama.test.ts`, 29 tests - NDJSON parsing/buffering (including a line deliberately split
@@ -432,47 +435,43 @@ rejects a `~`-prefixed argument before `looksLikePath` is ever called on it (rem
       (toolExecutor's own cap, untouched), while both the task's in-memory transcript and the
       persisted `orchestrator-tasks.json` on disk correctly held only 4,044 bytes (4000 truncated +
       the marker text) for that same tool result.
-- [ ] **Project-scoped data hooks can land stale responses after a quick project switch.**
+- [x] **Project-scoped data hooks can land stale responses after a quick project switch.**
       `frontend/src/hooks/useTools.ts:13-28`, `useFindings.ts:12-27`, `useActivity.ts:16-34`,
-      `useReports.ts:16-31`, `useScans.ts:29-44` - each `refresh` depends only on `[projectId]`, no
-      AbortController and no "still the current project" check; views stay mounted forever and each
-      view has its own project selector, so a slow response for project A resolving after project B
-      can render the wrong project's executions/findings/reports/scans/tasks (and the late
-      `finally { setLoading(false) }` clears loading early). Suggested fix: guard at resolution time
-      with a `projectIdRef` comparison (the pattern `useChat`/`useOrchestratorTask` already use).
-- [ ] **`ProjectPanel.disabled` (the documented mid-task lock) is never wired in the Workbench.**
-      `frontend/src/components/OrchestratorWorkbench.tsx:108-118` renders `<ProjectPanel … />`
-      without `disabled`, though `ProjectPanel.tsx:18-20` documents it as the guard against
-      switching/deleting the project mid-task and `MultiAgentPlanner.tsx:180` shows the intended
-      wiring. While a task session or a scan is running, the user can deselect/delete the project;
-      `useScans.ts:103` then appends a scan that finished for the *old* project into the *new*
-      project's list. Also `ProjectPanel.tsx:158-164` uses `aria-disabled` on a real `<button>`,
-      which doesn't block keyboard activation (Enter/Space still fire `onClick`). Suggested fix:
-      pass `disabled` from the Workbench when any task session is non-terminal or a scan is running,
-      and guard inside the handler or use a real `disabled`.
+      `useReports.ts:16-31`, `useScans.ts:29-44` - pre-nav-simplification layout; these now guard at
+      resolution time with a `missionIdRef` comparison + request abort (the `useChat`/
+      `useOrchestratorTask` pattern) and cover the mutation-settlement paths too. See POLISH.md A1.
+      (2026-09-20)
+- [x] **`ProjectPanel.disabled` (the documented mid-task lock) is never wired in the Workbench.**
+      Pre-nav-simplification; post-rename the prop (now `MissionPanel`) is fully implemented and IS
+      wired: `WorkOrdersView` passes `disabled={hasActiveTask}` (running/waiting_approval), and the
+      card click/keyboard handlers also guard on `disabled`. See POLISH.md A2. (2026-09-20)
 
 ### Low
 
-- [ ] `assertNotPrivileged` is case-sensitive (`backend/src/services/toolManager.ts:177`) -
+- [x] `assertNotPrivileged` is case-sensitive (`backend/src/services/toolManager.ts:177`) -
       `/\b(sudo|doas|pkexec|su)\b/` misses `Sudo`/`SUDO`; with no TTY most sudo installs still fail,
-      so this is belt-and-suspenders, but make it case-insensitive and also reject `setsid`/`env`-
-      wrapped variants.
-- [ ] Cancel/timeout kills the direct child, not the process group (`backend/src/services/toolExecutor.ts:75-77`) -
-      no `detached:true` + `kill(-pid)`, so `bash -c 'sleep 3600 &'` leaks orphan processes; repeated
-      aborts accumulate.
+      so this is belt-and-suspenders. Now case-insensitive (`/i`) and also rejects `setsid` (escapes
+      the A4 process-group kill); env-wrapped escalations are caught by the verb match, bare `env`
+      stays allowed. See POLISH.md A6. (2026-09-20)
+- [x] Cancel/timeout kills the direct child, not the process group (`backend/src/services/toolExecutor.ts:75-77`) -
+      no `detached:true` + `kill(-pid)`. Now `detached:true` + `process.kill(-pid, SIGTERM)` on
+      external abort / timeout / already-aborted. See POLISH.md A4. (2026-09-20)
 - [ ] Log injection / server-path disclosure - `toolManager.ts` logs `record.resolvedCommand`
       (agent-controlled argv, can contain ANSI/newlines); `InvalidToolArgumentsError` echoes
       `env.workspaceRoot` verbatim to any caller, disclosing the server filesystem layout.
-- [ ] RAG index persists full file text; a misconfigured `WORKSPACE_ROOT` (`.`, `..`, or `backend/`)
+- [x] RAG index persists full file text; a misconfigured `WORKSPACE_ROOT` (`.`, `..`, or `backend/`)
       would index `backend/data/projects/*` (sensitive scope/notes/evidence) and make it retrievable
-      via `search_knowledge_base`. Dotfiles/symlinks are already skipped.
+      via `search_knowledge_base`. Now `walkWorkspace` always skips the app's own `backend/data`
+      subtree (lexical containment in the walk, plus a full no-op if `WORKSPACE_ROOT` lands inside
+      it). Dotfiles/symlinks are still skipped. See POLISH.md A5. (2026-09-20)
 - [ ] Prompt injection surface: scanner/parser output and finding evidence (attacker-controlled web
       content) is fed raw into the report-writer prompt and re-enters the orchestrator transcript;
       and unauthenticated `POST/PUT /api/agents` lets a rebinding/LAN attacker rewrite
       `systemPrompt`/`execTools` of agents the human later drives. Bind this to whatever auth is
       added for the High item.
-- [ ] No security headers (no `X-Content-Type-Options`/`X-Frame-Options`); `CORS_ORIGIN=*` accepted
-      without warning.
+- [x] No security headers (no `X-Content-Type-Options`/`X-Frame-Options`); `CORS_ORIGIN=*` accepted
+      without warning. Now `securityHeaders.ts` middleware sets nosniff / DENY / no-referrer /
+      same-origin CORP / strict CSP. See POLISH.md A8. (2026-09-20)
 - [ ] `maxOrchestratorTaskTimeMs` is only enforced *between* agent calls, not during a single
       generation (`orchestrator.ts:527`) - a single long model call runs past the cap. Document as
       loop-only or pass a deadline into `collectAgentReply`.
@@ -481,31 +480,36 @@ rejects a `~`-prefixed argument before `looksLikePath` is ever called on it (rem
       is the only trace. Deliberate, but worth a doc line.
 - [ ] `pendingStdin` entries are never evicted for abandoned `pending_confirmation` executions
       (`toolManager.ts:339`) - a large `write_file` payload stays resident for the process lifetime.
-- [ ] `activeExecutionByScan` leaks a stale id if `confirmExecution` throws (`scanRunner.ts:171-175`);
+- [x] `activeExecutionByScan` leaks a stale id if `confirmExecution` throws (`scanRunner.ts:171-175`);
       a `cancelScanRun` in that window calls `cancelExecution` on a dead id and swallows the throw.
       Put the delete in a `finally`.
-- [ ] `listExecToolsWithStatus` runs synchronous child processes inside request handlers
+- [x] `listExecToolsWithStatus` runs synchronous child processes inside request handlers
       (`toolManager.ts:101-138`, ~20 tools × up to two `spawnSync` probes incl. a 3s version timeout)
-      on every `GET /api/tools`, `PATCH /api/tools/:id`, and scan preview - blocks the event loop.
-      Memoize with a short TTL or probe async.
-- [ ] No timeout/abort on RAG reindex (`ragIndex.ts:119-161`, `routes/rag.ts:12-18`) - a hung Ollama
+      on every `GET /api/tools`, `PATCH /api/tools/:id`, and scan preview. Now memoized with a 10s
+      TTL, invalidated on register/toggle/override-load. See POLISH.md A3. (2026-09-20)
+- [x] No timeout/abort on RAG reindex (`ragIndex.ts:119-161`, `routes/rag.ts:12-18`) - a hung Ollama
       leaves `POST /api/rag/reindex` hanging indefinitely, and a second reindex isn't coordinated.
-- [ ] Frontend `OrchestratorTask` type omits `projectId` and `model`
+      Now: in-flight guard (409) + overall 5-min budget signal (504) threaded through `embed`, plus
+      an always-exclude of `backend/data` from the walk. See POLISH.md A5. (2026-09-20)
+- [x] Frontend `OrchestratorTask` type omits `projectId` and `model`
       (`frontend/src/types/orchestrator.ts:18-31` vs `backend/src/services/orchestrator.ts:59-77`) -
       a strict subset, so it typechecks but future backend fields are silently invisible.
-- [ ] `lastPositionalArg` misattributes the target for `dig <domain> <type>` (`parsers/index.ts:24`,
-      `parsers/shared.ts:16-21`) - `dig example.com A` attributes findings to `"A"`. Use the first
-      non-flag arg for dig/whois.
+- [x] `lastPositionalArg` misattributes the target for `dig <domain> <type>` (`parsers/index.ts:24`,
+      `parsers/shared.ts:16-21`) - `dig example.com A` attributes findings to `"A"`. Now a
+      `firstPositionalArg` helper, used for dig/whois. See POLISH.md A7. (2026-09-20)
 - [ ] Creation status codes are inconsistent (200 for projects/tools, 201 for findings/agents,
       streaming for scans/orchestrator/plans/reports) - cosmetic, but worth standardizing.
 - [ ] Five near-identical NDJSON write/error loops (`streamUtils.ts` vs `routes/orchestrator.ts:32-60`,
       `plans.ts:53-81`, `tools.ts:99-130`, `scanners.ts:94-110`, `reports.ts:70-95`) with subtly
       different event types - a shared "stream terminal object" helper would remove the drift risk.
-- [ ] Confirmed dead/inert code: `extensions/pluginRegistry.ts` + `extensions/retrievalRegistry.ts`
+- [x] Confirmed dead/inert code: `extensions/pluginRegistry.ts` + `extensions/retrievalRegistry.ts`
       zero importers (the still-planned Plugin system); `toolRegistry.ts` empty so any agent setting
       `tools` throws `UnknownToolError`. All documented in CLAUDE.md - keeping them intentional, not
       new findings.
-- [ ] `Markdown.tsx:22` code-block copy button is keyboard-invisible (no `focus-visible:opacity-100`)
+      **Partially resolved 2026-09-20: `pluginRegistry.ts`/`retrievalRegistry.ts` (and
+      `types/plugin.ts`) were deleted in commit a65fb26**; `toolRegistry.ts` remains the intentional
+      inert extension point (zero tools registered, documented).
+- [x] `Markdown.tsx:22` code-block copy button is keyboard-invisible (no `focus-visible:opacity-100`)
       and `handleCopy` (`Markdown.tsx:11-15`) has no `try/catch` - `navigator.clipboard.writeText`
       can reject (permissions/insecure context), producing an unhandled rejection.
 - [x] Finding drawer can show a stale cross-project finding - `FindingsView.tsx:161` falls back to
@@ -1280,7 +1284,7 @@ Found during live end-to-end verification of the transformation above (see DEVEL
 Surfaced while cutting Chat/Workbench/Plans/standalone-Evidence per direct user feedback (see
 DEVELOPMENT.md's "Nav simplification" section) - not fixed in that pass, flagged for a decision:
 
-- [ ] **`SettingsPanel.tsx`'s settings (temperature/top_p/max tokens/context size/keep-alive) are
+- [x] **`SettingsPanel.tsx`'s settings (temperature/top_p/max tokens/context size/keep-alive) are
       now fully orphaned.** They existed to configure manual (no-agent) Chat requests; now that Chat
       is gone, nothing in the app reads `useSettings.ts`'s stored values any more - every agent's
       sampling settings come from its own `backend/data/agents/*.json` config instead. The gear-icon
@@ -1288,8 +1292,43 @@ DEVELOPMENT.md's "Nav simplification" section) - not fixed in that pass, flagged
       on anything. Options: remove it entirely (continues the same simplification this session did),
       or repurpose it as an editable *default* that seeds new agent configs / work order objectives
       - needs a decision, not a unilateral call.
+      **Resolved 2026-09-20 (POLISH.md B1): removed outright** - `SettingsPanel.tsx`,
+      `useSettings.ts`, `types/settings.ts`, the App wiring, the TopBar gear button, and the
+      Command Palette's settings command (its values ruled nothing; every agent carries its own
+      sampling config).
 - [ ] A failed Work Order has no in-UI retry affordance - `factoryDirector.ts` will seed a fresh one
       automatically once the blocking condition changes (e.g. scope gets added), but a work order
       that failed for an unrelated transient reason (model briefly offline, a flaky tool) currently
       needs a manual `POST /api/missions/:id/workorders` to retry. Worth a "Retry" button on a failed
       Work Order card in `WorkOrdersView.tsx` that recreates it with the same agent/objective/target.
+
+## Audit findings (2026-11-05)
+
+Full-project audit and fix pass - see DEVELOPMENT.md's "Audit and fix pass (2026-11-05)" for what was
+fixed and why. Deliberately left open:
+
+- [ ] **The validator rubber-stamps.** In live runs on `qwen2.5-coder:7b` it wrote "Reproduced using
+      nmap" without running anything, and confirmed a misidentified `ppp?` service. `confirmed` currently
+      means an agent said so - consider requiring a tool execution in that task before accepting it.
+- [ ] **Scope has no port or path granularity, and `rules` is only advisory.** Given scope `127.0.0.1`
+      and rules naming one port, the recon agent scanned the host's top 1000 ports. Scope enforcement
+      passed it, correctly by its own definition.
+- [ ] `ffuf` can't reach system wordlists (the workspace sandbox refuses them, correctly), so agents
+      stall on it. Ship a small wordlist in the workspace and name it in the usage hint, or hide `ffuf`
+      when none exists.
+- [ ] `nomic-embed-text` isn't installed here, so knowledge-base search fails despite a loaded index.
+- [ ] `katana`, `subfinder`, `amass` aren't installed; `/usr/bin/httpx` is not the ProjectDiscovery tool.
+- [ ] The same port can land as two assets (`127.0.0.1:8765` from an agent, `8765/tcp` from the parser).
+- [ ] Time cap is checked between generations, not during one (the per-chunk idle timeout covers a
+      hung model; a slow-but-streaming reply can overrun by one generation).
+- [ ] Scan and report `GET`/`PATCH` routes look ids up across missions without checking the id in the
+      path belongs to that mission.
+- [ ] `InvalidToolArgumentsError` messages include absolute paths (local-only app, low impact).
+- [ ] An IPv4-mapped IPv6 target isn't matched against an IPv4 `outOfScope` entry.
+- [ ] Prompt injection is reduced, not solved: report prompts now mark finding data as untrusted, and
+      the UI won't auto-load remote images, but a local model can still follow injected text. The human
+      confirmation gate on every real tool run remains the actual control.
+- [ ] Still open from POLISH.md: route-level integration tests (D1), a shared NDJSON helper (D2),
+      status-code consistency (D3).
+- [ ] After the UI cleanup (DEVELOPMENT.md, "UI cleanup"), try the Findings filter bar and report bar
+      on a mission with real findings - they've only been exercised by tests since the rewrite.

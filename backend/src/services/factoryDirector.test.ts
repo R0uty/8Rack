@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getMission, updateMission } from "./missionManager.js";
 import { listAssets } from "./assetManager.js";
 import { getMissionFindings } from "./findingsManager.js";
-import { createWorkOrder, dependenciesSatisfied, listWorkOrders, startWorkOrder } from "./workOrderManager.js";
+import { createWorkOrder, dependenciesSatisfied, listWorkOrders, resumeWorkOrderIfReady, startWorkOrder, workOrderNeedsGuidance } from "./workOrderManager.js";
 import { MissionNotFoundError } from "./errors.js";
 import { advanceMission } from "./factoryDirector.js";
 import type { Mission } from "../types/mission.js";
@@ -18,7 +18,9 @@ vi.mock("./workOrderManager.js", () => ({
   createWorkOrder: vi.fn(),
   dependenciesSatisfied: vi.fn(() => true),
   listWorkOrders: vi.fn(),
+  resumeWorkOrderIfReady: vi.fn(),
   startWorkOrder: vi.fn(),
+  workOrderNeedsGuidance: vi.fn(() => false),
 }));
 vi.mock("./activityLog.js", () => ({ logActivity: vi.fn() }));
 
@@ -30,6 +32,7 @@ const mockCreateWorkOrder = vi.mocked(createWorkOrder);
 const mockDependenciesSatisfied = vi.mocked(dependenciesSatisfied);
 const mockListWorkOrders = vi.mocked(listWorkOrders);
 const mockStartWorkOrder = vi.mocked(startWorkOrder);
+const mockResumeWorkOrderIfReady = vi.mocked(resumeWorkOrderIfReady);
 
 function fixtureMission(overrides: Partial<Mission> = {}): Mission {
   return { id: "mission-1", name: "Acme Pentest", notes: "", createdAt: 0, scope: ["example.com"], ...overrides };
@@ -368,3 +371,163 @@ describe("advanceMission", () => {
     expect(result.workOrder).toBeUndefined();
   });
 });
+
+describe("advanceMission after a human decision", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockDependenciesSatisfied.mockReturnValue(true);
+    mockListAssets.mockReturnValue([fixtureAsset()]);
+    mockGetMissionFindings.mockReturnValue([]);
+    mockUpdateMission.mockImplementation(async (_id, patch) => fixtureMission(patch as Partial<Mission>));
+  });
+
+  it("resumes a work order paused at waiting_approval before doing anything else", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "investigating" }));
+    const paused = fixtureWorkOrder({ id: "wo-1", agentId: "web-analyzer", target: "example.com", status: "waiting_approval" });
+    mockListWorkOrders.mockReturnValue([paused]);
+    mockResumeWorkOrderIfReady.mockImplementation(async () => {
+      paused.status = "completed";
+      return paused;
+    });
+
+    await advanceMission("mission-1");
+
+    expect(mockResumeWorkOrderIfReady).toHaveBeenCalledWith("wo-1", undefined, undefined);
+    expect(mockStartWorkOrder).not.toHaveBeenCalled();
+  });
+
+  it("stops and explains why when a resumed work order failed", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "investigating" }));
+    const paused = fixtureWorkOrder({ id: "wo-1", agentId: "web-analyzer", status: "waiting_approval" });
+    mockListWorkOrders.mockReturnValue([paused]);
+    mockResumeWorkOrderIfReady.mockResolvedValue({ ...paused, status: "failed", result: "model offline" });
+
+    const result = await advanceMission("mission-1");
+
+    expect(result.workOrder?.status).toBe("failed");
+    expect(result.blockedReason).toContain("model offline");
+  });
+
+  it.each(["paused", "cancelled", "review", "completed"] as const)("runs nothing for a %s mission", async (status) => {
+    mockGetMission.mockResolvedValue(fixtureMission({ status }));
+    mockListWorkOrders.mockReturnValue([fixtureWorkOrder({ id: "wo-1" })]);
+
+    const result = await advanceMission("mission-1");
+
+    expect(result.blockedReason).toContain(status);
+    expect(mockStartWorkOrder).not.toHaveBeenCalled();
+    expect(mockCreateWorkOrder).not.toHaveBeenCalled();
+  });
+
+  it("doesn't move a mission out of draft when it's blocked on having no scope", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "draft", scope: [] }));
+    mockListAssets.mockReturnValue([]);
+    mockListWorkOrders.mockReturnValue([]);
+
+    const result = await advanceMission("mission-1");
+
+    expect(result.blockedReason).toContain("no scope");
+    expect(mockUpdateMission).not.toHaveBeenCalled();
+  });
+});
+
+describe("advanceMission auto-chain termination", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockDependenciesSatisfied.mockReturnValue(true);
+    mockGetMissionFindings.mockReturnValue([]);
+    mockUpdateMission.mockImplementation(async (_id, patch) => fixtureMission(patch as Partial<Mission>));
+  });
+
+  /** A store-like double: createWorkOrder really adds an order, startWorkOrder really settles it. */
+  function withLiveOrders(settle: (wo: WorkOrder) => void) {
+    const orders: WorkOrder[] = [];
+    mockListWorkOrders.mockImplementation(() => [...orders]);
+    mockCreateWorkOrder.mockImplementation(async (_missionId, input) => {
+      const wo = fixtureWorkOrder({ ...input, id: `wo-${orders.length}`, relatedFindings: input.relatedFindings ?? [] });
+      orders.push(wo);
+      return wo;
+    });
+    mockStartWorkOrder.mockImplementation(async (id) => {
+      const wo = orders.find((o) => o.id === id)!;
+      settle(wo);
+      return wo;
+    });
+    return orders;
+  }
+
+  it("doesn't loop forever when Recon 'completes' without registering any asset", async () => {
+    // A model that answers in prose instead of calling a tool completes the order but changes
+    // nothing, so the seed condition stays true.
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "recon" }));
+    mockListAssets.mockReturnValue([]);
+    const orders = withLiveOrders((wo) => {
+      wo.status = "completed";
+    });
+
+    await advanceMission("mission-1");
+
+    expect(orders).toHaveLength(1);
+    expect(mockStartWorkOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it("doesn't loop forever when Validation 'completes' without settling its finding", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "investigating" }));
+    mockListAssets.mockReturnValue([fixtureAsset({ type: "port", value: "80/tcp" })]);
+    mockGetMissionFindings.mockReturnValue([fixtureFinding({ id: "f-1", status: "potential" })]);
+    const orders = withLiveOrders((wo) => {
+      wo.status = "completed";
+    });
+
+    await advanceMission("mission-1");
+
+    expect(orders).toHaveLength(1);
+  });
+
+  it("still retries that no-op Recon on the human's next advance call, just once", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "recon" }));
+    mockListAssets.mockReturnValue([]);
+    const orders = withLiveOrders((wo) => {
+      wo.status = "completed";
+    });
+
+    await advanceMission("mission-1");
+    await advanceMission("mission-1");
+
+    expect(orders).toHaveLength(2);
+  });
+
+  it("pauses after a bounded number of work orders in one call instead of running unattended forever", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "investigating" }));
+    // Every completed order "discovers" one more enumerable asset.
+    const assets = [fixtureAsset({ value: "a0.example.com", type: "subdomain" })];
+    mockListAssets.mockImplementation(() => [...assets]);
+    const orders = withLiveOrders((wo) => {
+      wo.status = "completed";
+      assets.push(fixtureAsset({ value: `a${assets.length}.example.com`, type: "subdomain" }));
+    });
+
+    const result = await advanceMission("mission-1");
+
+    expect(result.blockedReason).toContain("Paused after 25");
+    expect(mockStartWorkOrder).toHaveBeenCalledTimes(25);
+    expect(orders.length).toBeLessThanOrEqual(26);
+  });
+});
+
+describe("advanceMission - an order waiting on a human note", () => {
+  it("says so instead of returning nothing, and starts no other work", async () => {
+    const paused = { id: "wo-1", missionId: "mission-1", agentId: "recon-agent", status: "waiting_approval" } as WorkOrder;
+    mockGetMission.mockResolvedValue(fixtureMission());
+    mockListWorkOrders.mockReturnValue([paused]);
+    mockResumeWorkOrderIfReady.mockResolvedValueOnce(paused);
+    vi.mocked(workOrderNeedsGuidance).mockReturnValueOnce(true);
+
+    const result = await advanceMission("mission-1");
+
+    expect(result.blockedReason).toContain("recon-agent");
+    expect(result.blockedReason).toContain("needs a note");
+    expect(mockStartWorkOrder).not.toHaveBeenCalled();
+  });
+});
+

@@ -46,7 +46,14 @@ export async function loadPlansFromDisk(): Promise<void> {
   const missionIds = await listMissionIds();
   for (const missionId of missionIds) {
     const missionPlansOnDisk = await readMissionJson<MultiAgentPlan>(missionId, PLANS_FILE);
-    for (const plan of missionPlansOnDisk) plans.set(plan.id, plan);
+    for (const plan of missionPlansOnDisk) {
+      // Same as orchestrator.ts#loadTasksFromDisk - nothing is driving a "running" plan any more.
+      if (plan.status === "running") {
+        plan.status = "failed";
+        plan.error = "The backend restarted while this plan was running.";
+      }
+      plans.set(plan.id, plan);
+    }
   }
 }
 
@@ -130,6 +137,18 @@ async function continueAfterStepTask(
   return plan;
 }
 
+/** A step that throws (e.g. its agent was deleted between steps) must still settle the plan, not
+ * leave it at "running" forever. */
+function settleThrownPlan(plan: MultiAgentPlan, err: unknown): void {
+  if (err instanceof RequestCancelledError) {
+    plan.status = "cancelled";
+  } else {
+    plan.status = "failed";
+    plan.error = err instanceof Error ? err.message : "Plan step failed";
+  }
+  touch(plan);
+}
+
 export async function createPlan(
   missionId: string,
   description: string,
@@ -164,10 +183,7 @@ export async function createPlan(
     await persistPlans(plan.missionId);
     return result;
   } catch (err) {
-    if (err instanceof RequestCancelledError) {
-      plan.status = "cancelled";
-      touch(plan);
-    }
+    settleThrownPlan(plan, err);
     await persistPlans(plan.missionId).catch(() => {});
     throw err;
   }
@@ -193,10 +209,7 @@ export async function resumePlan(id: string, onChunk?: ChunkListener, signal?: A
     await persistPlans(plan.missionId);
     return result;
   } catch (err) {
-    if (err instanceof RequestCancelledError) {
-      plan.status = "cancelled";
-      touch(plan);
-    }
+    settleThrownPlan(plan, err);
     await persistPlans(plan.missionId).catch(() => {});
     throw err;
   }
@@ -228,10 +241,7 @@ export async function provideStepGuidance(
     await persistPlans(plan.missionId);
     return result;
   } catch (err) {
-    if (err instanceof RequestCancelledError) {
-      plan.status = "cancelled";
-      touch(plan);
-    }
+    settleThrownPlan(plan, err);
     await persistPlans(plan.missionId).catch(() => {});
     throw err;
   }
@@ -240,6 +250,9 @@ export async function provideStepGuidance(
 export function cancelPlan(id: string): MultiAgentPlan {
   const plan = plans.get(id);
   if (!plan) throw new PlanNotFoundError(id);
+  if (plan.status === "completed" || plan.status === "failed" || plan.status === "cancelled") {
+    throw new InvalidPlanStateError(`Plan "${id}" has already finished (status: ${plan.status})`);
+  }
   const currentRun = plan.stepRuns[plan.currentStepIndex];
   if (currentRun) {
     try {

@@ -43,13 +43,13 @@ const agents: AgentWithStatus[] = [
 ];
 
 describe("ApprovalQueue", () => {
-  it("shows an empty state when nothing is pending", () => {
-    render(<ApprovalQueue missionName="Acme" executions={[]} agents={agents} onSettled={vi.fn()} />);
-    expect(screen.getByText(/No actions awaiting approval/)).toBeInTheDocument();
+  it("renders nothing when nothing is pending", () => {
+    const { container } = render(<ApprovalQueue missionName="Acme" executions={[]} agents={agents} onSettled={vi.fn()} />);
+    expect(container).toBeEmptyDOMElement();
   });
 
   it("ignores executions that aren't pending_confirmation", () => {
-    render(
+    const { container } = render(
       <ApprovalQueue
         missionName="Acme"
         executions={[fixtureExecution({ status: "completed" })]}
@@ -57,7 +57,7 @@ describe("ApprovalQueue", () => {
         onSettled={vi.fn()}
       />,
     );
-    expect(screen.getByText(/No actions awaiting approval/)).toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
   });
 
   it("shows the resolved command, agent name, and scope status, and approves on click", async () => {
@@ -69,14 +69,14 @@ describe("ApprovalQueue", () => {
 
     expect(screen.getByText("Recon Agent")).toBeInTheDocument();
     expect(screen.getByText("$ nmap -sV example.com")).toBeInTheDocument();
-    expect(screen.getByText("In scope")).toBeInTheDocument();
+    expect(screen.getByText("No scope warning")).toBeInTheDocument();
 
     await userEvent.setup().click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(onSettled).toHaveBeenCalled());
     expect(mockConfirm).toHaveBeenCalledWith("exec-1", expect.any(Function));
   });
 
-  it("shows the scope warning instead of 'In scope' when one is present", () => {
+  it("shows the scope warning instead of the all-clear when one is present", () => {
     render(
       <ApprovalQueue
         missionName="Acme"
@@ -86,7 +86,7 @@ describe("ApprovalQueue", () => {
       />,
     );
     expect(screen.getByText("no identifiable target")).toBeInTheDocument();
-    expect(screen.queryByText("In scope")).not.toBeInTheDocument();
+    expect(screen.queryByText("No scope warning")).not.toBeInTheDocument();
   });
 
   it("rejects on click", async () => {

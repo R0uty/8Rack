@@ -121,10 +121,10 @@ export class ExecutableUnavailableError extends Error {
 export class PrivilegedCommandError extends Error {
   constructor(command: string) {
     super(
-      `Command "${command}" invokes a privilege-escalation tool (sudo/su/doas/pkexec). Tools run ` +
-        "non-interactively with no TTY, so a password prompt cannot be answered and this would only " +
-        "hang until it times out. Ask the user to run the privileged command themselves in their own " +
-        "terminal, or find an approach that doesn't require root.",
+      `Command "${command}" invokes a privilege-escalation tool (sudo/su/doas/pkexec/setsid). Tools ` +
+        "run non-interactively with no TTY, so a password prompt cannot be answered and this would " +
+        "only hang until it times out. Ask the user to run the privileged command themselves in " +
+        "their own terminal, or find an approach that doesn't require root.",
     );
     this.name = "PrivilegedCommandError";
   }
@@ -289,5 +289,22 @@ export class EmbeddingModelUnavailableError extends Error {
     );
     this.name = "EmbeddingModelUnavailableError";
     this.cause = cause;
+  }
+}
+
+export class RagReindexInProgressError extends Error {
+  constructor() {
+    super("A RAG reindex is already in progress - wait for it to finish before starting another.");
+    this.name = "RagReindexInProgressError";
+  }
+}
+
+export class RagReindexTimeoutError extends Error {
+  constructor() {
+    super(
+      "RAG reindex timed out - the workspace is too large or the embedding model is unresponsive. " +
+        "Check WORKSPACE_ROOT and that Ollama is healthy, then try again.",
+    );
+    this.name = "RagReindexTimeoutError";
   }
 }

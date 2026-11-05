@@ -75,6 +75,29 @@ describe("useTools", () => {
     await waitFor(() => expect(mockFetchExecutions).toHaveBeenLastCalledWith("proj-2"));
   });
 
+  it("ignores a stale previous-mission response that resolves after a mission switch", async () => {
+    mockFetchTools.mockResolvedValue([fixtureTool]);
+    let resolveOld!: (executions: ExecutionRecord[]) => void;
+    mockFetchExecutions.mockImplementation((id: string) =>
+      id === "proj-1" ? new Promise<ExecutionRecord[]>((r) => { resolveOld = r; }) : Promise.resolve([]),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useTools(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(mockFetchExecutions).toHaveBeenCalledWith("proj-1"));
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchExecutions).toHaveBeenLastCalledWith("proj-2"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      resolveOld([{ ...fixtureExecution, id: "stale-exec" }]);
+    });
+
+    expect(result.current.executions).toEqual([]);
+  });
+
   it("surfaces a load failure", async () => {
     mockFetchTools.mockRejectedValue(new Error("boom"));
     const { result } = renderHook(() => useTools(null));

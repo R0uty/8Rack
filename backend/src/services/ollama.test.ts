@@ -318,6 +318,17 @@ describe("streamChat", () => {
   });
 });
 
+describe("streamChat mid-stream errors", () => {
+  it("throws on an {error} line after streaming began, rather than ending as a normal reply", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(streamResponse([ndjsonLine({ content: "partial", done: false }), '{"error":"model runner has unexpectedly stopped"}\n'])),
+    );
+
+    await expect(collect(streamChat({ model: "m", messages: [] }))).rejects.toThrow("model runner has unexpectedly stopped");
+  });
+});
+
 describe("chat", () => {
   it("collects a full completion by concatenating streamed content", async () => {
     vi.stubGlobal(

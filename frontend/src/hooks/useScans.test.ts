@@ -71,6 +71,29 @@ describe("useScans", () => {
     expect(result.current.scans).toEqual([fixtureRun()]);
   });
 
+  it("ignores a stale previous-mission response that resolves after a mission switch", async () => {
+    mockFetchScanProfiles.mockResolvedValue([fixtureProfile]);
+    let resolveOld!: (scans: ScanRun[]) => void;
+    mockFetchScans.mockImplementation((id: string) =>
+      id === "proj-1" ? new Promise<ScanRun[]>((r) => { resolveOld = r; }) : Promise.resolve([]),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useScans(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(mockFetchScans).toHaveBeenCalledWith("proj-1"));
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchScans).toHaveBeenLastCalledWith("proj-2"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      resolveOld([fixtureRun({ id: "stale-scan" })]);
+    });
+
+    expect(result.current.scans).toEqual([]);
+  });
+
   it("surfaces a load failure", async () => {
     mockFetchScanProfiles.mockRejectedValue(new Error("boom"));
     const { result } = renderHook(() => useScans(null));
@@ -169,6 +192,53 @@ describe("useScans", () => {
     });
 
     expect(mockCreateScan).not.toHaveBeenCalled();
+  });
+
+  it("does not append a scan that finishes after the mission changed", async () => {
+    mockFetchScanProfiles.mockResolvedValue([fixtureProfile]);
+    mockFetchScans.mockResolvedValue([]);
+    mockPreviewScan.mockResolvedValue(fixturePreview);
+
+    const doneStep = {
+      toolId: "dig",
+      label: "Dig",
+      arguments: ["example.com"],
+      status: "completed" as const,
+      resolvedCommand: "dig example.com",
+    };
+    let fireEvents!: () => void;
+    mockCreateScan.mockImplementation((_missionId, _profileId, _target, onEvent) =>
+      new Promise<ScanRun>((r) => {
+        fireEvents = () => {
+          onEvent({ type: "scan", scan: fixtureRun() });
+          onEvent({ type: "step", step: doneStep });
+          r(fixtureRun({ status: "completed", steps: [doneStep] }));
+        };
+      }),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useScans(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => {
+      await result.current.runPreview("quick-recon", "example.com");
+    });
+
+    let run!: Promise<void>;
+    await act(async () => {
+      run = result.current.runScan();
+    });
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchScans).toHaveBeenLastCalledWith("proj-2"));
+
+    await act(async () => {
+      fireEvents();
+      await run;
+    });
+
+    expect(result.current.scans).toEqual([]);
+    expect(result.current.run).toBeNull();
   });
 
   it("runScan() surfaces a failure", async () => {

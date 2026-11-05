@@ -13,19 +13,14 @@ vi.mock("./hooks/useAgents", () => ({ useAgents: vi.fn() }));
 vi.mock("./hooks/useTools", () => ({
   useTools: () => ({ tools: [], executions: [], loading: false, error: null, refresh: vi.fn(), toggleTool: vi.fn() }),
 }));
-vi.mock("./hooks/useSettings", () => ({
-  useSettings: () => ({
-    settings: { temperature: 0.7, topP: 0.9, maxTokens: 0, contextSize: 0, keepAlive: "5m" },
-    update: vi.fn(),
-    reset: vi.fn(),
-  }),
+vi.mock("./hooks/useMissions", () => ({
+  useMissions: () => ({ missions: [], loading: false, error: null, refresh: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() }),
 }));
 vi.mock("./hooks/useTheme", () => ({ useTheme: () => ({ theme: "dark", setTheme: vi.fn(), toggle: vi.fn() }) }));
 
 vi.mock("./components/FindingsView", () => ({ FindingsView: () => null }));
 vi.mock("./components/FactoryDashboard", () => ({ FactoryDashboard: () => null }));
 vi.mock("./components/AgentEditor", () => ({ AgentEditor: () => null }));
-vi.mock("./components/SettingsPanel", () => ({ SettingsPanel: () => null }));
 
 const mockUseAgents = vi.mocked(useAgents);
 

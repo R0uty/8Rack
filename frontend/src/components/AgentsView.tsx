@@ -4,7 +4,7 @@ import type { AgentConfigWarning, AgentWithStatus } from "../types/agent";
 import type { ExecToolWithStatus } from "../types/execTool";
 import { iconFor } from "../lib/icons";
 import { AgentToolAccess } from "./AgentToolAccess";
-import { Button, GlassPanel, IconButton, SectionHeading, SkeletonRows, StatusDot } from "./ui";
+import { Button, GlassPanel, IconButton, SkeletonRows, StatusDot } from "./ui";
 
 interface AgentsViewProps {
   agents: AgentWithStatus[];
@@ -17,39 +17,37 @@ interface AgentsViewProps {
   onEditAgent: (agent: AgentWithStatus) => void;
 }
 
-/**
- * The Agents nav view: every agent's factory role at a glance (name/description/model/status) plus
- * its Orchestrator tool access (AgentToolAccess, spec's "Allowed/Restricted" list) inline, and the
- * same create/edit entry points the sidebar's compact AgentList already wires to AgentEditor - a
- * full-width card grid reads better here than reusing AgentList's 280px-sidebar-shaped layout.
- */
+/** Every agent's role, model, and any tool restrictions - and where agents get created and edited. */
 export function AgentsView({ agents, loading, error, warnings, execTools, onRefresh, onCreateAgent, onEditAgent }: AgentsViewProps) {
   return (
     <div className="flex flex-col gap-4">
-      <SectionHeading
-        actions={
-          <div className="flex items-center gap-1.5">
-            <IconButton
-              icon={RefreshCw}
-              label="Reload agent configs"
-              size="sm"
-              onClick={onRefresh}
-              disabled={loading}
-              className={loading ? "animate-spin" : undefined}
-            />
-            <Button variant="primary" size="sm" icon={Plus} onClick={onCreateAgent}>
-              New agent
-            </Button>
-          </div>
-        }
-      >
-        Agents
-      </SectionHeading>
+      <div className="flex items-center justify-end gap-1.5">
+        <IconButton
+          icon={RefreshCw}
+          label="Reload agent configs"
+          size="sm"
+          onClick={onRefresh}
+          disabled={loading}
+          className={loading ? "animate-spin" : undefined}
+        />
+        <Button variant="primary" size="sm" icon={Plus} onClick={onCreateAgent}>
+          New agent
+        </Button>
+      </div>
 
       {error && <p className="text-xs text-critical">{error}</p>}
       {warnings.length > 0 && (
         <div className="rounded-lg border border-warning/30 bg-warning-dim px-2.5 py-2 text-xs text-warning">
-          {warnings.length} agent config file{warnings.length === 1 ? "" : "s"} failed to load.
+          <p className="mb-1 font-medium">
+            {warnings.length} agent config file{warnings.length === 1 ? "" : "s"} failed to load
+          </p>
+          <ul className="space-y-0.5 opacity-90">
+            {warnings.map((w) => (
+              <li key={w.file}>
+                <code>{w.file}</code> - {w.reason}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {loading && agents.length === 0 && <SkeletonRows count={4} />}
@@ -84,9 +82,11 @@ export function AgentsView({ agents, loading, error, warnings, execTools, onRefr
                   </span>
                 </div>
               </div>
-              <div className="mt-3 border-t border-border pt-2.5">
-                <AgentToolAccess agent={agent} tools={execTools} />
-              </div>
+              {agent.execTools !== undefined && (
+                <div className="mt-3 border-t border-border pt-2.5">
+                  <AgentToolAccess agent={agent} tools={execTools} />
+                </div>
+              )}
             </GlassPanel>
           );
         })}

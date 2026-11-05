@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { listMissionIds, missionDir } from "./missionStore.js";
+import { listMissionIds, missionDir, writeFileAtomic } from "./missionStore.js";
 import { MissionNotFoundError } from "./errors.js";
 import { migrateMissionStatus, type Mission } from "../types/mission.js";
 
@@ -50,7 +50,7 @@ async function readMissionMeta(id: string): Promise<Mission | undefined> {
 
 async function writeMissionMeta(mission: Mission): Promise<void> {
   await mkdir(missionDir(mission.id), { recursive: true });
-  await writeFile(path.join(missionDir(mission.id), MISSION_FILE), JSON.stringify(mission, null, 2));
+  await writeFileAtomic(path.join(missionDir(mission.id), MISSION_FILE), JSON.stringify(mission, null, 2));
 }
 
 /** No read-through cache (unlike agentManager) - missions are mutated via this API, and the

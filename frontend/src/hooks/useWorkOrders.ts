@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cancelWorkOrder, createWorkOrder, fetchWorkOrders, refreshWorkOrder, startWorkOrder } from "../services/workOrdersApi";
 import type { WorkOrder, WorkOrderCreateInput } from "../types/workOrder";
 
@@ -9,6 +9,13 @@ export function useWorkOrders(missionId: string | null) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  /** Guard against a stale previous-mission response landing after a quick mission switch - see
+   * useTools.ts's identical ref for the pattern and why it matters. */
+  const missionIdRef = useRef(missionId);
+  useEffect(() => {
+    missionIdRef.current = missionId;
+  }, [missionId]);
+
   const refresh = useCallback(async () => {
     if (!missionId) {
       setWorkOrders([]);
@@ -18,11 +25,14 @@ export function useWorkOrders(missionId: string | null) {
     setLoading(true);
     setError(null);
     try {
-      setWorkOrders(await fetchWorkOrders(missionId));
+      const data = await fetchWorkOrders(missionId);
+      if (missionIdRef.current !== missionId) return;
+      setWorkOrders(data);
     } catch (err) {
+      if (missionIdRef.current !== missionId) return;
       setError(err instanceof Error ? err.message : "Failed to load work orders");
     } finally {
-      setLoading(false);
+      if (missionIdRef.current === missionId) setLoading(false);
     }
   }, [missionId]);
 
@@ -67,7 +77,7 @@ export function useWorkOrders(missionId: string | null) {
     async (id: string) => {
       if (!missionId) throw new Error("No mission selected");
       const workOrder = await refreshWorkOrder(missionId, id);
-      setWorkOrders((prev) => prev.map((w) => (w.id === id ? workOrder : w)));
+      if (missionIdRef.current === missionId) setWorkOrders((prev) => prev.map((w) => (w.id === id ? workOrder : w)));
       return workOrder;
     },
     [missionId],

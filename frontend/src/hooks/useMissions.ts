@@ -24,8 +24,8 @@ export function useMissions() {
   }, [refresh]);
 
   const create = useCallback(
-    async (name: string, notes: string) => {
-      const mission = await createMission(name, notes);
+    async (name: string, notes: string, fields: Partial<Omit<Mission, "id" | "name" | "notes" | "createdAt">> = {}) => {
+      const mission = await createMission(name, notes, fields);
       await refresh();
       return mission;
     },

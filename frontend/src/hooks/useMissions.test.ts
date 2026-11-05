@@ -46,7 +46,7 @@ describe("useMissions", () => {
       created = await result.current.create("Acme", "scope notes");
     });
 
-    expect(mockCreateMission).toHaveBeenCalledWith("Acme", "scope notes");
+    expect(mockCreateMission).toHaveBeenCalledWith("Acme", "scope notes", {});
     expect(created).toEqual(fixtureMission);
     expect(result.current.missions).toEqual([fixtureMission]);
   });

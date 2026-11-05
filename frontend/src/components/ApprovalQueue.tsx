@@ -56,14 +56,7 @@ export function ApprovalQueue({ missionName, executions, agents, onSettled }: Ap
     }
   };
 
-  if (pending.length === 0) {
-    return (
-      <section>
-        <SectionHeading>Approval Queue</SectionHeading>
-        <p className="text-xs text-muted">No actions awaiting approval for this mission.</p>
-      </section>
-    );
-  }
+  if (pending.length === 0) return null;
 
   return (
     <section>
@@ -91,7 +84,7 @@ export function ApprovalQueue({ missionName, executions, agents, onSettled }: Ap
               ) : (
                 <span className="flex items-center gap-1 text-primary">
                   <ShieldCheck size={11} />
-                  In scope
+                  No scope warning
                 </span>
               )}
             </div>

@@ -8,17 +8,23 @@ import {
   listWorkOrders,
   loadWorkOrdersFromDisk,
   refreshWorkOrder,
+  resumeWorkOrderIfReady,
   startWorkOrder,
+  workOrderNeedsGuidance,
 } from "./workOrderManager.js";
-import { cancelTask, createTask, getTask } from "./orchestrator.js";
+import { cancelTask, createTask, getTask, resumeTask } from "./orchestrator.js";
+import { getExecution } from "./toolManager.js";
 import { onMissionDeleted } from "./missionManager.js";
-import { InvalidWorkOrderStateError, WorkOrderNotFoundError } from "./errors.js";
+import { InvalidTaskStateError, InvalidWorkOrderStateError, RequestCancelledError, WorkOrderNotFoundError } from "./errors.js";
 import { listMissionIds, readMissionJson } from "./missionStore.js";
 import { listActivity } from "./activityLog.js";
 import type { OrchestratorTask } from "./orchestrator.js";
 import type { WorkOrder } from "../types/workOrder.js";
 
-vi.mock("./orchestrator.js", () => ({ createTask: vi.fn(), cancelTask: vi.fn(), getTask: vi.fn() }));
+vi.mock("./orchestrator.js", () => ({ createTask: vi.fn(), cancelTask: vi.fn(), getTask: vi.fn(), resumeTask: vi.fn() }));
+vi.mock("./toolManager.js", () => ({ getExecution: vi.fn() }));
+const mockResumeTask = vi.mocked(resumeTask);
+const mockGetExecution = vi.mocked(getExecution);
 const mockCreateTask = vi.mocked(createTask);
 const mockCancelTask = vi.mocked(cancelTask);
 const mockGetTask = vi.mocked(getTask);
@@ -136,7 +142,15 @@ describe("startWorkOrder", () => {
 
     const started = await startWorkOrder(wo.id);
 
-    expect(mockCreateTask).toHaveBeenCalledWith("recon-agent", expect.stringContaining("enumerate"), missionId, undefined, undefined);
+    expect(mockCreateTask).toHaveBeenCalledWith(
+      "recon-agent",
+      expect.stringContaining("enumerate"),
+      missionId,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
     expect(started.status).toBe("waiting_approval");
     expect(started.orchestratorTaskId).toBe(task.id);
     expect(started.startedAt).toBeTruthy();
@@ -305,3 +319,152 @@ describe("loadWorkOrdersFromDisk", () => {
     expect(getWorkOrder(onDisk.id)).toEqual(onDisk);
   });
 });
+
+describe("work order lifecycle races", () => {
+  async function startedAwaitingApproval(executionId = "exec-1") {
+    const missionId = randomUUID();
+    const wo = await createWorkOrder(missionId, { agentId: "a", objective: "o" });
+    const task = fixtureTask({ missionId, status: "waiting_confirmation", pendingExecutionId: executionId });
+    mockCreateTask.mockResolvedValueOnce(task);
+    await startWorkOrder(wo.id);
+    mockGetTask.mockReturnValue(task);
+    return { wo, task };
+  }
+
+  it("claims the order before the first await, so a second start is refused", async () => {
+    const wo = await createWorkOrder(randomUUID(), { agentId: "a", objective: "o" });
+    mockCreateTask.mockResolvedValueOnce(fixtureTask());
+
+    const first = startWorkOrder(wo.id);
+    expect(getWorkOrder(wo.id)?.status).toBe("running");
+    await expect(startWorkOrder(wo.id)).rejects.toThrow(InvalidWorkOrderStateError);
+    await first;
+
+    expect(mockCreateTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a cancel reach a task that's still generating its first reply", async () => {
+    const wo = await createWorkOrder(randomUUID(), { agentId: "a", objective: "o" });
+    let finish: (task: OrchestratorTask) => void = () => {};
+    const inFlight = fixtureTask({ status: "running" });
+    mockCreateTask.mockImplementationOnce((...args) => {
+      args[6]?.(inFlight);
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+
+    const run = startWorkOrder(wo.id);
+    await vi.waitFor(() => expect(mockCreateTask).toHaveBeenCalled());
+    cancelWorkOrder(wo.id);
+
+    expect(mockCancelTask).toHaveBeenCalledWith(inFlight.id);
+    finish({ ...inFlight, status: "cancelled" });
+    await run;
+    expect(getWorkOrder(wo.id)?.status).toBe("cancelled");
+  });
+
+  it("refuses to cancel an order that already finished", async () => {
+    const wo = await createWorkOrder(randomUUID(), { agentId: "a", objective: "o" });
+    mockCreateTask.mockResolvedValueOnce(fixtureTask({ status: "completed" }));
+    await startWorkOrder(wo.id);
+
+    expect(() => cancelWorkOrder(wo.id)).toThrow(InvalidWorkOrderStateError);
+    expect(getWorkOrder(wo.id)?.status).toBe("completed");
+  });
+
+  it("returns the order to pending when the client disconnects mid-generation", async () => {
+    const wo = await createWorkOrder(randomUUID(), { agentId: "a", objective: "o" });
+    mockCreateTask.mockRejectedValueOnce(new RequestCancelledError());
+
+    await expect(startWorkOrder(wo.id)).rejects.toThrow(RequestCancelledError);
+
+    expect(getWorkOrder(wo.id)?.status).toBe("pending");
+  });
+
+  it("fails the order on any other start error", async () => {
+    const wo = await createWorkOrder(randomUUID(), { agentId: "a", objective: "o" });
+    mockCreateTask.mockRejectedValueOnce(new Error("agent is gone"));
+
+    await expect(startWorkOrder(wo.id)).rejects.toThrow("agent is gone");
+
+    expect(getWorkOrder(wo.id)?.status).toBe("failed");
+    expect(getWorkOrder(wo.id)?.result).toBe("agent is gone");
+  });
+
+  it("doesn't resume while the human hasn't decided", async () => {
+    const { wo } = await startedAwaitingApproval();
+    mockGetExecution.mockReturnValue({ status: "pending_confirmation" } as never);
+
+    const result = await resumeWorkOrderIfReady(wo.id);
+
+    expect(mockResumeTask).not.toHaveBeenCalled();
+    expect(result.status).toBe("waiting_approval");
+  });
+
+  it("resumes the task once the execution settled, and syncs the outcome", async () => {
+    const { wo, task } = await startedAwaitingApproval();
+    mockGetExecution.mockReturnValue({ status: "completed" } as never);
+    mockResumeTask.mockImplementationOnce(async () => {
+      task.status = "completed";
+      task.finalResponse = "finished after approval";
+      return task;
+    });
+
+    const result = await resumeWorkOrderIfReady(wo.id);
+
+    expect(mockResumeTask).toHaveBeenCalledWith(task.id, undefined, undefined);
+    expect(result.status).toBe("completed");
+    expect(result.result).toBe("finished after approval");
+  });
+
+  it("settles the order when its task can never continue", async () => {
+    const { wo } = await startedAwaitingApproval();
+    mockGetExecution.mockReturnValue(undefined);
+    mockResumeTask.mockRejectedValueOnce(new InvalidTaskStateError("its execution record is gone"));
+
+    const result = await resumeWorkOrderIfReady(wo.id);
+
+    expect(result.status).toBe("failed");
+  });
+
+  it("doesn't strand the order at running on an unexpected resume error", async () => {
+    const { wo } = await startedAwaitingApproval();
+    mockGetExecution.mockReturnValue({ status: "completed" } as never);
+    mockResumeTask.mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(resumeWorkOrderIfReady(wo.id)).rejects.toThrow("disk full");
+
+    expect(getWorkOrder(wo.id)?.status).toBe("failed");
+  });
+
+  it("repairs an order left running by a previous process when loading from disk", async () => {
+    const missionId = randomUUID();
+    const id = randomUUID();
+    mockListMissionIds.mockResolvedValueOnce([missionId]);
+    mockReadMissionJson.mockResolvedValueOnce([
+      { id, missionId, agentId: "a", objective: "o", status: "running", priority: 0, dependencies: [], createdAt: 1, relatedAssets: [], relatedFindings: [] },
+    ]);
+
+    await loadWorkOrdersFromDisk();
+
+    expect(getWorkOrder(id)?.status).not.toBe("running");
+  });
+});
+
+describe("workOrderNeedsGuidance", () => {
+  it("is true only for a paused order whose task wants a note", async () => {
+    const missionId = randomUUID();
+    const wo = await createWorkOrder(missionId, { agentId: "a", objective: "o" });
+    const task = fixtureTask({ missionId, status: "waiting_guidance" });
+    mockCreateTask.mockResolvedValueOnce(task);
+    await startWorkOrder(wo.id);
+    mockGetTask.mockReturnValue(task);
+
+    expect(workOrderNeedsGuidance(wo)).toBe(true);
+
+    task.status = "waiting_confirmation";
+    expect(workOrderNeedsGuidance(wo)).toBe(false);
+  });
+});
+

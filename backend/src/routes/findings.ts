@@ -1,6 +1,5 @@
 import { Router } from "express";
 import {
-  buildFindingsGraph,
   createFinding,
   deleteFinding,
   listFindings,
@@ -134,10 +133,6 @@ missionFindingsRouter.get("/search", (req, res) => {
     return;
   }
   res.json({ findings: searchFindings(missionIdOf(req), q) });
-});
-
-missionFindingsRouter.get("/graph", (req, res) => {
-  res.json({ graph: buildFindingsGraph(missionIdOf(req)) });
 });
 
 missionFindingsRouter.post("/", async (req, res, next) => {

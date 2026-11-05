@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { readFile, unlink } from "node:fs/promises";
 import { runExecutable } from "./toolExecutor.js";
 import type { OutputChunk } from "./toolExecutor.js";
 
@@ -74,6 +77,44 @@ describe("runExecutable", () => {
     expect(result.success).toBe(false);
   });
 
+  it("kills backgrounded grandchildren too - cancellation reaches the whole process group", async () => {
+    // The parent process spawns a detached grandchild (a node loop, PID captured to a file) and
+    // then blocks forever. If only the direct child were signalled, the grandchild would survive
+    // the cancellation as an orphan - the process-group kill must take it down with the parent.
+    const grandchildPidFile = path.join(tmpdir(), `tool-executor-grandchild-${process.pid}-${Date.now()}.pid`);
+    // Anchored as a JSON string so the embedded \n and quotes stay literal in the -e script.
+    const pidFileArg = JSON.stringify(grandchildPidFile);
+    const { executable, args } = node(`
+      const { spawn } = require("node:child_process");
+      const { writeFileSync } = require("node:fs");
+      const gc = spawn(process.execPath, ["-e", "setInterval(() => {}, 86400000)"], { stdio: "ignore" });
+      writeFileSync(${pidFileArg}, String(gc.pid));
+      setInterval(() => {}, 86400000);
+    `);
+
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 200);
+    try {
+      const result = await runExecutable({
+        executable,
+        args,
+        cwd: process.cwd(),
+        timeoutMs: 10_000,
+        signal: controller.signal,
+      });
+      expect(result.cancelled).toBe(true);
+
+      // The grandchild recorded its pid, then died with the group - plant a probe that the pid
+      // is no longer live (process.kill with signal 0 throws ESRCH once the process is gone).
+      await vi.waitFor(async () => {
+        const gcPid = Number(await readFile(grandchildPidFile, "utf-8"));
+        expect(() => process.kill(gcPid, 0)).toThrow();
+      });
+    } finally {
+      unlink(grandchildPidFile).catch(() => {});
+    }
+  });
+
   it("invokes onOutput for each chunk as it arrives", async () => {
     const { executable, args } = node("process.stdout.write('chunked')");
     const onOutput = vi.fn<(chunk: OutputChunk) => void>();
@@ -132,4 +173,42 @@ describe("runExecutable", () => {
     expect(result.success).toBe(false);
     expect(result.exitCode).toBeNull();
   });
+});
+
+describe("runExecutable resilience", () => {
+  it("survives a child that exits without reading a large stdin (EPIPE)", async () => {
+    const { executable, args } = node("process.exit(0)");
+    const result = await runExecutable({ executable, args, cwd: process.cwd(), timeoutMs: 5000, stdin: "x".repeat(5_000_000) });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.success).toBe(true);
+  });
+
+  it("doesn't corrupt a multibyte character split across two output chunks", async () => {
+    const { executable, args } = node(
+      "const b = Buffer.from('€'); process.stdout.write(b.subarray(0, 1)); setTimeout(() => process.stdout.write(b.subarray(1)), 100);",
+    );
+    const result = await runExecutable({ executable, args, cwd: process.cwd(), timeoutMs: 5000 });
+
+    expect(result.stdout).toBe("€");
+  });
+
+  it("escalates to SIGKILL when a process ignores SIGTERM", async () => {
+    const { executable, args } = node("process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);");
+    const startedAt = Date.now();
+    const result = await runExecutable({ executable, args, cwd: process.cwd(), timeoutMs: 300 });
+
+    expect(result.timedOut).toBe(true);
+    expect(result.success).toBe(false);
+    expect(Date.now() - startedAt).toBeLessThan(6000);
+  }, 10_000);
+
+  it("doesn't leave a process running for an already-aborted signal", async () => {
+    const { executable, args } = node("setInterval(() => {}, 1000);");
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runExecutable({ executable, args, cwd: process.cwd(), timeoutMs: 60_000, signal: controller.signal });
+
+    expect(result.cancelled).toBe(true);
+  }, 10_000);
 });

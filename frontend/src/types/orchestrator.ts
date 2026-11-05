@@ -17,7 +17,9 @@ export type TaskStatus =
 
 export interface OrchestratorTask {
   id: string;
+  missionId: string;
   agentId: string;
+  model?: string;
   objective: string;
   messages: OrchestratorMessage[];
   status: TaskStatus;
@@ -26,6 +28,8 @@ export interface OrchestratorTask {
   pendingExecutionId?: string;
   finalResponse?: string;
   error?: string;
+  /** Agent working time, excluding time parked on a human decision - what the time cap counts. */
+  activeMs?: number;
   createdAt: number;
   updatedAt: number;
 }

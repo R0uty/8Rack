@@ -10,10 +10,11 @@ function mission(overrides: Partial<Mission> = {}): Mission {
 
 function setup(overrides: Partial<React.ComponentProps<typeof MissionEditor>> = {}) {
   const onSave = vi.fn().mockResolvedValue(undefined);
+  const onDelete = vi.fn().mockResolvedValue(undefined);
   const onClose = vi.fn();
-  const props = { open: true, mission: mission(), onSave, onClose, ...overrides };
+  const props = { open: true, mission: mission(), onSave, onDelete, onClose, ...overrides };
   render(<MissionEditor {...props} />);
-  return { onSave, onClose };
+  return { onSave, onDelete, onClose };
 }
 
 describe("MissionEditor", () => {
@@ -60,21 +61,34 @@ describe("MissionEditor", () => {
     );
   });
 
-  it("converts the date input to an epoch-ms startDate", async () => {
-    const { onSave } = setup();
+  it("creates a mission with its scope in one go when mission is null", async () => {
+    const { onSave } = setup({ mission: null });
     const user = userEvent.setup();
+    expect(screen.getByRole("button", { name: "Create mission" })).toBeDisabled();
+    expect(screen.queryByLabelText("Status")).not.toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("Start date"), "2026-01-15");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.type(screen.getByLabelText("Name"), "New one");
+    await user.type(screen.getByLabelText("Scope"), "example.com");
+    await user.click(screen.getByRole("button", { name: "Create mission" }));
 
-    const [, patch] = onSave.mock.calls[0] as [string, { startDate?: number }];
-    expect(new Date(patch.startDate!).toISOString().slice(0, 10)).toBe("2026-01-15");
+    expect(onSave).toHaveBeenCalledWith(null, expect.objectContaining({ name: "New one", scope: ["example.com"] }));
   });
 
-  it("closes without saving when there is nothing to edit yet (mission is null)", () => {
+  it("only deletes after a second, explicit confirmation", async () => {
+    const { onDelete, onClose } = setup();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Delete mission" }));
+    expect(onDelete).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+    expect(onDelete).toHaveBeenCalledWith("p1");
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("offers no delete while creating", () => {
     setup({ mission: null });
-    expect(screen.getByText("Edit Mission")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Delete mission" })).not.toBeInTheDocument();
   });
 
   it("Save changes is disabled once the name is cleared", async () => {

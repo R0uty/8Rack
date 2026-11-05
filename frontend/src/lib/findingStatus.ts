@@ -1,12 +1,7 @@
 import type { Tone } from "../components/ui";
 import type { FindingStatus } from "../types/finding";
 
-/** Shared across FindingsTimeline/FindingsTable/FindingDetails - previously defined in
- * FindingsTimeline.tsx and imported by the other two, which made FindingsTimeline import back
- * from FindingsView (for SELECT_CLASS, see components/ui/selectClass.ts), creating two real
- * import cycles (View <-> Timeline <-> Table, View <-> Timeline <-> Details). Centralizing here -
- * a leaf module with no dependency on any Findings view - breaks both. FINDING_STATUSES was also
- * previously duplicated verbatim in FindingsTimeline.tsx and FindingDetails.tsx. */
+/** Shared across FindingsView/FindingsTable/FindingDetails. */
 export const FINDING_STATUSES: FindingStatus[] = [
   "potential",
   "investigating",

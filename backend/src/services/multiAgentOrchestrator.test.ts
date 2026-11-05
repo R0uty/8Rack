@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAgent } from "./agentManager.js";
 import { cancelTask, createTask, provideGuidance, resumeTask } from "./orchestrator.js";
 import { InvalidPlanStateError, PlanNotFoundError } from "./errors.js";
-import { cancelPlan, createPlan, provideStepGuidance, resumePlan } from "./multiAgentOrchestrator.js";
+import { cancelPlan, createPlan, getPlan, listPlans, loadPlansFromDisk, provideStepGuidance, resumePlan } from "./multiAgentOrchestrator.js";
+import { listMissionIds, readMissionJson } from "./missionStore.js";
 import type { AgentWithStatus } from "../types/agent.js";
 import type { OrchestratorTask, TaskStatus } from "./orchestrator.js";
 import type { PlanStep } from "../types/orchestration.js";
@@ -246,7 +247,38 @@ describe("cancelPlan", () => {
       throw new Error("already finished");
     });
 
-    expect(() => cancelPlan(plan.id)).not.toThrow();
     expect(cancelPlan(plan.id).status).toBe("cancelled");
+  });
+
+  it("refuses to re-settle a plan that already finished", async () => {
+    mockCreateTask.mockResolvedValue(fixtureTask({ status: "completed" }));
+    const plan = await createPlan("proj-1", "desc", twoSteps);
+    expect(plan.status).toBe("completed");
+
+    expect(() => cancelPlan(plan.id)).toThrow(InvalidPlanStateError);
+    expect(getPlan(plan.id)?.status).toBe("completed");
+  });
+});
+
+describe("plans that can no longer make progress", () => {
+  it("marks the plan failed, not running forever, when a step throws", async () => {
+    mockCreateTask.mockRejectedValueOnce(new Error("agent was deleted"));
+
+    await expect(createPlan("proj-throw", "desc", twoSteps)).rejects.toThrow("agent was deleted");
+
+    const [plan] = listPlans("proj-throw");
+    expect(plan.status).toBe("failed");
+    expect(plan.error).toBe("agent was deleted");
+  });
+
+  it("fails a plan left running by a previous process when loading from disk", async () => {
+    vi.mocked(listMissionIds).mockResolvedValueOnce(["proj-hydrate"]);
+    vi.mocked(readMissionJson).mockResolvedValueOnce([
+      { id: "plan-hydrate", missionId: "proj-hydrate", status: "running", steps: [], stepRuns: [], currentStepIndex: 0 },
+    ]);
+
+    await loadPlansFromDisk();
+
+    expect(getPlan("plan-hydrate")?.status).toBe("failed");
   });
 });

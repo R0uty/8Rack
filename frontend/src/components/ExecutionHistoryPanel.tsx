@@ -1,8 +1,7 @@
 import { useMemo, useState } from "react";
-import { Bookmark, BookmarkCheck, ChevronDown, RefreshCw, Search } from "lucide-react";
+import { ChevronDown, Search } from "lucide-react";
 import { ExecutionConsole } from "./ExecutionConsole";
-import { GlassPanel, IconButton, SectionHeading, StatusPill, type Tone } from "./ui";
-import { useBookmarks } from "../hooks/useBookmarks";
+import { GlassPanel, StatusPill, type Tone } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
 import { cn } from "../lib/cn";
 import type { ExecutionRecord, ExecutionStatus } from "../types/execTool";
@@ -12,7 +11,6 @@ interface ExecutionHistoryPanelProps {
   executions: ExecutionRecord[];
   loading: boolean;
   error: string | null;
-  onRefresh: () => void;
   /** Resolves an execution's agentId to a display name - this view blends executions from every
    * agent (and manual, agent-less requests) in one flat list, unlike a single task session's own
    * view where the agent is already obvious from context. */
@@ -51,30 +49,17 @@ function matchesQuery(execution: ExecutionRecord, agentLabel: string | undefined
   return haystack.includes(query);
 }
 
-function HistoryRow({
-  execution,
-  agentLabel,
-  bookmarked,
-  onToggleBookmark,
-}: {
-  execution: ExecutionRecord;
-  agentLabel?: string;
-  bookmarked: boolean;
-  onToggleBookmark: () => void;
-}) {
+function HistoryRow({ execution, agentLabel }: { execution: ExecutionRecord; agentLabel?: string }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
     <GlassPanel padding="sm">
-      <div className="flex items-center gap-2">
-        {/* Not built on the shared Collapsible primitive - its trigger is a single button, and
-         * the bookmark toggle below needs to be a sibling interactive element, not nested inside
-         * one (invalid HTML, and would fire both handlers on one click). */}
-        <button
-          type="button"
-          onClick={() => setExpanded((e) => !e)}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-        >
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+        className="flex w-full min-w-0 items-center gap-2 text-left"
+      >
           <ChevronDown
             size={13}
             className={cn("shrink-0 text-muted transition-transform duration-200", expanded && "rotate-180")}
@@ -92,15 +77,7 @@ function HistoryRow({
             {execution.resolvedCommand}
           </span>
           <span className="shrink-0 text-[11px] text-muted">{relativeTime(execution.createdAt)}</span>
-        </button>
-        <IconButton
-          icon={bookmarked ? BookmarkCheck : Bookmark}
-          label={bookmarked ? "Remove bookmark" : "Bookmark this execution"}
-          size="sm"
-          active={bookmarked}
-          onClick={onToggleBookmark}
-        />
-      </div>
+      </button>
 
       {expanded && (
         <div className="mt-2">
@@ -117,43 +94,17 @@ function HistoryRow({
   );
 }
 
-/**
- * Search + bookmark across a mission's tool execution history - the redesign's design spec asked
- * for this in the Terminal section but it was deliberately deferred at the time (see TODO.md) as
- * needing real state design. Search is a plain client-side filter over the executions this view
- * already has (no new backend endpoint - `GET /api/tools/executions` already returns full
- * stdout/stderr per record); bookmarks are frontend-only (hooks/useBookmarks.ts, localStorage),
- * since which executions matter to *you* is a personal preference, not mission data.
- */
-export function ExecutionHistoryPanel({ executions, loading, error, onRefresh, agents }: ExecutionHistoryPanelProps) {
+/** A mission's tool runs, searchable by tool, agent, command, or output. */
+export function ExecutionHistoryPanel({ executions, loading, error, agents }: ExecutionHistoryPanelProps) {
   const [query, setQuery] = useState("");
-  const [bookmarkedOnly, setBookmarkedOnly] = useState(false);
-  const { isBookmarked, toggle } = useBookmarks();
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return executions.filter(
-      (e) => (!bookmarkedOnly || isBookmarked(e.id)) && matchesQuery(e, agentName(agents, e.agentId), q),
-    );
-  }, [executions, query, bookmarkedOnly, isBookmarked, agents]);
+    return executions.filter((e) => matchesQuery(e, agentName(agents, e.agentId), q));
+  }, [executions, query, agents]);
 
   return (
     <section>
-      <SectionHeading
-        actions={
-          <IconButton
-            icon={RefreshCw}
-            label="Refresh execution history"
-            size="sm"
-            onClick={onRefresh}
-            disabled={loading}
-            className={loading ? "animate-spin" : undefined}
-          />
-        }
-      >
-        Execution History
-      </SectionHeading>
-
       {error && <p className="mb-2 text-xs text-critical">{error}</p>}
 
       <div className="mb-2 flex items-center gap-2">
@@ -166,18 +117,11 @@ export function ExecutionHistoryPanel({ executions, loading, error, onRefresh, a
             className="w-full rounded-lg border border-border bg-surface-2 py-1.5 pl-7 pr-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60"
           />
         </div>
-        <IconButton
-          icon={bookmarkedOnly ? BookmarkCheck : Bookmark}
-          label={bookmarkedOnly ? "Showing bookmarked only — click to show all" : "Show bookmarked only"}
-          size="sm"
-          active={bookmarkedOnly}
-          onClick={() => setBookmarkedOnly((b) => !b)}
-        />
       </div>
 
       {!error && !loading && executions.length === 0 && <p className="text-xs text-muted">No executions yet</p>}
       {!error && executions.length > 0 && filtered.length === 0 && (
-        <p className="text-xs text-muted">No executions match{bookmarkedOnly ? " your bookmarks" : ""}.</p>
+        <p className="text-xs text-muted">No executions match.</p>
       )}
 
       <div className="flex flex-col gap-1.5">
@@ -186,8 +130,6 @@ export function ExecutionHistoryPanel({ executions, loading, error, onRefresh, a
             key={execution.id}
             execution={execution}
             agentLabel={agentName(agents, execution.agentId)}
-            bookmarked={isBookmarked(execution.id)}
-            onToggleBookmark={() => toggle(execution.id)}
           />
         ))}
       </div>

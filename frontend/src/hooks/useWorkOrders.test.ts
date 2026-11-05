@@ -102,4 +102,18 @@ describe("useWorkOrders", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     await expect(result.current.refreshOne("wo-1")).rejects.toThrow("No mission selected");
   });
+
+  it("ignores a slow response for the previous mission after switching", async () => {
+    let resolveA: (orders: WorkOrder[]) => void = () => {};
+    mockFetchWorkOrders.mockImplementationOnce(() => new Promise((resolve) => (resolveA = resolve)));
+    const { result, rerender } = renderHook(({ id }) => useWorkOrders(id), { initialProps: { id: "m-a" } });
+
+    mockFetchWorkOrders.mockResolvedValueOnce([fixtureWorkOrder({ id: "from-b", missionId: "m-b" })]);
+    rerender({ id: "m-b" });
+    await waitFor(() => expect(result.current.workOrders.map((w) => w.id)).toEqual(["from-b"]));
+
+    await act(async () => resolveA([fixtureWorkOrder({ id: "from-a", missionId: "m-a" })]));
+
+    expect(result.current.workOrders.map((w) => w.id)).toEqual(["from-b"]);
+  });
 });

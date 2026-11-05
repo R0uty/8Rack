@@ -206,11 +206,11 @@ export const builtinExecTools: ExecTool[] = [
     name: "Nmap",
     description: "Network port/service scanner.",
     usageHint:
-      'Use when the objective involves finding open ports/running services on a host or IP. arguments: ["-sV", "-p-", "<host>"]',
+      'Use when the objective involves finding open ports/running services on a host or IP. arguments: ["-sV", "--top-ports", "1000", "<host>"]',
     category: "network",
     executable: "nmap",
     defaultArguments: [],
-    timeout: 120_000,
+    timeout: 900_000, // a -p- service scan (the Full Port Scan profile) routinely takes many minutes
     enabled: true,
     requiresConfirmation: true,
     parser: "text",

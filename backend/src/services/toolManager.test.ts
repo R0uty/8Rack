@@ -3,11 +3,14 @@ import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env } from "../config/env.js";
 import {
+  abortAllExecutions,
   cancelExecution,
   confirmExecution,
   getExecTool,
   getExecution,
+  listExecToolsWithStatus,
   listExecutions,
+  loadExecutionsFromDisk,
   loadToolOverridesFromDisk,
   registerExecTool,
   rejectExecution,
@@ -16,6 +19,7 @@ import {
 } from "./toolManager.js";
 import { getMission, onMissionDeleted } from "./missionManager.js";
 import { listActivity } from "./activityLog.js";
+import { listMissionIds, readMissionJson } from "./missionStore.js";
 import {
   ExecToolDisabledError,
   ExecToolNotFoundError,
@@ -186,6 +190,39 @@ describe("requestExecution validation", () => {
       missionId: "p",
     });
     expect(record.status).toBe("pending_confirmation");
+  });
+
+  it("rejects case-variant spellings of the escalation verbs (Sudo/SUDO/PkExec)", async () => {
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["Sudo", "pacman", "-S", "katana"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["bash", "-c", "SUDO whoami"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["PkExec", "-h"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+  });
+
+  it("rejects an env-wrapped escalation, but allows a plain env VAR=x command", async () => {
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["env", "PATH=/tmp/evil", "sudo", "whoami"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+    const record = await requestExecution({
+      tool: "test-tool",
+      arguments: ["env", "LANG=C", "nmap", "-h"],
+      missionId: "p",
+    });
+    expect(record.status).toBe("pending_confirmation");
+  });
+
+  it("rejects setsid, since its child would escape process-group cancellation (A4)", async () => {
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["setsid", "sudo", "whoami"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["setsid", "nc", "-lvp", "4444"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
   });
 });
 
@@ -515,6 +552,35 @@ describe("getExecTool", () => {
   });
 });
 
+describe("listExecToolsWithStatus caching", () => {
+  it("returns the cached list on a second call within the TTL window (no re-probe)", () => {
+    const first = listExecToolsWithStatus();
+    expect(listExecToolsWithStatus()).toBe(first);
+  });
+
+  it("recomputes after a tool is registered, reflecting the new tool immediately", () => {
+    registerExecTool({ ...baseTool, id: "fresh-cached-tool" });
+    expect(listExecToolsWithStatus().some((t) => t.id === "fresh-cached-tool")).toBe(true);
+  });
+
+  it("recomputes after setToolEnabled, reflecting the toggle immediately instead of serving a stale value", async () => {
+    registerExecTool({ ...baseTool, id: "toggle-cached-tool" });
+    await setToolEnabled("toggle-cached-tool", false);
+    expect(listExecToolsWithStatus().find((t) => t.id === "toggle-cached-tool")?.enabled).toBe(false);
+    await setToolEnabled("toggle-cached-tool", true);
+    expect(listExecToolsWithStatus().find((t) => t.id === "toggle-cached-tool")?.enabled).toBe(true);
+  });
+
+  it("loadToolOverridesFromDisk invalidates the cache too", async () => {
+    registerExecTool({ ...baseTool, id: "override-cached-tool" });
+    await setToolEnabled("override-cached-tool", false);
+    registerExecTool({ ...baseTool, id: "override-cached-tool" }); // fresh builtin, enabled=true again
+
+    await loadToolOverridesFromDisk();
+    expect(listExecToolsWithStatus().find((t) => t.id === "override-cached-tool")?.enabled).toBe(false);
+  });
+});
+
 describe("setToolEnabled / loadToolOverridesFromDisk", () => {
   it("throws for an unknown tool id", async () => {
     await expect(setToolEnabled("nope", false)).rejects.toThrow(ExecToolNotFoundError);
@@ -558,5 +624,108 @@ describe("setToolEnabled / loadToolOverridesFromDisk", () => {
 
     await expect(loadToolOverridesFromDisk()).resolves.toBeUndefined();
     expect(getExecTool("malformed-guard-tool")?.enabled).toBe(false);
+  });
+});
+
+describe("confirmation races", () => {
+  it("runs the tool once when confirm is sent twice", async () => {
+    const record = await requestExecution({ tool: "test-tool", arguments: ["process.stdout.write('once')"], missionId: "proj-double" });
+
+    const results = await Promise.allSettled([confirmExecution(record.id), confirmExecution(record.id)]);
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(getExecution(record.id)?.result?.stdout).toBe("once");
+  });
+
+  it("doesn't run a tool rejected while its confirm is still awaiting", async () => {
+    const record = await requestExecution({ tool: "test-tool", arguments: ["process.stdout.write('ran')"], missionId: "proj-race" });
+
+    const confirming = confirmExecution(record.id).catch(() => undefined);
+    rejectExecution(record.id);
+    await confirming;
+
+    expect(getExecution(record.id)?.status).toBe("rejected");
+    expect(getExecution(record.id)?.result).toBeUndefined();
+  });
+});
+
+describe("stdin across a concurrency-cap refusal", () => {
+  it("still has its stdin when the refused confirm is retried", async () => {
+    const blockers = await Promise.all(
+      Array.from({ length: env.maxConcurrentExecutions }, () =>
+        requestExecution({ tool: "test-tool", arguments: ["setTimeout(() => {}, 5000)"], missionId: "proj-stdin-cap" }),
+      ),
+    );
+    const running = blockers.map((r) => confirmExecution(r.id));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const record = await requestExecution({
+      tool: "test-tool",
+      arguments: ["process.stdin.pipe(process.stdout)"],
+      missionId: "proj-stdin-cap",
+      stdin: "keep me",
+    });
+    await expect(confirmExecution(record.id)).rejects.toThrow(TooManyConcurrentExecutionsError);
+
+    blockers.forEach((r) => cancelExecution(r.id));
+    await Promise.all(running);
+
+    const finished = await confirmExecution(record.id);
+    expect(finished.result?.stdout).toBe("keep me");
+  });
+});
+
+describe("local-only tools and scope", () => {
+  it("doesn't scope-check a filesystem tool's path as if it were a network target", async () => {
+    registerExecTool({ ...baseTool, id: "read_file" });
+    mockGetMission.mockResolvedValueOnce({ id: "proj-local", name: "m", notes: "", createdAt: 0, scope: ["example.com"] });
+    const record = await requestExecution({ tool: "read_file", arguments: ["notes.io"], missionId: "proj-local" });
+    expect(record.status).toBe("pending_confirmation");
+  });
+});
+
+describe("privileged command matching", () => {
+  it("doesn't mistake a hostname containing a privileged verb for that verb", async () => {
+    const record = await requestExecution({ tool: "test-tool", arguments: ["curl", "https://su.example.com"], missionId: "proj-su" });
+    expect(record.status).toBe("pending_confirmation");
+  });
+
+  it("still blocks the bare verb", async () => {
+    await expect(requestExecution({ tool: "test-tool", arguments: ["su", "root"], missionId: "proj-su" })).rejects.toThrow(
+      PrivilegedCommandError,
+    );
+  });
+});
+
+describe("abortAllExecutions", () => {
+  it("stops every running tool", async () => {
+    const record = await requestExecution({ tool: "test-tool", arguments: ["setTimeout(() => {}, 5000)"], missionId: "proj-abort-all" });
+    const running = confirmExecution(record.id);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    abortAllExecutions();
+
+    expect((await running).status).toBe("cancelled");
+  });
+});
+
+describe("loadExecutionsFromDisk recovery", () => {
+  function onDisk(id: string, status: string, resolvedCommand = "tool") {
+    return { id, missionId: "proj-hydrate", toolId: "test-tool", status, resolvedCommand, arguments: [], createdAt: 0 };
+  }
+
+  it("fails what can't survive a restart and leaves the rest alone", async () => {
+    vi.mocked(listMissionIds).mockResolvedValueOnce(["proj-hydrate"]);
+    vi.mocked(readMissionJson).mockResolvedValueOnce([
+      onDisk("hyd-running", "running"),
+      onDisk("hyd-stdin", "pending_confirmation", "tee x (stdin: 11 bytes)"),
+      onDisk("hyd-pending", "pending_confirmation"),
+    ]);
+
+    await loadExecutionsFromDisk();
+
+    expect(getExecution("hyd-running")?.status).toBe("failed");
+    expect(getExecution("hyd-stdin")?.status).toBe("failed");
+    expect(getExecution("hyd-pending")?.status).toBe("pending_confirmation");
   });
 });

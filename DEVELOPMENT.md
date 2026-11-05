@@ -3378,3 +3378,143 @@ were in the just-deleted `OrchestratorTaskView.tsx`), `npm test` 207/207 (was 30
 exactly the deleted test files, not a coverage loss on anything still real). Browser-verified live:
 the simplified 8-item nav, Findings' new Evidence tab rendering real evidence, and Tools' Security
 Scan section still fully functional at the bottom of the page.
+
+## Audit and fix pass (2026-11-05)
+
+A whole-project audit, with each fix pinned by a regression test. Behavior changes worth knowing first:
+
+- **Approving a tool now continues the factory.** `advanceMission` resumes `waiting_approval` orders
+  whose execution has settled (`workOrderManager.ts#resumeWorkOrderIfReady`), and the dashboard calls
+  advance after every approve/reject. Before this nothing ever resumed a paused order, so a mission
+  stalled at its first approval. Further tool runs still stop at the Approval Queue.
+- **The task time cap counts agent time only** (`OrchestratorTask.activeMs`). It used to be wall-clock,
+  so a task that sat overnight waiting for a human failed the moment it was approved.
+- **Cancelling something already finished is now an error** for tasks, work orders, and plans, instead
+  of overwriting a real outcome with `cancelled`.
+- **Agents can't validate their own findings** (`validate_finding` refuses when the finding's source
+  agent is the caller).
+- **POSTs from foreign origins get a 403** (`middleware/originCheck.ts`), and writes to a missing
+  mission get a 404 (`middleware/requireMission.ts`) instead of creating an orphan directory.
+- **The Approval Queue says "No scope warning", not "In scope"** - it also showed for missions with no
+  scope at all and for local filesystem tools, where "in scope" was simply untrue.
+- **Agent output can't load remote images** (`Markdown.tsx` renders them as links) - viewing a report
+  must not send a request to a host a prompt-injected agent chose.
+
+Fixed, by area:
+
+- **Process execution:** a child exiting before reading stdin crashed the whole backend (EPIPE);
+  multibyte output split across chunks was corrupted; SIGTERM-ignoring tools now get SIGKILL after 3s;
+  shutdown stops running tools, which otherwise outlive the backend in their own process groups.
+- **Confirmation:** a double confirm ran the tool twice; a reject during confirm's await still ran it;
+  a 429 retry lost stdin and truncated the target file; filesystem tools were scope-checked as if their
+  paths were hosts; the privileged-verb regex matched hostnames like `su.example.com`.
+- **Persistence:** mission files are written atomically (temp + rename) with coalesced queued writes;
+  stray non-UUID directories are ignored; startup settles whatever a dead process left `running` -
+  executions, tasks, work orders, plans, and scans.
+- **Director:** follow-up seeding could loop forever (capped at `MAX_WORK_ORDERS_PER_ADVANCE`); paused,
+  cancelled, review, and completed missions now return a `blockedReason` instead of running.
+- **Work orders:** a double start ran twice; a cancel couldn't reach a task in its first generation; a
+  client disconnect now resets to `pending`.
+- **Orchestrator:** tool-call parsing takes the first balanced valid object and coerces arguments;
+  empty replies, null JSON arguments, and unexpected errors settle the task instead of crashing it.
+- **Reports:** evidence reached the model as `[object Object]`, so reports were written without any;
+  findings from another mission are refused; an empty reply is an error, not a saved report.
+- **Ollama:** mid-stream `{"error"}` lines were ignored, so a crashed model read as a short answer.
+- **Scope:** a mission's own TLDs (`.gg`, `.internal`) weren't recognized, so an out-of-scope
+  `admin.acme.gg` only drew a warning; trailing-dot hosts bypassed `outOfScope`; `std::cout` read as IPv6.
+- **HTTP:** bodyless POSTs and malformed or oversized JSON returned 500; a failed bind logged
+  "listening"; blank numeric env values became 0, which set the concurrency cap to "nothing can run".
+- **RAG:** a failed reindex replaced the live index before failing, and the budget wasn't checked during
+  file reads.
+- **Findings:** confidence is clamped to 0-1 and history capped at 50 entries; dedupe lookups no longer
+  sort the whole mission per item.
+- **Frontend:** work orders could never be cancelled from the UI, locking their mission panel forever;
+  stale responses in `useWorkOrders`/`useAssets`; mission switching during an advance; a silent report
+  failure on the dashboard; several unhandled rejections now show errors; start dates saved a day early
+  west of Greenwich.
+
+Verified: backend 559 tests, frontend 218 tests, both typechecks, oxlint, and both builds. Live against a built backend: 400/413/403/404 responses, concurrent confirm refused, scope
+verdicts on an unlisted TLD, paused-mission `blockedReason`, EADDRINUSE exit, and SIGTERM killing a
+running tool.
+
+Then two real runs on `qwen2.5-coder:7b` against a throwaway site on `127.0.0.1:8765`. The first, with
+human notes, went recon -> validation -> `reporting` and produced a report containing real nmap evidence.
+The second, with no notes, reached `investigating` and then paused on an `ffuf` wordlist. Approve, reject
+and guidance all resumed correctly. Those runs found four more bugs, all fixed:
+
+- Advance returned no reason for an order waiting on a human note: empty queue, nothing to click.
+  `workOrderNeedsGuidance` now drives a `blockedReason`.
+- Nmap's usage hint recommended `-sV -p-` with a 120s timeout, so the suggested first scan timed out. The
+  hint now says `--top-ports 1000`, and the timeout is 15 minutes for the Full Port Scan profile.
+- Agents were offered tools that aren't installed, picked one, and paused. The preamble now lists only
+  available tools.
+- Local models repeat a successful recording call until the 10-call cap, which failed finished work
+  orders. An exact repeat of a successful `create_finding`/`upsert_asset`/`validate_finding` now
+  completes the task. Real tools are unaffected.
+
+Architecture notes from the audit: the service-per-concern layout, the `missionStore` chokepoint, and
+the confirmation gate all held up. The recurring weakness was state machines with no owner - each
+service settles its own statuses, which is where nearly every race and stuck-`running` bug lived, and
+why startup repair had to be added five separate times. A shared transition helper would be the
+next structural improvement, alongside the route-level tests still missing (POLISH.md D1).
+
+## UI cleanup (2026-11-05)
+
+A usability audit of the running app, then a removal pass. The app had grown a feature per request,
+so the same job was often offered several ways. Every removal below was checked against what the
+backend and other views actually depend on. No mission data is affected.
+
+### The big reversal: one current mission
+
+Every view had its own `MissionPanel` and its own selection, so you re-picked the mission on all seven
+pages. The earlier "deliberate, repeated pattern" note argued against a global selector, but it was
+written before anyone counted the clicks, and nothing depended on views differing from each other.
+`App.tsx` now owns the selection (`useSelectedMission`, derived against the live list so a deleted
+mission falls through to the next one) and passes `mission` down. `MissionSwitcher` in the sidebar is
+the only picker. It locks only while the Factory is advancing; the old lock during a running or
+approval-waiting work order is gone, because a work order runs server-side and survives a switch.
+
+`MissionEditor` now also creates (scope can be set up front, since nothing runs without it - sent as
+one POST so a failure can't leave a half-made mission) and deletes (two-step).
+
+### Removed
+
+| What | Why |
+| --- | --- |
+| Missions page, `MissionPanel` | Picker duplicate; its timeline moved to Factory's Activity ("Show all") |
+| Sidebar agent list (`AgentList`) | Duplicate of the Agents page; its config-warning detail moved there |
+| Search box, Cmd+K `CommandPalette` | Looked like search, only navigated between seven visible links |
+| Findings Graph (`FindingsGraphView`, `graphLayout`, d3 deps, `GET .../findings/graph`, `buildFindingsGraph`) | Target-string heuristic that added nothing to the table, for four dependencies and a backend path |
+| Findings Timeline and Evidence tabs | Same data as the table; evidence is in the finding drawer |
+| 5 of 8 finding filters, plus 3 evidence filters | Tool/target/tag/agent/confidence overlap with search. Status filter added, which was missing |
+| Execution bookmarks (`useBookmarks`) | Browser-local only, and search covers it |
+| Tool "last run"/"never run" pill | Mostly "never run" noise; History answers this |
+| Mission start date field | Stored, never read |
+| Work order priority and related counts | The Director doesn't let anyone act on them |
+| 7 stat tiles down to 4, the 8-segment bar, the 10-stage pipeline | Three displays of one status. The 10 stages claimed more than the 6 statuses the Director tracks, and repeated "work order failed" on two of them |
+| Duplicate page headings, manual refresh buttons, `AppShell.rightPanel`, dead `TopBar` props, logo home button | Clutter |
+
+The agent reload button stays: it's the only way to pick up a direct edit to `data/agents/*.json`.
+
+### Fixed
+
+- **Stale pages.** Views stay mounted across nav switches and only fetched once, so Work Orders could
+  show "waiting approval" after you approved on Factory. `useRefreshOnActivate` re-fetches when a view
+  is shown again, which is what made the refresh buttons removable.
+- **Failed work orders were invisible** once the activity feed scrolled past them. Factory now has a
+  banner linking to Work Orders.
+- **Findings said "no findings match the current filters"** on a mission with no findings at all.
+- **Phone layout.** The 280px sidebar left 95px of a 375px screen. It now stacks above the content,
+  with the nav scrolling sideways.
+- **Tools page.** Scans were hidden at the bottom of a long page; the page is now four tabs, kept
+  mounted so a scan keeps streaming while another is open.
+- **Notes vs Description** read as the same field. The form now says that agents get Description and
+  never Notes (checked: nothing in the backend reads `mission.notes` into a prompt).
+
+### Verified
+
+Backend and frontend typecheck, lint, tests, and builds. In the browser, at desktop and 375px: every
+page and Tools tab, create with scope, selection surviving a reload, switching carrying across pages,
+two-step delete falling through to the next mission, all API calls 200. Advance, approval, and report
+generation were not re-run live here (the handlers were kept as they were, with unit tests); neither
+was a mission with real findings, so the filter bar and report bar were only exercised by tests.

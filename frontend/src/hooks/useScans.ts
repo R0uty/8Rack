@@ -26,6 +26,13 @@ export function useScans(missionId: string | null) {
   const [error, setError] = useState<string | null>(null);
   const nextStepIndexRef = useRef(0);
 
+  /** Guard against a stale previous-mission response landing after a quick mission switch - see
+   * useTools.ts's identical ref for the pattern and why it matters. */
+  const missionIdRef = useRef(missionId);
+  useEffect(() => {
+    missionIdRef.current = missionId;
+  }, [missionId]);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -34,12 +41,14 @@ export function useScans(missionId: string | null) {
         fetchScanProfiles(),
         missionId ? fetchScans(missionId) : Promise.resolve([]),
       ]);
+      if (missionIdRef.current !== missionId) return;
       setProfiles(profileList);
       setScans(scanList);
     } catch (err) {
+      if (missionIdRef.current !== missionId) return;
       setError(err instanceof Error ? err.message : "Failed to load scanners");
     } finally {
-      setLoading(false);
+      if (missionIdRef.current === missionId) setLoading(false);
     }
   }, [missionId]);
 
@@ -80,11 +89,13 @@ export function useScans(missionId: string | null) {
     try {
       const finished = await createScan(missionId, profile.id, target, (event) => {
         if (event.type === "scan") {
+          if (missionIdRef.current !== missionId) return;
           setRun(event.scan);
           nextStepIndexRef.current = 0;
           return;
         }
         if (event.type === "step") {
+          if (missionIdRef.current !== missionId) return;
           if (event.step.status === "running") setLiveOutput([]);
           const idx = nextStepIndexRef.current;
           setRun((prev) => {
@@ -97,8 +108,10 @@ export function useScans(missionId: string | null) {
           if (event.step.status !== "running") nextStepIndexRef.current += 1;
           return;
         }
-        setLiveOutput((prev) => [...prev, { stream: event.stream, data: event.data }]);
+        if (missionIdRef.current === missionId)
+          setLiveOutput((prev) => [...prev, { stream: event.stream, data: event.data }]);
       });
+      if (missionIdRef.current !== missionId) return;
       setRun(finished);
       setScans((prev) => [finished, ...prev.filter((s) => s.id !== finished.id)]);
     } catch (err) {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useActivity } from "./useActivity";
 import { fetchActivity } from "../services/activityApi";
 import type { MissionEvent } from "../types/missionEvent";
@@ -53,5 +53,27 @@ describe("useActivity", () => {
 
     rerender({ missionId: "proj-2" });
     await waitFor(() => expect(mockFetchActivity).toHaveBeenLastCalledWith("proj-2"));
+  });
+
+  it("ignores a stale previous-mission response that resolves after a mission switch", async () => {
+    let resolveOld!: (events: MissionEvent[]) => void;
+    mockFetchActivity.mockImplementation((id: string) =>
+      id === "proj-1" ? new Promise<MissionEvent[]>((r) => { resolveOld = r; }) : Promise.resolve([]),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useActivity(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(mockFetchActivity).toHaveBeenCalledWith("proj-1"));
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchActivity).toHaveBeenLastCalledWith("proj-2"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      resolveOld([{ ...fixtureEvent, id: "stale-event" }]);
+    });
+
+    expect(result.current.events).toEqual([]);
   });
 });

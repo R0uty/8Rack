@@ -71,16 +71,18 @@ backend/src/
 │                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports
 ├── services/           the real logic - see the list below
 ├── middleware/         errorHandler.ts - maps every domain Error subclass (services/errors.ts) to
-│                       an HTTP status + JSON body; every route's catch/next(err) funnels here
+│                       an HTTP status + JSON body; every route's catch/next(err) funnels here.
+│                       hostCheck/originCheck block DNS rebinding and cross-site POSTs (no auth on
+│                       this app); requireMission 404s writes to a mission that doesn't exist
 ├── types/              domain types - Agent, OllamaModel, ChatRequest/ChatResponseChunk, ExecTool,
 │                       Finding, Mission, Asset, WorkOrder, MissionEvent, ScanProfile/ScanRun,
-│                       Report, RagSearchResult, plus the two extension-point types that are still
-│                       genuinely unbuilt (tool.ts, plugin.ts - see "Later" in TODO.md)
+│                       Report, RagSearchResult, plus the one extension-point type that is still
+│                       genuinely unbuilt (tool.ts - see "Later" in TODO.md)
 ├── extensions/         toolRegistry.ts (wired into the native Ollama tool-calling path, but zero
 │                       tools registered - see "Two tool-calling mechanisms" below) and
 │                       scannerRegistry.ts (real - holds the built-in Scan Profiles) are live;
-│                       retrievalRegistry.ts/pluginRegistry.ts are confirmed dead code (audited, no
-│                       importers anywhere) kept around for the still-unbuilt Plugin system
+│                       the still-unbuilt Plugin system's retrievalRegistry.ts/pluginRegistry.ts/
+│                       types/plugin.ts were deleted (commit a65fb26) rather than kept around dead
 ├── tools/exec/builtins.ts   the ~20 built-in ExecTools (nmap, ffuf, nuclei, httpx, bash, python,
 │                       filesystem ops, ...) - every one requires human confirmation before running
 ├── scanners/builtins.ts     the 4 built-in Scan Profiles (fixed chains of ExecTool steps - Quick
@@ -100,9 +102,9 @@ Key files under `backend/src/services/`:
 | `missionManager.ts` / `missionStore.ts` | The mission-scoping primitive everything else below is keyed on - see "Missions" below |
 | `assetManager.ts` | The Asset Inventory - a real, deduplicated store (`upsertAsset`) of everything discovered about a mission, with a parent/child relationship tree |
 | `workOrderManager.ts` | Security Work Orders - a trackable unit of agent work backed 1:1 by a real `OrchestratorTask` |
-| `factoryDirector.ts` | The Factory Director - reads a mission's scope/assets/findings/work orders and deterministically seeds/starts Work Orders, auto-chaining through everything that doesn't need human approval. Request-driven (`POST /api/missions/:id/factory/advance`), not a background timer |
+| `factoryDirector.ts` | The Factory Director - reads a mission's scope/assets/findings/work orders and deterministically seeds/starts Work Orders, auto-chaining through everything that doesn't need human approval. Also resumes paused orders whose execution a human has settled. Request-driven (`POST /api/missions/:id/factory/advance`), not a background timer |
 | `activityLog.ts` | The Mission Activity Timeline - an explicit, named-event append-only log (`logActivity`), not derived from executions/tasks |
-| `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated, graph-correlated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
+| `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `ragIndex.ts` | The knowledge-base indexer/search over `WORKSPACE_ROOT` |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
 | `reportManager.ts` | Report generation - one Report Writer agent call over a set of selected findings, tracked through a `status` field (`draft/ai_generated/human_review/ready/submitted`) |
@@ -120,21 +122,22 @@ backend/data/
 ```
 frontend/src/
 ├── components/         One top-level component per nav view - FactoryDashboard (+FactoryPipeline/
-│                        ApprovalQueue), MissionsView, AssetsView, WorkOrdersView, FindingsView
-│                        (+FindingDetails/FindingsTable/FindingsTimeline/FindingsGraphView, and an
-│                        Evidence tab alongside Table/Timeline/Graph), ReportsView, AgentsView,
-│                        ToolsView (+ToolRegistry/ExecutionHistoryPanel/ExecutionConsole/
-│                        ScannerPanel). components/layout/ (AppShell, Sidebar, TopBar,
-│                        CommandPalette) and components/ui/ (GlassPanel, Button, Sheet, StatusPill,
-│                        ...) are the shared primitives every view is built from. There is no Chat/
+│                        ApprovalQueue), AssetsView, WorkOrdersView, FindingsView (+FindingDetails/
+│                        FindingsTable), ReportsView, AgentsView, ToolsView (tabs: ScannerPanel/
+│                        ExecutionHistoryPanel/ToolRegistry/KnowledgeBasePanel). MissionSwitcher +
+│                        MissionEditor are the only mission picker/editor. components/layout/
+│                        (AppShell, Sidebar, TopBar) and components/ui/ (GlassPanel, Button, Sheet,
+│                        StatusPill, ...) are the shared primitives every view is built from. See
+│                        "UI cleanup" in DEVELOPMENT.md for what was cut and why. There is no Chat/
 │                        Workbench/Plans surface any more - see "Nav simplification" in
 │                        DEVELOPMENT.md for why (Work Orders replaced Workbench's freestanding
 │                        agent-run-a-tool UI, the Factory Director replaced hand-authored Plans,
 │                        and plain no-mission Chat never fit the mission model).
 ├── hooks/               One hook per domain - useModels, useAgents, useTools, useMissions,
 │                        useAssets, useWorkOrders, useFindings, useScans, useReports, useActivity,
-│                        useRag, useSettings, useTheme, useBookmarks - each owns its own
-│                        fetching/state; App.tsx composes them.
+│                        useRag, useTheme - each owns its own fetching/state; App.tsx composes
+│                        them. Plus useSelectedMission (the one current mission, in localStorage)
+│                        and useRefreshOnActivate (re-fetch when a kept-mounted view is shown again).
 ├── services/            One `*Api.ts` file per domain, all built on `services/httpClient.ts`
 │                        (`apiFetch`/`readNdjsonStream`/`throwForErrorResponse` - the shared
 │                        NDJSON-stream-reading and error-unwrapping logic every domain reuses).
@@ -172,9 +175,8 @@ caches the loaded list after first read, it is not re-read fresh on every reques
 `Agent.tools?: string[]` (native Ollama tool-calling) and `Agent.execTools?: string[]` (an
 allowlist into the Tool Execution Framework's ExecTools, enforced in `orchestrator.ts` both in the
 tools preamble shown to the model and again at request time) are both real and read - see "Two
-tool-calling mechanisms" below for why there are two separate fields. Clicking an agent (sidebar
-row or the Cmd/Ctrl+K command palette) opens its editor - there is no chat-session concept any more
-for an agent selection to open instead.
+tool-calling mechanisms" below for why there are two separate fields. Agents are created and edited from
+the Agents view - there is no chat-session concept any more for an agent selection to open instead.
 
 ### Two tool-calling mechanisms - don't conflate them
 
@@ -210,18 +212,18 @@ UUID-shaped before ever building a path (the fix for a real path-traversal findi
 the fix and its reasoning are unchanged) - if you add a new mission-scoped store, route it through
 `readMissionJson`/`writeMissionJson`, not a hand-rolled path.
 
-Every mission-scoped frontend view (FactoryDashboard, MissionsView, AssetsView, WorkOrdersView,
-FindingsView, ReportsView, ToolsView) keeps its own `MissionPanel`-driven mission selection rather
-than a shared global "current mission" in `App.tsx` - a deliberate, repeated pattern (confirmed
-during the Nav simplification pass to still be the right call, not accidentally load-bearing
-leftover complexity) rather than something to "fix" into a single global selector.
+There is one current mission, owned by `App.tsx` (`useSelectedMission`, remembered in `localStorage`)
+and picked in the sidebar's `MissionSwitcher`; every mission-scoped view receives it as a `mission`
+prop. This reverses the earlier per-view `MissionPanel` pattern - see "UI cleanup" in
+`DEVELOPMENT.md` for why. The switcher locks while the Factory is advancing, since that view's live
+output belongs to the selected mission.
 
 ### Settings
 
 `SettingsPanel.tsx` (temperature/top_p/max tokens/context size/keep-alive, persisted in
-`localStorage` via `useSettings.ts`) previously configured manual (no-agent) Chat requests. Now
-that Chat has been removed (see "Nav simplification" in DEVELOPMENT.md), nothing in the app actually
-reads these values any more - every agent's own sampling settings come from its own
-`backend/data/agents/*.json` config instead. The panel is currently orphaned UI, not wired to
-anything; flagged in `TODO.md` rather than removed outright, since removing it is a separate
-decision from the nav cleanup that produced this state.
+`localStorage` via `useSettings.ts`) previously configured manual (no-agent) Chat requests. Once
+Chat was removed (see "Nav simplification" in DEVELOPMENT.md), nothing in the app read those values
+any more - every agent's own sampling settings come from its own `backend/data/agents/*.json`
+config. **Removed outright (POLISH.md Phase B, 2026-09-20)** - `SettingsPanel.tsx`,
+`useSettings.ts`, `types/settings.ts`, the App wiring, the TopBar gear button, and the Command
+Palette's settings command. There is no settings surface any more.

@@ -1,74 +1,65 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity as ActivityIcon, Play } from "lucide-react";
-import { MissionPanel } from "./MissionPanel";
+import { FileText, Play } from "lucide-react";
 import { FactoryPipeline } from "./FactoryPipeline";
 import { ApprovalQueue } from "./ApprovalQueue";
 import { ActivityFeed } from "./ActivityFeed";
-import { Button, GlassPanel, SectionHeading, StreamingCursor } from "./ui";
-import { useMissions } from "../hooks/useMissions";
+import { NoMission } from "./NoMission";
+import { Button, FOCUS_RING, GlassPanel, SectionHeading, StreamingCursor } from "./ui";
+import type { AppView } from "./layout";
 import { useAssets } from "../hooks/useAssets";
 import { useWorkOrders } from "../hooks/useWorkOrders";
 import { useFindings } from "../hooks/useFindings";
 import { useTools } from "../hooks/useTools";
 import { useActivity } from "../hooks/useActivity";
+import { useReports } from "../hooks/useReports";
+import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
 import { advanceFactory } from "../services/factoryApi";
 import type { AgentWithStatus } from "../types/agent";
 import type { Mission } from "../types/mission";
 
 interface FactoryDashboardProps {
   agents: AgentWithStatus[];
+  mission: Mission | null;
+  active?: boolean;
+  onMissionsChanged?: () => void;
+  onAdvancingChange?: (advancing: boolean) => void;
+  onOpenView?: (view: AppView) => void;
 }
 
-const STAGE_ORDER: Mission["status"][] = [
-  "draft",
-  "ready",
-  "recon",
-  "investigating",
-  "validating",
-  "reporting",
-  "review",
-  "completed",
-];
+const RECENT_ACTIVITY = 8;
 
-function StatTile({ label, value, tone }: { label: string; value: number; tone?: "critical" | "warning" }) {
+function StatTile({ label, value, onClick }: { label: string; value: number; onClick?: () => void }) {
   return (
-    <GlassPanel padding="md" className="flex flex-col gap-0.5">
-      <span className="text-xl font-semibold text-text" data-tone={tone}>
-        {value}
-      </span>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex flex-col gap-0.5 rounded-panel border border-border bg-card/60 p-3 text-left transition-colors hover:border-border-strong ${FOCUS_RING}`}
+    >
+      <span className="text-xl font-semibold text-text">{value}</span>
       <span className="text-[11px] text-muted">{label}</span>
-    </GlassPanel>
+    </button>
   );
 }
 
 /**
- * The Factory Dashboard - default landing view. Mission-scoped stat tiles, the visual pipeline
- * (FactoryPipeline), a "Start Factory" control that advances the FactoryDirector one step
- * (streamed, auto-chains until something needs approval), the Approval Queue, and a recent-activity
- * strip. Every stat is derived from hooks other views already use (useAssets/useWorkOrders/
- * useFindings/useTools/useActivity) - no new aggregation endpoint.
+ * The default landing view, in the order a human needs it: run the mission, decide what's waiting on
+ * you, see where things stand, then what happened. Every number comes from hooks other views already
+ * use - no aggregation endpoint.
  */
-export function FactoryDashboard({ agents }: FactoryDashboardProps) {
-  const {
-    missions,
-    loading: missionsLoading,
-    error: missionsError,
-    refresh: refreshMissions,
-    create: createMission,
-    update: updateMission,
-    remove: removeMission,
-  } = useMissions();
-  const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
-  const { assets, refresh: refreshAssets } = useAssets(selectedMissionId);
-  const { workOrders, refresh: refreshWorkOrders } = useWorkOrders(selectedMissionId);
-  const { findings, refresh: refreshFindings } = useFindings(selectedMissionId);
-  const { executions, refresh: refreshTools } = useTools(selectedMissionId);
-  const { events, loading: activityLoading, error: activityError, refresh: refreshActivity } = useActivity(selectedMissionId);
+export function FactoryDashboard({ agents, mission, active = true, onMissionsChanged, onAdvancingChange, onOpenView }: FactoryDashboardProps) {
+  const missionId = mission?.id ?? null;
+  const { assets, refresh: refreshAssets } = useAssets(missionId);
+  const { workOrders, refresh: refreshWorkOrders } = useWorkOrders(missionId);
+  const { findings, refresh: refreshFindings } = useFindings(missionId);
+  const { executions, refresh: refreshTools } = useTools(missionId);
+  const { events, loading: activityLoading, error: activityError, refresh: refreshActivity } = useActivity(missionId);
+  const { reports, generating, error: reportsError, refresh: refreshReports, generate: generateReport } = useReports(missionId);
 
   const [advancing, setAdvancing] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [advanceError, setAdvanceError] = useState<string | null>(null);
   const [blockedReason, setBlockedReason] = useState<string | null>(null);
+  const [showAllActivity, setShowAllActivity] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -76,30 +67,29 @@ export function FactoryDashboard({ agents }: FactoryDashboardProps) {
   }, []);
 
   useEffect(() => {
-    if (selectedMissionId && !missionsLoading && !missions.some((m) => m.id === selectedMissionId)) {
-      setSelectedMissionId(null);
-    }
-  }, [missions, missionsLoading, selectedMissionId]);
+    onAdvancingChange?.(advancing);
+  }, [advancing, onAdvancingChange]);
 
-  const selectedMission = missions.find((m) => m.id === selectedMissionId) ?? null;
-
-  const handleSelectMission = (mission: Mission) => {
-    setSelectedMissionId((current) => (current === mission.id ? null : mission.id));
+  useEffect(() => {
     setBlockedReason(null);
     setAdvanceError(null);
-  };
+    setShowAllActivity(false);
+  }, [missionId]);
 
   const refreshAll = () => {
-    refreshMissions();
+    onMissionsChanged?.();
     refreshAssets();
     refreshWorkOrders();
     refreshFindings();
     refreshTools();
     refreshActivity();
+    refreshReports();
   };
 
+  useRefreshOnActivate(active, refreshAll);
+
   const handleAdvance = async () => {
-    if (!selectedMissionId || advancing) return;
+    if (!missionId || advancing) return;
     setAdvancing(true);
     setAdvanceError(null);
     setBlockedReason(null);
@@ -107,111 +97,120 @@ export function FactoryDashboard({ agents }: FactoryDashboardProps) {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const result = await advanceFactory(
-        selectedMissionId,
-        (chunk) => setStreamingText((prev) => prev + chunk),
-        controller.signal,
-      );
+      const result = await advanceFactory(missionId, (chunk) => setStreamingText((prev) => prev + chunk), controller.signal);
       setBlockedReason(result.blockedReason ?? null);
       refreshAll();
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
         setAdvanceError(err instanceof Error ? err.message : "Factory advance failed");
+        refreshAll(); // a chain can fail partway, after settling earlier work orders
       }
     } finally {
       setAdvancing(false);
     }
   };
 
-  const runningWorkOrders = workOrders.filter((w) => w.status === "running").length;
+  // A human decision is what the paused work order was waiting on, so that's what picks it back up -
+  // anything further the agent wants to run still stops at this same queue.
+  const handleApprovalSettled = () => {
+    refreshAll();
+    void handleAdvance();
+  };
+
+  if (!mission) return <NoMission />;
+
   const activeWorkOrders = workOrders.filter((w) => w.status === "running" || w.status === "waiting_approval" || w.status === "queued").length;
+  const failedWorkOrders = workOrders.filter((w) => w.status === "failed").length;
   const potentialFindings = findings.filter((f) => f.status === "potential" || f.status === "investigating").length;
-  const confirmedFindings = findings.filter((f) => f.status === "confirmed").length;
-  const criticalHighFindings = findings.filter((f) => f.severity === "critical" || f.severity === "high").length;
-  const pendingApprovals = executions.filter((e) => e.status === "pending_confirmation").length;
-  const stageIndex = selectedMission?.status ? STAGE_ORDER.indexOf(selectedMission.status) : -1;
+  const reportableIds = findings.filter((f) => f.status === "confirmed").map((f) => f.id);
+
+  // The Director settles a fully-worked mission at `reporting` and then stops (report generation
+  // stays an explicit human act) - so a mission sitting at reporting with confirmed findings but no
+  // report yet is the moment to nudge.
+  const showReportNudge = mission.status === "reporting" && reportableIds.length > 0 && reports.length === 0;
+
+  const handleGenerateReport = async () => {
+    if (reportableIds.length === 0 || generating) return;
+    await generateReport(`${mission.name} Report`, reportableIds);
+    refreshReports();
+  };
 
   return (
     <div className="flex flex-col gap-4">
-      <MissionPanel
-        missions={missions}
-        loading={missionsLoading}
-        error={missionsError}
-        selectedMissionId={selectedMissionId}
-        onSelect={handleSelectMission}
-        onCreate={createMission}
-        onUpdate={updateMission}
-        onDelete={removeMission}
-        onRefresh={refreshMissions}
-      />
-
-      {!selectedMission && <p className="text-xs text-muted">Select or create a mission above to open its factory dashboard.</p>}
-
-      {selectedMission && (
-        <>
-          <GlassPanel padding="md" className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-text">{selectedMission.name}</span>
-                <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-muted">
-                  {selectedMission.status ?? "draft"}
-                </span>
-              </div>
-              {stageIndex >= 0 && (
-                <div className="mt-2 flex gap-0.5">
-                  {STAGE_ORDER.map((s, i) => (
-                    <span
-                      key={s}
-                      className={`h-1.5 flex-1 rounded-full ${i <= stageIndex ? "bg-primary" : "bg-surface-2"}`}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-            <Button variant="primary" icon={Play} onClick={handleAdvance} disabled={advancing}>
-              {advancing ? "Running…" : "Start / Advance Factory"}
-            </Button>
-          </GlassPanel>
-
-          {!selectedMission.scope?.length && (
-            <p className="rounded-lg border border-warning/30 bg-warning-dim px-2.5 py-2 text-xs text-warning">
-              This mission has no scope configured — the Director won't start Recon until at least
-              one in-scope target is set. Edit the mission (pencil icon above) to add one.
-            </p>
-          )}
-          {blockedReason && (
-            <p className="rounded-lg border border-warning/30 bg-warning-dim px-2.5 py-2 text-xs text-warning">
-              {blockedReason}
-            </p>
-          )}
-          {advanceError && <p className="text-xs text-critical">{advanceError}</p>}
-          {advancing && streamingText && (
-            <GlassPanel padding="md" className="max-h-40 overflow-y-auto font-mono text-xs text-muted">
-              {streamingText}
-              <StreamingCursor />
-            </GlassPanel>
-          )}
-
-          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-7">
-            <StatTile label="Assets" value={assets.length} />
-            <StatTile label="Work orders" value={activeWorkOrders} />
-            <StatTile label="Running agents" value={runningWorkOrders} />
-            <StatTile label="Potential findings" value={potentialFindings} />
-            <StatTile label="Confirmed findings" value={confirmedFindings} />
-            <StatTile label="Critical / High" value={criticalHighFindings} tone="critical" />
-            <StatTile label="Pending approvals" value={pendingApprovals} tone="warning" />
+      <GlassPanel padding="md" className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-text">{mission.name}</p>
+            {mission.scope?.length ? (
+              <p className="truncate font-mono text-xs text-muted">{mission.scope.join(", ")}</p>
+            ) : (
+              <p className="text-xs text-warning">No scope set - add a target before recon can start.</p>
+            )}
           </div>
+          <Button variant="primary" icon={Play} onClick={handleAdvance} disabled={advancing}>
+            {advancing ? "Running…" : "Advance factory"}
+          </Button>
+        </div>
+        <FactoryPipeline mission={mission} />
+        {advancing && streamingText && (
+          <div className="max-h-40 overflow-y-auto font-mono text-xs text-muted">
+            {streamingText}
+            <StreamingCursor />
+          </div>
+        )}
+      </GlassPanel>
 
-          <FactoryPipeline mission={selectedMission} workOrders={workOrders} findings={findings} />
-
-          <ApprovalQueue missionName={selectedMission.name} executions={executions} agents={agents} onSettled={refreshAll} />
-
-          <section>
-            <SectionHeading actions={<ActivityIcon size={14} className="text-muted" />}>Recent Activity</SectionHeading>
-            <ActivityFeed events={events.slice(0, 8)} loading={activityLoading} error={activityError} />
-          </section>
-        </>
+      {blockedReason && (
+        <p className="rounded-lg border border-warning/30 bg-warning-dim px-2.5 py-2 text-xs text-warning">{blockedReason}</p>
       )}
+      {advanceError && <p className="text-xs text-critical">{advanceError}</p>}
+      {reportsError && <p className="text-xs text-critical">{reportsError}</p>}
+      {failedWorkOrders > 0 && !blockedReason && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-critical/30 px-2.5 py-2 text-xs text-critical">
+          {failedWorkOrders} work order{failedWorkOrders === 1 ? "" : "s"} failed.
+          <Button variant="secondary" size="sm" onClick={() => onOpenView?.("workorders")}>
+            View
+          </Button>
+        </div>
+      )}
+      {showReportNudge && (
+        <GlassPanel padding="md" className="flex flex-wrap items-center justify-between gap-3">
+          <span className="text-xs text-muted">
+            Ready for a report from {reportableIds.length} confirmed finding{reportableIds.length === 1 ? "" : "s"}.
+          </span>
+          <Button variant="primary" size="sm" icon={FileText} onClick={handleGenerateReport} disabled={generating}>
+            {generating ? "Generating…" : "Generate report now"}
+          </Button>
+        </GlassPanel>
+      )}
+
+      <ApprovalQueue missionName={mission.name} executions={executions} agents={agents} onSettled={handleApprovalSettled} />
+
+      <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+        <StatTile label="Active work orders" value={activeWorkOrders} onClick={() => onOpenView?.("workorders")} />
+        <StatTile label="Assets" value={assets.length} onClick={() => onOpenView?.("assets")} />
+        <StatTile label="Findings to review" value={potentialFindings} onClick={() => onOpenView?.("findings")} />
+        <StatTile label="Confirmed findings" value={reportableIds.length} onClick={() => onOpenView?.("findings")} />
+      </div>
+
+      <section>
+        <SectionHeading
+          actions={
+            events.length > RECENT_ACTIVITY ? (
+              <Button variant="ghost" size="sm" onClick={() => setShowAllActivity((s) => !s)}>
+                {showAllActivity ? "Show recent" : `Show all (${events.length})`}
+              </Button>
+            ) : undefined
+          }
+        >
+          Activity
+        </SectionHeading>
+        <ActivityFeed
+          events={showAllActivity ? events : events.slice(0, RECENT_ACTIVITY)}
+          loading={activityLoading}
+          error={activityError}
+        />
+      </section>
     </div>
   );
 }

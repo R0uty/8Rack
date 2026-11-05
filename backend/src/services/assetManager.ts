@@ -37,7 +37,10 @@ export async function loadAssetsFromDisk(): Promise<void> {
 
 function findExisting(missionId: string, type: Asset["type"], value: string): Asset | undefined {
   const key = value.toLowerCase();
-  return missionAssets(missionId).find((a) => a.type === type && a.value.toLowerCase() === key);
+  for (const a of assets.values()) {
+    if (a.missionId === missionId && a.type === type && a.value.toLowerCase() === key) return a;
+  }
+  return undefined;
 }
 
 /** Case-insensitive lookup by raw value across every asset type for a mission - used to resolve a

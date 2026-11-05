@@ -92,22 +92,3 @@ export type FindingPatchInput = Partial<
     | "validatedBy"
   >
 >;
-
-export interface FindingsGraphNode {
-  id: string;
-  type: FindingType | "target" | "tool";
-  label: string;
-}
-
-export type FindingsGraphRelation = "runs_on" | "discovered_by" | "uses" | "contains" | "connected_to" | "related_to";
-
-export interface FindingsGraphEdge {
-  source: string;
-  target: string;
-  relation: FindingsGraphRelation;
-}
-
-export interface FindingsGraph {
-  nodes: FindingsGraphNode[];
-  edges: FindingsGraphEdge[];
-}

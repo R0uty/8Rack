@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { registerScanProfile } from "../extensions/scannerRegistry.js";
 import { registerExecTool } from "./toolManager.js";
-import { cancelScanRun, createScanRun, getScan, listScans, previewScan } from "./scanRunner.js";
+import { cancelScanRun, createScanRun, getScan, listScans, loadScansFromDisk, previewScan } from "./scanRunner.js";
+import { listMissionIds, readMissionJson } from "./missionStore.js";
 import {
   InvalidScanStateError,
   InvalidScanTargetError,
@@ -174,5 +175,30 @@ describe("listScans / getScan", () => {
     expect(listScans("proj-list-b")).toHaveLength(1);
     expect(getScan(runB.id)?.missionId).toBe("proj-list-b");
     expect(getScan("nope")).toBeUndefined();
+  });
+});
+
+describe("loadScansFromDisk", () => {
+  it("settles a scan left running by a previous process", async () => {
+    vi.mocked(listMissionIds).mockResolvedValueOnce(["proj-scan-hydrate"]);
+    vi.mocked(readMissionJson).mockResolvedValueOnce([
+      {
+        id: "scan-hydrate",
+        missionId: "proj-scan-hydrate",
+        status: "running",
+        steps: [
+          { toolId: "a", status: "completed" },
+          { toolId: "b", status: "running" },
+          { toolId: "c", status: "pending" },
+        ],
+      },
+    ]);
+
+    await loadScansFromDisk();
+
+    const run = getScan("scan-hydrate");
+    expect(run?.status).toBe("cancelled");
+    expect(run?.finishedAt).toBeTruthy();
+    expect(run?.steps.map((s) => s.status)).toEqual(["completed", "skipped", "skipped"]);
   });
 });

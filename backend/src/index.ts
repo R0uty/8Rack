@@ -17,8 +17,12 @@ import { missionAssetsRouter } from "./routes/assets.js";
 import { missionWorkOrdersRouter } from "./routes/workOrders.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { hostCheck } from "./middleware/hostCheck.js";
+import { originCheck } from "./middleware/originCheck.js";
+import { requireMission } from "./middleware/requireMission.js";
+import { securityHeaders } from "./middleware/securityHeaders.js";
 import { loadAgents } from "./services/agentManager.js";
 import {
+  abortAllExecutions,
   listExecToolsWithStatus,
   loadExecutionsFromDisk,
   loadToolOverridesFromDisk,
@@ -44,8 +48,16 @@ for (const profile of builtinScanProfiles) registerScanProfile(profile);
 const app = express();
 
 app.use(hostCheck);
+app.use(securityHeaders);
+app.use(originCheck);
 app.use(cors({ origin: env.corsOrigin }));
 app.use(express.json());
+// Express 5 leaves req.body undefined when nothing was parsed - every route's validation expects an
+// object, and a bodyless POST should get its 400, not a TypeError's 500.
+app.use((req, _res, next) => {
+  req.body ??= {};
+  next();
+});
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -54,22 +66,32 @@ app.get("/health", (_req, res) => {
 app.use("/api/models", modelsRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/agents", agentsRouter);
+app.use("/api/tools/request", requireMission);
 app.use("/api/tools", toolsRouter);
+app.use("/api/orchestrator/tasks", (req, res, next) => (req.path === "/" ? requireMission(req, res, next) : next()));
 app.use("/api/orchestrator", orchestratorRouter);
 app.use("/api/missions", missionsRouter);
-app.use("/api/missions/:missionId/findings", missionFindingsRouter);
+app.use("/api/missions/:missionId/findings", requireMission, missionFindingsRouter);
 app.use("/api/findings", findingsRouter);
+app.use("/api/plans", (req, res, next) => (req.path === "/" ? requireMission(req, res, next) : next()));
 app.use("/api/plans", plansRouter);
 app.use("/api/rag", ragRouter);
 app.use("/api/scanners", scannersRouter);
-app.use("/api/missions/:missionId/scans", missionScansRouter);
-app.use("/api/missions/:missionId/reports", missionReportsRouter);
+app.use("/api/missions/:missionId/scans", requireMission, missionScansRouter);
+app.use("/api/missions/:missionId/reports", requireMission, missionReportsRouter);
 app.use("/api/missions/:missionId/assets", missionAssetsRouter);
-app.use("/api/missions/:missionId/workorders", missionWorkOrdersRouter);
+app.use("/api/missions/:missionId/workorders", requireMission, missionWorkOrdersRouter);
 
 app.use(errorHandler);
 
-app.listen(env.port, env.host, async () => {
+const server = app.listen(env.port, env.host, async (listenError?: Error) => {
+  // Express 5 calls this on a failed bind too (e.g. EADDRINUSE) - carrying on would announce a server
+  // that isn't listening, hydrate it, and exit silently once there's nothing left to do.
+  if (listenError) {
+    console.error(`Could not listen on ${env.host}:${env.port}:`, listenError.message);
+    process.exit(1);
+  }
+
   console.log(`Backend listening on http://${env.host}:${env.port}`);
 
   // The server is already accepting connections by the time this runs - none of the routes above
@@ -123,3 +145,19 @@ app.listen(env.port, env.host, async () => {
     );
   }
 });
+
+// Tools run in their own process groups (see toolExecutor.ts), so a signal to this process doesn't
+// reach them - without this, every restart (tsx watch included) leaves running scans behind as
+// orphans. Second signal, or a shutdown that hangs on an open stream, exits regardless.
+let shuttingDown = false;
+function shutdown(signal: NodeJS.Signals) {
+  if (shuttingDown) process.exit(1);
+  shuttingDown = true;
+  console.log(`${signal} received - stopping running tools and shutting down`);
+  abortAllExecutions();
+  server.close(() => process.exit(0));
+  server.closeAllConnections();
+  setTimeout(() => process.exit(0), 1000).unref();
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

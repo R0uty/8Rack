@@ -8,16 +8,16 @@ interface SheetProps {
   onClose: () => void;
   title: string;
   children: ReactNode;
-  /** Tailwind max-width class for the panel - defaults to the original SettingsPanel width. */
+  /** Tailwind max-width class for the panel. */
   width?: string;
 }
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-/** Right-docked glass panel over a backdrop - replaces SettingsPanel's bespoke modal markup.
- * Backs 5 surfaces (SettingsPanel/AgentEditor/MissionEditor/FindingDetails/ReportsPanel), so the
- * focus management here (previously: none at all - a real accessibility gap flagged in an audit)
+/** Right-docked glass panel over a backdrop. Backs 4 surfaces (AgentEditor/MissionEditor/
+ * FindingDetails/ReportsPanel), so the focus management here (previously: none at all - a real
+ * accessibility gap flagged in an audit)
  * fixes all of them at once: focus moves into the panel on open and back to whatever opened it on
  * close, Tab is trapped inside the panel instead of reaching background content, and Escape closes
  * it like every other modal convention. */

@@ -74,6 +74,28 @@ describe("useFindings", () => {
     await waitFor(() => expect(mockFetchFindings).toHaveBeenLastCalledWith("proj-2"));
   });
 
+  it("ignores a stale previous-mission response that resolves after a mission switch", async () => {
+    let resolveOld!: (findings: Finding[]) => void;
+    mockFetchFindings.mockImplementation((id: string) =>
+      id === "proj-1" ? new Promise<Finding[]>((r) => { resolveOld = r; }) : Promise.resolve([]),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useFindings(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(mockFetchFindings).toHaveBeenCalledWith("proj-1"));
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchFindings).toHaveBeenLastCalledWith("proj-2"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      resolveOld([fixtureFinding({ id: "stale-finding" })]);
+    });
+
+    expect(result.current.findings).toEqual([]);
+  });
+
   it("surfaces a load failure", async () => {
     mockFetchFindings.mockRejectedValue(new Error("boom"));
     const { result } = renderHook(() => useFindings("proj-1"));

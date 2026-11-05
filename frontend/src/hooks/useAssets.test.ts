@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useAssets } from "./useAssets";
 import { fetchAssets } from "../services/assetsApi";
 import type { Asset } from "../types/asset";
@@ -55,5 +55,19 @@ describe("useAssets", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     rerender({ missionId: "m2" });
     await waitFor(() => expect(mockFetchAssets).toHaveBeenLastCalledWith("m2"));
+  });
+
+  it("ignores a slow response for the previous mission after switching", async () => {
+    let resolveA: (assets: Asset[]) => void = () => {};
+    mockFetchAssets.mockImplementationOnce(() => new Promise((resolve) => (resolveA = resolve)));
+    const { result, rerender } = renderHook(({ id }) => useAssets(id), { initialProps: { id: "m-a" } });
+
+    mockFetchAssets.mockResolvedValueOnce([fixtureAsset({ id: "from-b", missionId: "m-b" })]);
+    rerender({ id: "m-b" });
+    await waitFor(() => expect(result.current.assets.map((a) => a.id)).toEqual(["from-b"]));
+
+    await act(async () => resolveA([fixtureAsset({ id: "from-a", missionId: "m-a" })]));
+
+    expect(result.current.assets.map((a) => a.id)).toEqual(["from-b"]);
   });
 });

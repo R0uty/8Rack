@@ -1,4 +1,4 @@
-import type { Finding, FindingCreateInput, FindingPatchInput, FindingsGraph } from "../types/finding";
+import type { Finding, FindingCreateInput, FindingPatchInput } from "../types/finding";
 import { ApiError, apiFetch, throwForErrorResponse } from "./httpClient";
 
 async function unwrapFinding(res: Response): Promise<Finding> {
@@ -14,14 +14,6 @@ export async function fetchFindings(missionId: string): Promise<Finding[]> {
   const data = (await res.json().catch(() => null)) as { findings?: Finding[] } | null;
   if (!data?.findings) throw new ApiError("Received an invalid response from the server", 502);
   return data.findings;
-}
-
-export async function fetchFindingsGraph(missionId: string): Promise<FindingsGraph> {
-  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/findings/graph`);
-  if (!res.ok) await throwForErrorResponse(res);
-  const data = (await res.json().catch(() => null)) as { graph?: FindingsGraph } | null;
-  if (!data?.graph) throw new ApiError("Received an invalid response from the server", 502);
-  return data.graph;
 }
 
 export async function createFinding(missionId: string, input: FindingCreateInput): Promise<Finding> {

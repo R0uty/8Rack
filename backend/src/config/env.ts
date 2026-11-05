@@ -16,8 +16,21 @@ if (process.env.CORS_ORIGIN === "*") {
   );
 }
 
+/** A blank value (.env.example ships several `KEY=` lines) or a typo must fall back to the default -
+ * Number("") is 0, which would silently set e.g. the concurrency cap to "nothing can ever run". */
+function numberFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    console.warn(`[env] ignoring non-numeric ${name}="${raw}", using ${fallback}`);
+    return fallback;
+  }
+  return value;
+}
+
 const DEFAULT_HOST = "127.0.0.1";
-const port = Number(process.env.PORT ?? 3001);
+const port = numberFromEnv("PORT", 3001);
 const host = process.env.HOST ?? DEFAULT_HOST;
 
 export const env = {
@@ -55,29 +68,29 @@ export const env = {
    * and /api/embed rejects them outright. Default (nomic-embed-text) needs a manual `ollama pull`. */
   embeddingModel: process.env.EMBEDDING_MODEL ?? "nomic-embed-text",
   /** Orchestrator loop-prevention caps — see services/orchestrator.ts. */
-  maxOrchestratorToolCalls: Number(process.env.MAX_ORCHESTRATOR_TOOL_CALLS ?? 10),
-  maxOrchestratorTaskTimeMs: Number(process.env.MAX_ORCHESTRATOR_TASK_TIME_MS ?? 10 * 60 * 1000),
+  maxOrchestratorToolCalls: numberFromEnv("MAX_ORCHESTRATOR_TOOL_CALLS", 10),
+  maxOrchestratorTaskTimeMs: numberFromEnv("MAX_ORCHESTRATOR_TASK_TIME_MS", 10 * 60 * 1000),
   /** Global cap on real OS processes spawned at once via the Tool Execution Framework - shared
    * across every caller (manual requests, Orchestrator tasks, Scan Profiles), since they all funnel
    * through the same runRecord() chokepoint in services/toolManager.ts. Guards against fork/memory
    * exhaustion from many confirmed executions landing at once; not a queue - a confirm beyond the
    * cap fails fast with a clear error so the human can retry once a slot frees up. */
-  maxConcurrentExecutions: Number(process.env.MAX_CONCURRENT_EXECUTIONS ?? 5),
+  maxConcurrentExecutions: numberFromEnv("MAX_CONCURRENT_EXECUTIONS", 5),
   /** Optional NVD API key (see services/cveLookup.ts) — raises the CVE-lookup rate limit from
    * 5 req/30s to 50 req/30s. Free to request at https://nvd.nist.gov/developers/request-an-api-key.
    * Lookups work fine unauthenticated at the lower limit if this is left unset. */
   nvdApiKey: process.env.NVD_API_KEY || undefined,
   /** Bounds the one outbound internet call this app ever makes (services/cveLookup.ts) - a
    * dead-but-open connection to NVD would otherwise hang a lookup indefinitely. */
-  nvdRequestTimeoutMs: Number(process.env.NVD_REQUEST_TIMEOUT_MS ?? 15_000),
+  nvdRequestTimeoutMs: numberFromEnv("NVD_REQUEST_TIMEOUT_MS", 15_000),
   /** Bounds Ollama's quick, non-generation calls (/api/tags, /api/embed - services/ollama.ts) - a
    * wedged Ollama process (e.g. mid model-load) would otherwise hang these indefinitely. Not used
    * for /api/chat, which can legitimately run far longer than this on a large local model - see
    * ollamaChatIdleTimeoutMs below. */
-  ollamaRequestTimeoutMs: Number(process.env.OLLAMA_REQUEST_TIMEOUT_MS ?? 60_000),
+  ollamaRequestTimeoutMs: numberFromEnv("OLLAMA_REQUEST_TIMEOUT_MS", 60_000),
   /** Bounds a /api/chat stream by *inactivity*, not total duration - the timer resets on every
    * chunk received, so a large local model that's still slowly producing tokens is never killed by
    * this, only a connection that has gone genuinely silent (a wedged/dead Ollama process). Mirrors
    * the frontend's own IDLE_TIMEOUT_MS (frontend/src/hooks/useChat.ts) for the same reasoning. */
-  ollamaChatIdleTimeoutMs: Number(process.env.OLLAMA_CHAT_IDLE_TIMEOUT_MS ?? 5 * 60 * 1000),
+  ollamaChatIdleTimeoutMs: numberFromEnv("OLLAMA_CHAT_IDLE_TIMEOUT_MS", 5 * 60 * 1000),
 };

@@ -68,10 +68,9 @@ cloud storage.
   in-app viewer, and Markdown export.
 - **Knowledge base (RAG)** — index your own workspace codebase locally via an Ollama embedding
   model; agents can search it as a read-only tool.
-- **A focused, keyboard-friendly UI** — a Factory Dashboard (live stats, pipeline visualization,
-  approval queue) as the default view, dark/light theme, and a Cmd/Ctrl+K command palette. Eight
-  top-level views: Factory, Missions, Assets, Work Orders, Findings (with an Evidence tab), Reports,
-  Agents, Tools.
+- **A focused UI** — one mission picked in the sidebar, a Factory Dashboard (pipeline, approval queue,
+  live stats) as the default view, and a dark/light theme. Seven top-level views: Factory, Work Orders,
+  Assets, Findings, Reports, Agents, Tools.
 
 Everything runs through the backend — the frontend never talks to Ollama directly.
 

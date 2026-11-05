@@ -326,6 +326,34 @@ describe("writeMissionJson serializes overlapping writes to the same mission+fil
   });
 });
 
+describe("writeMissionJson durability", () => {
+  it("coalesces a burst of writes down to the newest content, and resolves every caller", async () => {
+    const original = fakeFs.writeFile.bind(fakeFs);
+    const written: string[] = [];
+    const writeSpy = vi.spyOn(fakeFs, "writeFile").mockImplementation(async (filePath: string, content: string) => {
+      written.push(content);
+      return original(filePath, content);
+    });
+
+    await Promise.all([1, 2, 3, 4, 5].map((n) => writeMissionJson(VALID_PROJ_ID, "tasks.json", [{ n }])));
+
+    expect(written.length).toBeLessThan(5);
+    expect(await readMissionJson(VALID_PROJ_ID, "tasks.json")).toEqual([{ n: 5 }]);
+    writeSpy.mockRestore();
+  });
+
+  it("leaves no temp file behind", async () => {
+    await writeMissionJson(VALID_PROJ_ID, "scans.json", [{ id: "s" }]);
+    expect([...fakeFs.files.keys()].filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("ignores a stray directory that isn't a mission id", async () => {
+    await writeMissionJson(VALID_PROJ_ID, "scans.json", []);
+    fakeFs.files.set(`${MISSIONS_DIR}/.Trash-1000/mission.json`, "{}");
+    expect(await listMissionIds()).not.toContain(".Trash-1000");
+  });
+});
+
 describe("readMissionMeta (via getMission) logs a warning for invalid mission.json", () => {
   it("logs but still resolves to 'not found' rather than throwing", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

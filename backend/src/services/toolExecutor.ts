@@ -3,6 +3,9 @@ import type { ExecutionResult } from "../types/execTool.js";
 
 /** Per-stream cap; once reached, further output is dropped and `truncated` is set. */
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
+/** How long a signalled process tree gets to exit on SIGTERM before it's SIGKILLed - a tool that
+ * traps or ignores SIGTERM must not be able to outlive its own cancel/timeout. */
+const KILL_GRACE_MS = 3000;
 
 export interface OutputChunk {
   stream: "stdout" | "stderr";
@@ -44,15 +47,45 @@ export function runExecutable(options: RunExecutableOptions): Promise<ExecutionR
     let settled = false;
 
     const controller = new AbortController();
+    let childPid: number | undefined;
+
+    // `detached: true` (below) makes every spawned process a new group leader (pgid == pid). A
+    // plain controller.abort() only signals the direct child, so `bash -c 'sleep 3600 &'` would
+    // strand the backgrounded grandchild holding its stdio pipe open (and its resources live) long
+    // after the outer command was cancelled/timed out. Killing the whole group (`kill(-pid)`) with
+    // the abort reaches the entire tree. Best-effort: on a platform where process groups aren't
+    // supported (Windows) or the group is already gone, the direct child is still aborted via the
+    // controller's signal, which is the old behaviour.
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const signalProcessGroup = (sig: NodeJS.Signals) => {
+      if (childPid === undefined) return;
+      try {
+        process.kill(-childPid, sig);
+      } catch {
+        // Already exited / no such group / unsupported - direct-child abort covers the non-group case.
+      }
+    };
+    // Unref'd and deliberately not cleared on settle: spawn's abort handling settles this promise
+    // the moment the abort fires, which says nothing about whether the tree actually died.
+    const killProcessGroup = () => {
+      signalProcessGroup("SIGTERM");
+      if (killTimer) return;
+      killTimer = setTimeout(() => signalProcessGroup("SIGKILL"), KILL_GRACE_MS);
+      killTimer.unref();
+    };
     const onExternalAbort = () => {
       cancelledByCaller = true;
       controller.abort();
+      killProcessGroup();
     };
     signal?.addEventListener("abort", onExternalAbort);
+    // addEventListener never fires for a signal that's already aborted.
+    if (signal?.aborted) onExternalAbort();
 
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
+      killProcessGroup();
     }, timeoutMs);
 
     const cleanup = () => {
@@ -81,7 +114,10 @@ export function runExecutable(options: RunExecutableOptions): Promise<ExecutionR
 
     let child;
     try {
-      child = spawn(executable, args, { cwd, signal: controller.signal });
+      // detached makes the child a process-group leader so killProcessGroup can reach any
+      // processes it spawns. No unref: the parent still waits for the tree to exit (the whole
+      // point - a cancelled tool must not linger either).
+      child = spawn(executable, args, { cwd, detached: true, signal: controller.signal });
     } catch (err) {
       cleanup();
       resolve({
@@ -97,11 +133,24 @@ export function runExecutable(options: RunExecutableOptions): Promise<ExecutionR
       return;
     }
 
+    childPid = child.pid;
+    // The external signal may have aborted before spawn returned - Node usually fails the spawn
+    // outright in that case, but if the process was briefly created, kill its whole group too.
+    if (controller.signal.aborted) killProcessGroup();
+
+    // A process that exits without draining stdin makes this write fail with EPIPE - an 'error'
+    // event on the stream that, with no listener, is an uncaught exception that takes the whole
+    // backend down. The process's own exit status is what reports the failure.
+    child.stdin?.on("error", () => {});
     if (stdin !== undefined) child.stdin?.write(stdin);
     child.stdin?.end();
 
-    child.stdout?.on("data", (chunk: Buffer) => appendOutput("stdout", chunk.toString("utf-8")));
-    child.stderr?.on("data", (chunk: Buffer) => appendOutput("stderr", chunk.toString("utf-8")));
+    // setEncoding, not chunk.toString(): a multi-byte character split across two reads would
+    // otherwise decode to two U+FFFD replacement characters.
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => appendOutput("stdout", chunk));
+    child.stderr?.on("data", (chunk: string) => appendOutput("stderr", chunk));
 
     child.on("error", (err: NodeJS.ErrnoException) => {
       if (settled) return;

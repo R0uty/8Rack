@@ -40,7 +40,11 @@ export function ExecutionConsole({ toolId, resolvedCommand, status, result, scop
   const outputText = [result?.stdout, result?.stderr].filter(Boolean).join("\n");
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(outputText);
+    try {
+      await navigator.clipboard.writeText(outputText);
+    } catch {
+      return; // Clipboard permission denied - Export still gets the output out.
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

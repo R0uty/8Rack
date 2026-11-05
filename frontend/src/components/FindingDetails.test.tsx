@@ -3,11 +3,11 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FindingDetails } from "./FindingDetails";
 import { lookupCves } from "../services/findingsApi";
-import { streamChat } from "../services/api";
+import { streamChat } from "../services/chatApi";
 import type { Finding } from "../types/finding";
 
 vi.mock("../services/findingsApi", () => ({ lookupCves: vi.fn() }));
-vi.mock("../services/api", () => ({ streamChat: vi.fn() }));
+vi.mock("../services/chatApi", () => ({ streamChat: vi.fn() }));
 
 function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
   return {

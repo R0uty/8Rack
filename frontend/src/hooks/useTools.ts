@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchExecutions, fetchTools, setToolEnabled } from "../services/toolsApi";
 import type { ExecToolWithStatus, ExecutionRecord } from "../types/execTool";
 
@@ -10,6 +10,14 @@ export function useTools(missionId: string | null) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  /** Tracks the mission the view currently means to show, so a slow in-flight response for a
+   * previous mission can't land in the new one's state (views stay mounted across a mission
+   * switch). Updated before `refresh`'s effect fires, so a stale resolution is always caught. */
+  const missionIdRef = useRef(missionId);
+  useEffect(() => {
+    missionIdRef.current = missionId;
+  }, [missionId]);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -18,12 +26,14 @@ export function useTools(missionId: string | null) {
         fetchTools(),
         missionId ? fetchExecutions(missionId) : Promise.resolve([]),
       ]);
+      if (missionIdRef.current !== missionId) return;
       setTools(toolList);
       setExecutions(executionList);
     } catch (err) {
+      if (missionIdRef.current !== missionId) return;
       setError(err instanceof Error ? err.message : "Failed to load tools");
     } finally {
-      setLoading(false);
+      if (missionIdRef.current === missionId) setLoading(false);
     }
   }, [missionId]);
 

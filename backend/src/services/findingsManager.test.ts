@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  buildFindingsGraph,
   createAgentFinding,
   createFinding,
   deleteFinding,
@@ -252,56 +251,6 @@ describe("filters, search, and agent-facing helpers", () => {
   });
 });
 
-describe("buildFindingsGraph", () => {
-  it("produces target/tool/finding nodes and runs_on/discovered_by edges for a port finding", async () => {
-    const missionId = randomUUID();
-    await ingestExecution(fixtureExecution({ missionId }));
-
-    const graph = buildFindingsGraph(missionId);
-    expect(graph.nodes.some((n) => n.type === "target" && n.label === "example.com")).toBe(true);
-    expect(graph.nodes.some((n) => n.type === "tool" && n.label === "nmap")).toBe(true);
-    expect(graph.nodes.some((n) => n.type === "port")).toBe(true);
-    expect(graph.edges.some((e) => e.relation === "runs_on")).toBe(true);
-    expect(graph.edges.some((e) => e.relation === "discovered_by")).toBe(true);
-  });
-
-  it("links a service finding to its specific port node via 'uses' when the port matches", async () => {
-    const missionId = randomUUID();
-    await ingestExecution(fixtureExecution({ missionId, arguments: ["example.com"] }));
-
-    const graph = buildFindingsGraph(missionId);
-    const serviceNode = graph.nodes.find((n) => n.type === "service");
-    const portNode = graph.nodes.find((n) => n.type === "port");
-    expect(serviceNode).toBeDefined();
-    expect(graph.edges.some((e) => e.source === portNode?.id && e.target === serviceNode?.id && e.relation === "uses")).toBe(
-      true,
-    );
-  });
-
-  it("links a cve finding back to its source finding via 'related_to' when sourceFindingId is set", async () => {
-    const missionId = randomUUID();
-    const tech = await createFinding(missionId, {
-      type: "technology",
-      severity: "info",
-      title: "nginx",
-      description: "d",
-      target: "example.com",
-      value: "nginx",
-    });
-    mockQueryNvd.mockResolvedValue([
-      { id: "CVE-2021-1234", description: "d", cvssScore: 9.8, cvssSeverity: "critical", cvssVector: null, references: [] },
-    ]);
-    await lookupCvesForFinding(tech.id);
-
-    const graph = buildFindingsGraph(missionId);
-    const cveNode = graph.nodes.find((n) => n.type === "cve");
-    expect(cveNode).toBeDefined();
-    expect(graph.edges.some((e) => e.source === tech.id && e.target === cveNode?.id && e.relation === "related_to")).toBe(
-      true,
-    );
-  });
-});
-
 describe("CVE lookup", () => {
   it("lookupCvesForFinding throws FindingNotFoundError for an unknown id", async () => {
     await expect(lookupCvesForFinding("nope")).rejects.toThrow(FindingNotFoundError);
@@ -532,4 +481,14 @@ describe("status/evidence migration on load", () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("confidence and history bounds", () => {
+  it("clamps confidence on create and on update", async () => {
+    const finding = await createFinding("proj-clamp", { type: "misc", target: "a.example.com", value: "v", title: "t", confidence: 95 } as never);
+    expect(finding.confidence).toBe(1);
+
+    const updated = await updateFinding(finding.id, { confidence: -3 });
+    expect(updated.confidence).toBe(0);
+  });
 });

@@ -60,6 +60,56 @@ describe("useReports", () => {
     await waitFor(() => expect(mockFetchReports).toHaveBeenLastCalledWith("proj-2"));
   });
 
+  it("ignores a stale previous-mission response that resolves after a mission switch", async () => {
+    let resolveOld!: (reports: Report[]) => void;
+    mockFetchReports.mockImplementation((id: string) =>
+      id === "proj-1" ? new Promise<Report[]>((r) => { resolveOld = r; }) : Promise.resolve([]),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useReports(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(mockFetchReports).toHaveBeenCalledWith("proj-1"));
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchReports).toHaveBeenLastCalledWith("proj-2"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      resolveOld([fixtureReport({ id: "stale-report" })]);
+    });
+
+    expect(result.current.reports).toEqual([]);
+  });
+
+  it("does not append a report that finishes after the mission changed", async () => {
+    mockFetchReports.mockResolvedValue([]);
+    let resolveCreate!: (report: Report) => void;
+    mockCreateReport.mockImplementation(
+      () => new Promise<Report>((r) => { resolveCreate = r; }),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useReports(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let generation!: Promise<Report | undefined>;
+    await act(async () => {
+      generation = result.current.generate("Report", ["finding-1"]);
+    });
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchReports).toHaveBeenLastCalledWith("proj-2"));
+
+    await act(async () => {
+      resolveCreate(fixtureReport());
+    });
+    await generation;
+
+    expect(result.current.reports).toEqual([]);
+  });
+
   it("surfaces a load failure", async () => {
     mockFetchReports.mockRejectedValue(new Error("boom"));
     const { result } = renderHook(() => useReports("proj-1"));

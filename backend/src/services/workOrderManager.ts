@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStore.js";
 import { onMissionDeleted } from "./missionManager.js";
-import { cancelTask as cancelOrchestratorTask, createTask as createOrchestratorTask, getTask } from "./orchestrator.js";
+import {
+  cancelTask as cancelOrchestratorTask,
+  createTask as createOrchestratorTask,
+  getTask,
+  resumeTask as resumeOrchestratorTask,
+} from "./orchestrator.js";
+import { getExecution } from "./toolManager.js";
 import type { ChunkListener, OrchestratorTask } from "./orchestrator.js";
 import { logActivity } from "./activityLog.js";
-import { InvalidWorkOrderStateError, WorkOrderNotFoundError } from "./errors.js";
+import { InvalidTaskStateError, InvalidWorkOrderStateError, RequestCancelledError, WorkOrderNotFoundError } from "./errors.js";
 import type { WorkOrder, WorkOrderCreateInput } from "../types/workOrder.js";
 
 /**
@@ -40,7 +46,16 @@ export async function loadWorkOrdersFromDisk(): Promise<void> {
   const missionIds = await listMissionIds();
   for (const missionId of missionIds) {
     const onDisk = await readMissionJson<WorkOrder>(missionId, WORK_ORDERS_FILE);
-    for (const wo of onDisk) workOrders.set(wo.id, wo);
+    for (const wo of onDisk) {
+      // Loaded after tasks (see index.ts). A "running" order's driver died with the old process: its
+      // task already says how that ended, and without a task it never really started.
+      if (wo.status === "running") {
+        const task = wo.orchestratorTaskId ? getTask(wo.orchestratorTaskId) : undefined;
+        if (task) syncFromTask(wo, task);
+        else resetToPending(wo);
+      }
+      workOrders.set(wo.id, wo);
+    }
   }
 }
 
@@ -94,14 +109,24 @@ function statusFromTask(taskStatus: OrchestratorTask["status"]): WorkOrder["stat
   }
 }
 
+function isTerminal(status: WorkOrder["status"]): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
 function syncFromTask(wo: WorkOrder, task: OrchestratorTask): WorkOrder {
   wo.status = statusFromTask(task.status);
   wo.orchestratorTaskId = task.id;
-  if (wo.status === "completed" || wo.status === "failed" || wo.status === "cancelled") {
-    wo.completedAt = Date.now();
+  if (isTerminal(wo.status)) {
+    wo.completedAt ??= Date.now();
     wo.result = task.finalResponse ?? task.error;
   }
   return wo;
+}
+
+function resetToPending(wo: WorkOrder): void {
+  wo.status = "pending";
+  wo.orchestratorTaskId = undefined;
+  wo.startedAt = undefined;
 }
 
 /** Logs work_order_completed/failed exactly once, the moment a work order actually transitions
@@ -128,19 +153,93 @@ export async function startWorkOrder(id: string, onChunk?: ChunkListener, signal
     throw new InvalidWorkOrderStateError(`Work order "${id}" has unmet dependencies`);
   }
 
+  // Claimed before the first await, so a double-clicked Start or a second advance can't start this
+  // order twice while the (minutes-long) first generation is still running.
+  wo.status = "running";
   wo.startedAt = Date.now();
   const objective = wo.target ? `${wo.objective}\n\nTarget: ${wo.target}` : wo.objective;
+  await persistWorkOrders(wo.missionId);
   await logActivity(wo.missionId, "work_order_started", `Work order started for ${wo.agentId}: ${wo.objective}`, {
     workOrderId: wo.id,
     agentId: wo.agentId,
   });
-  const task = await createOrchestratorTask(wo.agentId, objective, wo.missionId, onChunk, signal);
-  const previousStatus = wo.status;
+
+  let task: OrchestratorTask;
+  try {
+    task = await createOrchestratorTask(wo.agentId, objective, wo.missionId, onChunk, signal, undefined, (created) => {
+      wo.orchestratorTaskId = created.id; // what lets cancelWorkOrder reach this generation mid-run
+    });
+  } catch (err) {
+    if (wo.status === "running") {
+      if (err instanceof RequestCancelledError) {
+        // The client went away mid-generation (reload, closed tab) - not a verdict on the work.
+        resetToPending(wo);
+      } else {
+        wo.status = "failed";
+        wo.completedAt = Date.now();
+        wo.result = err instanceof Error ? err.message : "Failed to start the work order's task";
+        await logTerminalTransition(wo.missionId, wo.id, "running", wo);
+      }
+    }
+    await persistWorkOrders(wo.missionId);
+    throw err;
+  }
+
   const result = syncFromTask(wo, task);
-  workOrders.set(result.id, result);
   await persistWorkOrders(wo.missionId);
-  await logTerminalTransition(wo.missionId, wo.id, previousStatus, result);
+  await logTerminalTransition(wo.missionId, wo.id, "running", result);
   return result;
+}
+
+/**
+ * Continues a paused work order whose tool execution a human has since confirmed or rejected: feeds
+ * the outcome back to its task's agent and runs that task's next step. A no-op while the execution
+ * is still undecided or running, or the task is waiting on guidance instead (that's provided on the
+ * task directly). This is what makes an approval actually lead anywhere - without it the agent never
+ * sees its tool's output and the order sits at waiting_approval forever.
+ */
+export async function resumeWorkOrderIfReady(id: string, onChunk?: ChunkListener, signal?: AbortSignal): Promise<WorkOrder> {
+  const wo = workOrders.get(id);
+  if (!wo) throw new WorkOrderNotFoundError(id);
+  if (wo.status !== "waiting_approval" || !wo.orchestratorTaskId) return wo;
+
+  const task = getTask(wo.orchestratorTaskId);
+  if (task?.status === "waiting_confirmation" && task.pendingExecutionId) {
+    const execution = getExecution(task.pendingExecutionId);
+    if (execution?.status === "pending_confirmation" || execution?.status === "running") return wo;
+
+    wo.status = "running"; // claimed before the first await, same as startWorkOrder
+    try {
+      await resumeOrchestratorTask(task.id, onChunk, signal);
+    } catch (err) {
+      if (err instanceof RequestCancelledError) {
+        syncFromTask(wo, task);
+        await persistWorkOrders(wo.missionId);
+        throw err;
+      }
+      // InvalidTaskStateError: its execution record is gone (trimmed from history, or never survived
+      // a restart), so the task can never continue. Either way, settle the order rather than leave
+      // it stuck at "running" with nothing driving it.
+      wo.status = "failed";
+      wo.completedAt = Date.now();
+      wo.result = err instanceof Error ? err.message : "Failed to resume the work order's task";
+      await persistWorkOrders(wo.missionId);
+      await logTerminalTransition(wo.missionId, wo.id, "running", wo);
+      if (!(err instanceof InvalidTaskStateError)) throw err;
+      return wo;
+    }
+    syncFromTask(wo, task);
+    await persistWorkOrders(wo.missionId);
+    await logTerminalTransition(wo.missionId, wo.id, "running", wo);
+    return wo;
+  }
+  return refreshWorkOrder(id);
+}
+
+/** True when a paused order is waiting on a human's note rather than a pending approval - its tool run
+ * failed, so the Approval Queue has nothing to show for it and advancing alone can't move it. */
+export function workOrderNeedsGuidance(wo: WorkOrder): boolean {
+  return wo.status === "waiting_approval" && !!wo.orchestratorTaskId && getTask(wo.orchestratorTaskId)?.status === "waiting_guidance";
 }
 
 /** Re-syncs a running/waiting work order's status from its underlying OrchestratorTask - call after
@@ -153,7 +252,8 @@ export async function refreshWorkOrder(id: string): Promise<WorkOrder> {
   if (!wo) throw new WorkOrderNotFoundError(id);
   if (!wo.orchestratorTaskId) return wo;
   const task = getTask(wo.orchestratorTaskId);
-  if (!task) return wo;
+  // A cancelled order stays cancelled - its task may still be settling from the abort.
+  if (!task || wo.status === "cancelled") return wo;
   const previousStatus = wo.status;
   const result = syncFromTask(wo, task);
   workOrders.set(result.id, result);
@@ -165,6 +265,9 @@ export async function refreshWorkOrder(id: string): Promise<WorkOrder> {
 export function cancelWorkOrder(id: string): WorkOrder {
   const wo = workOrders.get(id);
   if (!wo) throw new WorkOrderNotFoundError(id);
+  if (isTerminal(wo.status)) {
+    throw new InvalidWorkOrderStateError(`Work order "${id}" has already finished (status: ${wo.status})`);
+  }
   if (wo.orchestratorTaskId) {
     try {
       cancelOrchestratorTask(wo.orchestratorTaskId);

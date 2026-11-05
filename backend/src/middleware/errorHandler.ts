@@ -38,6 +38,8 @@ import {
   UnknownToolError,
   WorkOrderNotFoundError,
   InvalidWorkOrderStateError,
+  RagReindexInProgressError,
+  RagReindexTimeoutError,
 } from "../services/errors.js";
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
@@ -154,6 +156,14 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(503).json({ error: err.message, code: "EMBEDDING_MODEL_UNAVAILABLE" });
     return;
   }
+  if (err instanceof RagReindexInProgressError) {
+    res.status(409).json({ error: err.message, code: "RAG_REINDEX_IN_PROGRESS" });
+    return;
+  }
+  if (err instanceof RagReindexTimeoutError) {
+    res.status(504).json({ error: err.message, code: "RAG_REINDEX_TIMEOUT" });
+    return;
+  }
   if (err instanceof FindingNotFoundError) {
     res.status(404).json({ error: err.message, code: "FINDING_NOT_FOUND" });
     return;
@@ -200,6 +210,14 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof InvalidWorkOrderStateError) {
     res.status(409).json({ error: err.message, code: "INVALID_WORK_ORDER_STATE" });
+    return;
+  }
+
+  // Body-parser failures (malformed JSON, a body over the size limit) are the client's mistake, and
+  // carry their own 4xx status - not a 500 logged as a server fault.
+  const { status, expose, message } = (err ?? {}) as { status?: unknown; expose?: unknown; message?: unknown };
+  if (typeof status === "number" && status >= 400 && status < 500 && expose === true) {
+    res.status(status).json({ error: typeof message === "string" ? message : "Invalid request", code: "INVALID_REQUEST" });
     return;
   }
 
