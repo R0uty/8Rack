@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { env } from "../config/env.js";
 import { getTool } from "../extensions/toolRegistry.js";
 import { chat, embed, listModels, resolveOllamaTools, streamChat, streamChatWithTools } from "./ollama.js";
 import {
@@ -6,6 +7,7 @@ import {
   OllamaConnectionError,
   OllamaModelNotFoundError,
   OllamaRequestError,
+  OllamaTimeoutError,
   RequestCancelledError,
 } from "./errors.js";
 import type { ChatRequest, OllamaToolSpec, ToolCall } from "../types/ollama.js";
@@ -108,6 +110,19 @@ describe("listModels", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
     await expect(listModels()).rejects.toThrow(OllamaConnectionError);
   });
+
+  it("throws OllamaTimeoutError when the request times out", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(Object.assign(new Error("timeout"), { name: "TimeoutError" })));
+    await expect(listModels()).rejects.toThrow(OllamaTimeoutError);
+  });
+
+  it("passes a bounded AbortSignal on the request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ models: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await listModels();
+    const init = fetchMock.mock.calls[0][1] as { signal?: AbortSignal };
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
 });
 
 describe("embed", () => {
@@ -140,6 +155,19 @@ describe("embed", () => {
   it("throws OllamaRequestError if the response is missing embeddings", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({})));
     await expect(embed("m", ["x"])).rejects.toThrow(OllamaRequestError);
+  });
+
+  it("throws OllamaTimeoutError when the request times out", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(Object.assign(new Error("timeout"), { name: "TimeoutError" })));
+    await expect(embed("m", ["x"])).rejects.toThrow(OllamaTimeoutError);
+  });
+
+  it("passes a bounded AbortSignal on the request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ embeddings: [[0.1]] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await embed("m", ["x"]);
+    const init = fetchMock.mock.calls[0][1] as { signal?: AbortSignal };
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 });
 
@@ -214,6 +242,90 @@ describe("streamChat", () => {
   it("throws OllamaConnectionError when the initial fetch fails for any other reason", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
     await expect(collect(streamChat(baseRequest))).rejects.toThrow(OllamaConnectionError);
+  });
+
+  it("throws OllamaTimeoutError when the stream goes idle for longer than the configured bound", async () => {
+    vi.useFakeTimers();
+    try {
+      // A connection that's gone genuinely silent: the reader's read() never resolves on its own,
+      // only when the signal passed into fetch() (the idle-timeout-combined one) actually aborts -
+      // mirroring how a real fetch/undici stream reacts to its governing AbortSignal firing.
+      const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => ({
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+        body: {
+          getReader: () => ({
+            read: () =>
+              new Promise((_resolve, reject) => {
+                init.signal?.addEventListener("abort", () => {
+                  reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+                });
+              }),
+            releaseLock: () => undefined,
+          }),
+        },
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const next = streamChat(baseRequest).next();
+      next.catch(() => {}); // see cveLookup.test.ts#callQueryNvd for why this is safe/needed
+      await vi.advanceTimersByTimeAsync(env.ollamaChatIdleTimeoutMs);
+      await expect(next).rejects.toThrow(OllamaTimeoutError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not time out a slow-but-alive stream that keeps producing chunks within the idle window", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveRead: ((v: { done: boolean; value?: Uint8Array }) => void) | undefined;
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+        body: {
+          getReader: () => ({
+            read: () => new Promise((resolve) => (resolveRead = resolve)),
+            releaseLock: () => undefined,
+          }),
+        },
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const gen = streamChat(baseRequest);
+      const first = gen.next();
+
+      // A chunk arrives just under the idle deadline - this must reset the timer, not let it lapse.
+      await vi.advanceTimersByTimeAsync(env.ollamaChatIdleTimeoutMs - 1000);
+      resolveRead?.({
+        done: false,
+        value: new TextEncoder().encode(ndjsonLine({ content: "still going", done: false })),
+      });
+      const chunk = await first;
+      expect(chunk.value?.message.content).toBe("still going");
+
+      // Another near-full window elapses from that reset point - still shouldn't time out.
+      const second = gen.next();
+      await vi.advanceTimersByTimeAsync(env.ollamaChatIdleTimeoutMs - 1000);
+      resolveRead?.({ done: true, value: undefined });
+      const result = await second;
+      expect(result.done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("streamChat mid-stream errors", () => {
+  it("throws on an {error} line after streaming began, rather than ending as a normal reply", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(streamResponse([ndjsonLine({ content: "partial", done: false }), '{"error":"model runner has unexpectedly stopped"}\n'])),
+    );
+
+    await expect(collect(streamChat({ model: "m", messages: [] }))).rejects.toThrow("model runner has unexpectedly stopped");
   });
 });
 

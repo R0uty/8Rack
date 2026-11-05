@@ -4,21 +4,16 @@ interface AppShellProps {
   sidebar: ReactNode;
   topBar: ReactNode;
   center: ReactNode;
-  rightPanel?: ReactNode;
 }
 
-/** Three-column desktop shell: fixed left sidebar, flexible center workspace, optional
- * context-aware right panel — with a floating top bar spanning center + right panel. */
-export function AppShell({ sidebar, topBar, center, rightPanel }: AppShellProps) {
+/** Left sidebar and scrolling workspace - on a phone the sidebar stacks above it as a compact header. */
+export function AppShell({ sidebar, topBar, center }: AppShellProps) {
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-bg text-text">
+    <div className="flex h-screen w-full flex-col overflow-hidden bg-bg text-text md:flex-row">
       {sidebar}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {topBar}
-        <div className="flex min-h-0 flex-1 gap-4 overflow-hidden p-4 pt-0">
-          <main className="relative min-w-0 flex-1 overflow-y-auto">{center}</main>
-          {rightPanel && <aside className="hidden w-[340px] shrink-0 overflow-y-auto xl:block">{rightPanel}</aside>}
-        </div>
+        <main className="relative min-h-0 min-w-0 flex-1 overflow-y-auto p-4 pt-0">{center}</main>
       </div>
     </div>
   );

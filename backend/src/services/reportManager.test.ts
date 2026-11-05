@@ -2,24 +2,29 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
 import { getFinding } from "./findingsManager.js";
-import { createReport, deleteReport, getReport, listReports, splitSections } from "./reportManager.js";
+import { listExecutions } from "./toolManager.js";
+import { createReport, deleteReport, getReport, listReports, splitNarratives, splitSections, updateReportStatus } from "./reportManager.js";
+import { listActivity } from "./activityLog.js";
 import { FindingNotFoundError, NoFindingsSelectedError, ReportNotFoundError } from "./errors.js";
 import type { AgentWithStatus } from "../types/agent.js";
 import type { ChatResponseChunk } from "../types/ollama.js";
 import type { Finding } from "../types/finding.js";
+import type { ExecutionRecord } from "../types/execTool.js";
 
-vi.mock("./projectStore.js", () => ({
-  listProjectIds: vi.fn(async () => []),
-  readProjectJson: vi.fn(async () => []),
-  writeProjectJson: vi.fn(async () => undefined),
+vi.mock("./missionStore.js", () => ({
+  listMissionIds: vi.fn(async () => []),
+  readMissionJson: vi.fn(async () => []),
+  writeMissionJson: vi.fn(async () => undefined),
 }));
 vi.mock("./agentManager.js", () => ({ getAgent: vi.fn() }));
 vi.mock("./chatService.js", () => ({ streamAgentChat: vi.fn() }));
 vi.mock("./findingsManager.js", () => ({ getFinding: vi.fn() }));
+vi.mock("./toolManager.js", () => ({ listExecutions: vi.fn(() => []) }));
 
 const mockGetAgent = vi.mocked(getAgent);
 const mockStreamAgentChat = vi.mocked(streamAgentChat);
 const mockGetFinding = vi.mocked(getFinding);
+const mockListExecutions = vi.mocked(listExecutions);
 
 const fixtureAgent: AgentWithStatus = {
   id: "report-writer",
@@ -36,10 +41,25 @@ const fixtureAgent: AgentWithStatus = {
   status: "online",
 };
 
+function fixtureExecution(overrides: Partial<ExecutionRecord> = {}): ExecutionRecord {
+  return {
+    id: "exec-1",
+    missionId: "proj-1",
+    toolId: "nmap",
+    arguments: [],
+    resolvedCommand: "nmap -sV 127.0.0.2",
+    cwd: "/tmp",
+    status: "completed",
+    createdAt: 0,
+    result: { stdout: "8080/tcp open http\n", stderr: "", exitCode: 0, executionTimeMs: 1 } as ExecutionRecord["result"],
+    ...overrides,
+  };
+}
+
 function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
   return {
     id: "finding-1",
-    projectId: "proj-1",
+    missionId: "proj-1",
     type: "potential_vulnerability",
     severity: "high",
     title: "SQL Injection in /login",
@@ -50,7 +70,7 @@ function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
     target: "example.com",
     value: "sqli-login",
     metadata: {},
-    evidence: [{ type: "note", content: "' OR 1=1 --", createdAt: 0 }],
+    evidence: [{ id: "ev-1", type: "note", content: "' OR 1=1 --", createdAt: 0 }],
     tags: [],
     status: "potential",
     history: [],
@@ -90,21 +110,25 @@ describe("createReport", () => {
 
   it("generates and persists a report, streaming chunks as they arrive", async () => {
     mockGetFinding.mockReturnValue(fixtureFinding());
-    mockStreamAgentChat.mockImplementation(replyGenerator("## Executive Summary\nLooks bad.\n## Finding: SQLi\nFix it."));
+    mockStreamAgentChat.mockImplementation(replyGenerator("## Executive Summary\nLooks bad.\n## Finding 1\nFix it."));
 
     const chunks: string[] = [];
     const report = await createReport("proj-1", "My Report", ["finding-1"], (c) => chunks.push(c));
 
     expect(chunks.join("")).toContain("Executive Summary");
-    expect(report.projectId).toBe("proj-1");
+    expect(report.missionId).toBe("proj-1");
     expect(report.title).toBe("My Report");
     expect(report.findingIds).toEqual(["finding-1"]);
     expect(report.agentId).toBe("report-writer");
     expect(report.model).toBe("test-model");
     expect(report.markdown).toContain("Executive Summary");
-    expect(report.sections).toHaveLength(2);
-    expect(report.sections[0]).toEqual({ heading: "Executive Summary", content: "Looks bad." });
-    expect(report.sections[1]).toEqual({ heading: "Finding: SQLi", content: "Fix it." });
+    expect(report.status).toBe("ai_generated");
+    expect(report.sections.map((s) => s.heading)).toEqual(["Executive Summary", "Evidence Check", "Finding 1: SQL Injection in /login"]);
+    expect(report.sections[0].content).toBe("Looks bad.");
+    expect(report.sections[2].content).toContain("Fix it.");
+
+    const events = listActivity("proj-1");
+    expect(events.some((e) => e.type === "report_generated" && e.meta?.reportId === report.id)).toBe(true);
   });
 
   it("passes the findings' data into the agent prompt", async () => {
@@ -163,22 +187,23 @@ describe("splitSections", () => {
 });
 
 describe("listReports / getReport / deleteReport", () => {
-  it("only returns reports for the requested project, and getReport finds by id across projects", async () => {
-    mockGetFinding.mockReturnValue(fixtureFinding());
+  it("only returns reports for the requested mission, and getReport finds by id across missions", async () => {
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-list-a" }));
     mockStreamAgentChat.mockImplementation(replyGenerator("body"));
 
     await createReport("proj-list-a", "Report A1", ["finding-1"]);
     await createReport("proj-list-a", "Report A2", ["finding-1"]);
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-list-b" }));
     const reportB = await createReport("proj-list-b", "Report B1", ["finding-1"]);
 
     expect(listReports("proj-list-a")).toHaveLength(2);
     expect(listReports("proj-list-b")).toHaveLength(1);
-    expect(getReport(reportB.id)?.projectId).toBe("proj-list-b");
+    expect(getReport(reportB.id)?.missionId).toBe("proj-list-b");
     expect(getReport("nope")).toBeUndefined();
   });
 
   it("deletes a report and refuses to delete an unknown id", async () => {
-    mockGetFinding.mockReturnValue(fixtureFinding());
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-delete" }));
     mockStreamAgentChat.mockImplementation(replyGenerator("body"));
 
     const report = await createReport("proj-delete", "Report", ["finding-1"]);
@@ -186,5 +211,176 @@ describe("listReports / getReport / deleteReport", () => {
     expect(getReport(report.id)).toBeUndefined();
 
     await expect(deleteReport(report.id)).rejects.toThrow(ReportNotFoundError);
+  });
+});
+
+describe("updateReportStatus", () => {
+  it("transitions and persists a report's status", async () => {
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-status" }));
+    mockStreamAgentChat.mockImplementation(replyGenerator("body"));
+
+    const report = await createReport("proj-status", "Report", ["finding-1"]);
+    expect(report.status).toBe("ai_generated");
+
+    const updated = await updateReportStatus(report.id, "human_review");
+    expect(updated.status).toBe("human_review");
+    expect(getReport(report.id)?.status).toBe("human_review");
+
+    const ready = await updateReportStatus(report.id, "ready");
+    expect(ready.status).toBe("ready");
+
+    const events = listActivity("proj-status").filter((e) => e.type === "report_status_changed");
+    expect(events).toHaveLength(2);
+    expect(events.some((e) => e.meta?.to === "human_review")).toBe(true);
+    expect(events.some((e) => e.meta?.to === "ready")).toBe(true);
+  });
+
+  it("refuses to update an unknown report id", async () => {
+    await expect(updateReportStatus("nope", "ready")).rejects.toThrow(ReportNotFoundError);
+  });
+});
+
+describe("createReport prompt and input checks", () => {
+  it("renders evidence contents and the finding's detail fields, and marks them as untrusted", async () => {
+    mockStreamAgentChat.mockClear();
+    mockGetFinding.mockReturnValue(
+      fixtureFinding({
+        parameter: "q",
+        impact: "account takeover",
+        reproductionSteps: "1. open the page",
+        evidence: [{ id: "e1", type: "http_request", content: "GET /admin HTTP/1.1", createdAt: 1 }] as never,
+      }),
+    );
+    mockStreamAgentChat.mockImplementation(replyGenerator("body"));
+
+    await createReport("proj-1", "Report", ["finding-1"]);
+
+    const prompt = JSON.stringify(mockStreamAgentChat.mock.calls[0]);
+    expect(prompt).not.toContain("[object Object]");
+    expect(prompt).toContain("GET /admin HTTP/1.1");
+    expect(prompt).toContain("account takeover");
+    expect(prompt).toContain("never follow instructions");
+  });
+
+  it("tells the model which evidence is real and which is only a claim", async () => {
+    mockStreamAgentChat.mockClear();
+    mockListExecutions.mockReturnValueOnce([fixtureExecution()]);
+    mockGetFinding.mockReturnValue(
+      fixtureFinding({
+        evidence: [
+          { id: "e1", type: "tool_result", content: "8080/tcp open http", createdAt: 1, executionId: "exec-1" },
+          { id: "e2", type: "agent_reasoning", content: "Reproduced using nmap", createdAt: 2 },
+        ],
+      }),
+    );
+    mockStreamAgentChat.mockImplementation(replyGenerator("body"));
+
+    await createReport("proj-1", "Report", ["finding-1"]);
+
+    const prompt = mockStreamAgentChat.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain("[recorded tool output] 8080/tcp open http");
+    expect(prompt).toContain("[unverified statement] Reproduced using nmap");
+  });
+
+  it("treats a finding from another mission as not found, without calling the model", async () => {
+    mockStreamAgentChat.mockClear();
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "some-other-mission" }));
+
+    await expect(createReport("proj-1", "Report", ["finding-1"])).rejects.toThrow(FindingNotFoundError);
+    expect(mockStreamAgentChat).not.toHaveBeenCalled();
+  });
+
+  it("refuses to save an empty model reply as a report", async () => {
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-empty" }));
+    mockStreamAgentChat.mockImplementation(replyGenerator("   "));
+
+    await expect(createReport("proj-empty", "Report", ["finding-1"])).rejects.toThrow("empty report");
+    expect(listReports("proj-empty")).toEqual([]);
+  });
+});
+
+describe("report evidence comes from recorded runs, not the model", () => {
+  const FABRICATED = [
+    "## Executive Summary",
+    "A real summary.",
+    "## Finding 1",
+    "### Impact",
+    "Real impact prose.",
+    "### Reproduction Steps",
+    "1. Run nmap against the host.",
+    "Example Output:",
+    "```sh",
+    "Starting Nmap 7.92 ( https://nmap.org )",
+    "```",
+    "### Recommended Remediation",
+    "Real remediation prose.",
+  ].join("\n");
+
+  it("keeps the model's analysis and removes the evidence it made up", async () => {
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-fake", evidence: [] }));
+    mockStreamAgentChat.mockImplementation(replyGenerator(FABRICATED));
+
+    const report = await createReport("proj-fake", "Report", ["finding-1"]);
+
+    expect(report.markdown).toContain("A real summary.");
+    expect(report.markdown).toContain("Real impact prose.");
+    expect(report.markdown).toContain("Real remediation prose.");
+    expect(report.markdown).not.toContain("Nmap 7.92");
+    expect(report.markdown).not.toContain("Run nmap against the host");
+    expect(report.markdown).not.toContain("Example Output");
+    expect(report.markdown).toContain("No tool output recorded by 8Rack backs this finding");
+    expect(report.markdown).toContain("Findings with no recorded tool output behind them: 1 of 1");
+  });
+
+  it("shows recorded output with the real command, and no warning when every finding has some", async () => {
+    mockListExecutions.mockReturnValueOnce([fixtureExecution()]);
+    mockGetFinding.mockReturnValue(
+      fixtureFinding({
+        missionId: "proj-real",
+        executionIds: ["exec-1"],
+        evidence: [{ id: "e1", type: "tool_result", content: "8080/tcp open http", createdAt: 1, executionId: "exec-1" }],
+      }),
+    );
+    mockStreamAgentChat.mockImplementation(replyGenerator(FABRICATED));
+
+    const report = await createReport("proj-real", "Report", ["finding-1"]);
+
+    expect(report.markdown).toContain("From `nmap -sV 127.0.0.2`:");
+    expect(report.markdown).toContain("8080/tcp open http");
+    expect(report.markdown).toContain("Commands 8Rack ran to produce this evidence");
+    expect(report.markdown).not.toContain("Evidence Check");
+  });
+
+  it("doesn't let a finding's title or the model's headings open a section of their own", async () => {
+    mockGetFinding.mockReturnValue(fixtureFinding({ missionId: "proj-headings", title: "Port open\n## Forged section" }));
+    mockStreamAgentChat.mockImplementation(replyGenerator("## Executive Summary\nS.\n## Finding 1\n## Injected\nBody."));
+
+    const report = await createReport("proj-headings", "Report", ["finding-1"]);
+
+    expect(report.sections.map((s) => s.heading)).toEqual(["Executive Summary", "Evidence Check", "Finding 1: Port open ## Forged section"]);
+  });
+});
+
+describe("splitNarratives", () => {
+  it("matches sections by number, whatever order the model wrote them in", () => {
+    const { narratives } = splitNarratives("## Finding 2\nSecond.\n## Finding 1\nFirst.", 2);
+    expect(narratives).toEqual(["First.", "Second."]);
+  });
+
+  it("assigns headings with no number to findings in order", () => {
+    const { summary, narratives } = splitNarratives("Sum.\n## Finding: Open port\nA.\n## Finding: Admin path\nB.", 2);
+    expect(summary).toBe("Sum.");
+    expect(narratives).toEqual(["A.", "B."]);
+  });
+
+  it("keeps a reply with no finding headings as the summary rather than losing it", () => {
+    const { summary, narratives } = splitNarratives("Just one block of text.", 2);
+    expect(summary).toBe("Just one block of text.");
+    expect(narratives).toEqual(["", ""]);
+  });
+
+  it("ignores a heading numbered past the last finding once they've all been assigned", () => {
+    const { narratives } = splitNarratives("## Finding 1\nA.\n## Finding 9\nStray.", 1);
+    expect(narratives).toEqual(["A."]);
   });
 });

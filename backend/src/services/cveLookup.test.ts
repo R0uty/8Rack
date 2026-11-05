@@ -160,4 +160,17 @@ describe("queryNvd", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
     await expect(callQueryNvd("networkfail")).rejects.toThrow(CveLookupError);
   });
+
+  it("throws a clear timeout-specific CveLookupError when the request times out", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(Object.assign(new Error("timeout"), { name: "TimeoutError" })));
+    await expect(callQueryNvd("timesout")).rejects.toThrow(/did not respond in time/i);
+  });
+
+  it("passes a bounded AbortSignal on every outbound request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(fixtureVulnerabilities([])));
+    vi.stubGlobal("fetch", fetchMock);
+    await callQueryNvd("bounded");
+    const init = fetchMock.mock.calls[0][1] as { signal?: AbortSignal };
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
 });

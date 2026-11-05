@@ -4,6 +4,7 @@ import {
   AgentIdConflictError,
   AgentNotFoundError,
   AgentOfflineError,
+  AssetNotFoundError,
   CveLookupError,
   EmbeddingModelUnavailableError,
   ExecutableUnavailableError,
@@ -13,18 +14,19 @@ import {
   FindingNotFoundError,
   InvalidAgentConfigError,
   InvalidPlanStateError,
-  InvalidProjectIdError,
+  InvalidMissionIdError,
   InvalidTaskStateError,
   InvalidToolArgumentsError,
   OllamaConnectionError,
   OutOfScopeError,
   OllamaModelNotFoundError,
   OllamaRequestError,
+  OllamaTimeoutError,
   InvalidScanStateError,
   NoFindingsSelectedError,
   PlanNotFoundError,
   PrivilegedCommandError,
-  ProjectNotFoundError,
+  MissionNotFoundError,
   ReportNotFoundError,
   RequestCancelledError,
   ScanProfileNotFoundError,
@@ -32,7 +34,12 @@ import {
   InvalidScanTargetError,
   ScanTargetRequiredError,
   TaskNotFoundError,
+  TooManyConcurrentExecutionsError,
   UnknownToolError,
+  WorkOrderNotFoundError,
+  InvalidWorkOrderStateError,
+  RagReindexInProgressError,
+  RagReindexTimeoutError,
 } from "../services/errors.js";
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
@@ -48,6 +55,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof OllamaConnectionError) {
     res.status(503).json({ error: err.message, code: "OLLAMA_UNAVAILABLE" });
+    return;
+  }
+  if (err instanceof OllamaTimeoutError) {
+    res.status(504).json({ error: err.message, code: "OLLAMA_TIMEOUT" });
     return;
   }
   if (err instanceof OllamaModelNotFoundError) {
@@ -97,6 +108,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(403).json({ error: err.message, code: "OUT_OF_SCOPE" });
     return;
   }
+  if (err instanceof TooManyConcurrentExecutionsError) {
+    res.status(429).json({ error: err.message, code: "TOO_MANY_CONCURRENT_EXECUTIONS" });
+    return;
+  }
   if (err instanceof InvalidToolArgumentsError) {
     res.status(400).json({ error: err.message, code: "INVALID_TOOL_ARGUMENTS" });
     return;
@@ -117,12 +132,12 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(409).json({ error: err.message, code: "INVALID_TASK_STATE" });
     return;
   }
-  if (err instanceof ProjectNotFoundError) {
-    res.status(404).json({ error: err.message, code: "PROJECT_NOT_FOUND" });
+  if (err instanceof MissionNotFoundError) {
+    res.status(404).json({ error: err.message, code: "MISSION_NOT_FOUND" });
     return;
   }
-  if (err instanceof InvalidProjectIdError) {
-    res.status(400).json({ error: err.message, code: "INVALID_PROJECT_ID" });
+  if (err instanceof InvalidMissionIdError) {
+    res.status(400).json({ error: err.message, code: "INVALID_MISSION_ID" });
     return;
   }
   if (err instanceof PlanNotFoundError) {
@@ -139,6 +154,14 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof EmbeddingModelUnavailableError) {
     res.status(503).json({ error: err.message, code: "EMBEDDING_MODEL_UNAVAILABLE" });
+    return;
+  }
+  if (err instanceof RagReindexInProgressError) {
+    res.status(409).json({ error: err.message, code: "RAG_REINDEX_IN_PROGRESS" });
+    return;
+  }
+  if (err instanceof RagReindexTimeoutError) {
+    res.status(504).json({ error: err.message, code: "RAG_REINDEX_TIMEOUT" });
     return;
   }
   if (err instanceof FindingNotFoundError) {
@@ -175,6 +198,26 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof NoFindingsSelectedError) {
     res.status(400).json({ error: err.message, code: "INVALID_REQUEST" });
+    return;
+  }
+  if (err instanceof AssetNotFoundError) {
+    res.status(404).json({ error: err.message, code: "ASSET_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof WorkOrderNotFoundError) {
+    res.status(404).json({ error: err.message, code: "WORK_ORDER_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof InvalidWorkOrderStateError) {
+    res.status(409).json({ error: err.message, code: "INVALID_WORK_ORDER_STATE" });
+    return;
+  }
+
+  // Body-parser failures (malformed JSON, a body over the size limit) are the client's mistake, and
+  // carry their own 4xx status - not a 500 logged as a server fault.
+  const { status, expose, message } = (err ?? {}) as { status?: unknown; expose?: unknown; message?: unknown };
+  if (typeof status === "number" && status >= 400 && status < 500 && expose === true) {
+    res.status(status).json({ error: typeof message === "string" ? message : "Invalid request", code: "INVALID_REQUEST" });
     return;
   }
 

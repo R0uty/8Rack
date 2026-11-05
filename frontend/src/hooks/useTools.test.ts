@@ -40,7 +40,7 @@ const fixtureExecution: ExecutionRecord = {
 };
 
 describe("useTools", () => {
-  it("loads tools and skips execution history when projectId is null", async () => {
+  it("loads tools and skips execution history when missionId is null", async () => {
     mockFetchTools.mockResolvedValue([fixtureTool]);
     const { result } = renderHook(() => useTools(null));
 
@@ -51,7 +51,7 @@ describe("useTools", () => {
     expect(mockFetchExecutions).not.toHaveBeenCalled();
   });
 
-  it("loads execution history scoped to a projectId", async () => {
+  it("loads execution history scoped to a missionId", async () => {
     mockFetchTools.mockResolvedValue([fixtureTool]);
     mockFetchExecutions.mockResolvedValue([fixtureExecution]);
     const { result } = renderHook(() => useTools("proj-1"));
@@ -62,17 +62,40 @@ describe("useTools", () => {
     expect(result.current.executions).toEqual([fixtureExecution]);
   });
 
-  it("re-fetches when projectId changes", async () => {
+  it("re-fetches when missionId changes", async () => {
     mockFetchTools.mockResolvedValue([fixtureTool]);
     mockFetchExecutions.mockResolvedValue([]);
-    const { result, rerender } = renderHook(({ projectId }) => useTools(projectId), {
-      initialProps: { projectId: "proj-1" as string | null },
+    const { result, rerender } = renderHook(({ missionId }) => useTools(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(mockFetchExecutions).toHaveBeenCalledWith("proj-1");
 
-    rerender({ projectId: "proj-2" });
+    rerender({ missionId: "proj-2" });
     await waitFor(() => expect(mockFetchExecutions).toHaveBeenLastCalledWith("proj-2"));
+  });
+
+  it("ignores a stale previous-mission response that resolves after a mission switch", async () => {
+    mockFetchTools.mockResolvedValue([fixtureTool]);
+    let resolveOld!: (executions: ExecutionRecord[]) => void;
+    mockFetchExecutions.mockImplementation((id: string) =>
+      id === "proj-1" ? new Promise<ExecutionRecord[]>((r) => { resolveOld = r; }) : Promise.resolve([]),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useTools(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(mockFetchExecutions).toHaveBeenCalledWith("proj-1"));
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchExecutions).toHaveBeenLastCalledWith("proj-2"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      resolveOld([{ ...fixtureExecution, id: "stale-exec" }]);
+    });
+
+    expect(result.current.executions).toEqual([]);
   });
 
   it("surfaces a load failure", async () => {

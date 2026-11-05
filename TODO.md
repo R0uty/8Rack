@@ -122,6 +122,9 @@ write-up of each pass. Only the Plugin system (see "Later" below) remains genuin
       `types/plugin.ts` are still the real "written once, never connected, never revisited"
       leftovers - either wire them up when the Plugin system (see "Later" below) actually gets
       built, or delete them now.
+      **Resolved: deleted in commit a65fb26** (per the "Later" decision - not wired up; the Plugin
+      system that would need them remains unbuilt, see below). CLAUDE.md/POLISH.md were updated to
+      stay accurate.
 - [x] Test coverage gaps: `services/ollama.ts` had no `.test.ts` at all despite being genuinely
       complex (the Ollama REST client + native tool-calling round trip). Fixed: new
       `ollama.test.ts`, 29 tests - NDJSON parsing/buffering (including a line deliberately split
@@ -163,14 +166,37 @@ Full-project re-audit (backend security, backend architecture/correctness, front
 three parallel reviews plus manual verification of every High/Medium item against the actual
 current code (which now includes the uncommitted Tasks 1-3 work: scope enforcement, Mission
 Editor/Assets/Activity, agent tool allowlists, etc.). All findings below were confirmed by reading
-the code; nothing was exploited against the live backend. **None of these are fixed yet** - this is
-a findings list, pending a decision on scope like last time. Baseline sanity checks pass: backend
-`npm test` 328/328, frontend `npm test` 252/252, both typechecks clean, `oxlint` clean (5 pre-existing
-`only-export-components` warnings).
+the code; nothing was exploited against the live backend. Baseline sanity checks at the time:
+backend `npm test` 328/328, frontend `npm test` 252/252, both typechecks clean, `oxlint` clean (5
+pre-existing `only-export-components` warnings).
+
+**Update (2026-08-17):** all 3 High items, 3 of 10 Medium items, and 1 Low item fixed in a follow-up
+pass - each marked `[x]` below with what changed and how it was verified. Current baseline: backend
+`npm test` 354/354 (including the code-review follow-up fixes below), frontend `npm test` 271/271,
+both typechecks clean, `oxlint` down to 3
+pre-existing `only-export-components` warnings (`OrchestratorTaskView.tsx` only -
+`FindingsTimeline.tsx`'s 2 were incidentally fixed by an unrelated import-cycle cleanup, see the Low
+items below). The rest (7 Medium, 18 Low) remain open findings.
+
+**Update (2026-08-18):** the mission-scope-enforcement, outbound-HTTP-timeout, streamed-output/
+concurrency-limit, deleteProject-ghost-records, and unbounded-task-transcript Medium items fixed too
+- see each one's own entry below for the full write-up. Current baseline: backend `npm test`
+395/395, frontend unchanged at 271/271, both typechecks clean. 2 Medium, 18 Low remain open.
+
+A `/code-review` pass over that same diff caught 3 more issues in the just-shipped fixes, all
+confirmed and fixed: (1) the `cancelTask` fix above closed the wide race but left a narrower one -
+a cancel landing *while `requestExecution()` itself was still awaiting* (its own internal
+`getProject()`/`persistExecutions()`) wasn't re-checked once it resolved, so `advance()` would
+overwrite the "cancelled" status back to `waiting_confirmation`; now re-checked and the
+just-created execution is rejected in that case too (1 new test). (2)/(3) two small cleanups in the
+path-containment fix: `isPathContained` was re-resolving `realOrNearestPath(env.workspaceRoot)` via
+a fresh `realpathSync` ancestor walk for every path-like argument instead of once per call (hoisted
+out of the loop), and `looksLikePath`'s `~` branch was dead code since `validateArguments` already
+rejects a `~`-prefixed argument before `looksLikePath` is ever called on it (removed).
 
 ### High
 
-- [ ] **No Host-header/Origin/CSRF defense on a no-auth tool-execution API - browser-triggerable
+- [x] **No Host-header/Origin/CSRF defense on a no-auth tool-execution API - browser-triggerable
       RCE via DNS rebinding.** `backend/src/index.ts:40` (`cors({ origin: env.corsOrigin })`) only
       gates cross-origin *reads* in browsers; there is no Host-header allowlist, no Origin/Referer
       check, and no CSRF token anywhere in the request path. The app binds `127.0.0.1` by default
@@ -183,12 +209,19 @@ a findings list, pending a decision on scope like last time. Baseline sanity che
       `confirm` route never re-checks scope/enabled state/requester; the same applies to every other
       mutating endpoint (`/api/orchestrator/tasks`, `/api/projects/:id/scans` which auto-confirms
       steps, `/reject`, `/cancel`, agent create/update). A LAN peer or any host-local process is the
-      documented tradeoff, but the *browser* vector is not covered by loopback binding. Suggested
-      fix: a Host-header allowlist middleware (`localhost`/`127.0.0.1`/`[::1]:3001`) before routing
-      - the standard DNS-rebinding mitigation - plus reject `CORS_ORIGIN=*` in `env.ts` (currently
-      accepted without warning) and, ideally, a per-install random bearer token or custom-header +
-      same-site check on mutating endpoints.
-- [ ] **`cancelTask`/`cancelPlan` don't abort an in-flight generation - a cancelled task can be
+      documented tradeoff, but the *browser* vector is not covered by loopback binding. Fixed: new
+      `backend/src/middleware/hostCheck.ts`, wired in before every route, checks the request's Host
+      header against an allowlist (`localhost`/`127.0.0.1`/`[::1]:PORT` by default, computed once in
+      `env.ts#allowedHosts`) - only enforced in the default loopback-only mode, since `HOST` set to
+      anything else is already an informed opt-in to wider exposure this app has no auth to guess a
+      safe LAN allowlist for. Override via new `ALLOWED_HOSTS` env var. `env.ts` now also throws at
+      startup on `CORS_ORIGIN=*` instead of accepting it silently. 5 new backend tests
+      (`hostCheck.test.ts`). Verified live against the real running backend: `Host: evil.com` → clean
+      403 `HOST_NOT_ALLOWED`; `Host: localhost:3001`/`127.0.0.1:3001` (what Vite's
+      `changeOrigin: true` proxy actually sends) → 200, frontend unaffected. A per-install bearer
+      token / same-site check on mutating endpoints remains a further hardening step, not pursued
+      this pass.
+- [x] **`cancelTask`/`cancelPlan` don't abort an in-flight generation - a cancelled task can be
       silently resurrected and spawn a new tool execution after the user cancelled it.**
       `backend/src/services/orchestrator.ts:800-825` (`cancelTask` is synchronous and only mutates
       the in-memory object; it has no handle on the AbortController driving the still-running
@@ -199,24 +232,33 @@ a findings list, pending a decision on scope like last time. Baseline sanity che
       `requestExecution` and sets `status = "waiting_confirmation"` (`:550-633`) - resurrecting a
       terminal-`"cancelled"` task and queueing a real subprocess the user already decided against.
       The frontend's single-tab flow masks this by aborting its own stream first
-      (`useOrchestratorTask.ts`), but the backend contract is not enforced. Suggested fix: hold a
-      per-task `AbortController` (keyed map, like `toolManager.ts`'s `runningControllers`) that
-      `cancelTask` aborts, and have `advance` bail to `"cancelled"` after each `await` if
-      `signal.aborted`/`task.status !== "running"` - before creating any execution.
-- [ ] **Session wipe on a failed agents fetch.** `frontend/src/App.tsx:68-74` runs
+      (`useOrchestratorTask.ts`), but the backend contract is not enforced. Fixed exactly as
+      suggested: a new `advanceTask()` wrapper registers a per-task `AbortController` (keyed map,
+      `runningTaskControllers`, same pattern as `toolManager.ts`'s `runningControllers`) around every
+      top-level `advance()` call, combined via `AbortSignal.any([...])` with the caller's own
+      disconnect signal so either one stops the loop; `cancelTask` now aborts that controller before
+      anything else, and `advance()` also re-checks `signal?.aborted` immediately before
+      `requestExecution` so a cancel landing in that exact race window can no longer create a new
+      execution. `cancelPlan` gets the fix for free (it already delegates to `cancelTask`). 2 new
+      backend tests proving the exact races described above no longer resurrect a task or spawn an
+      execution. Verified live against the real running backend with a real local 27B model:
+      cancelled a task mid-generation from a separate `curl` call, confirmed the task settled
+      `cancelled` and zero executions were created for the project.
+- [x] **Session wipe on a failed agents fetch.** `frontend/src/App.tsx:68-74` runs
       `sessions.pruneOrphanedSessions(new Set(agents.map((a) => a.id)))` gated only on
       `agentsLoading` - but `useAgents.ts:18-22` leaves `agents` as its initial `[]` when
       `fetchAgents` fails (only `error` is set, `loading` goes false). So if the *first* `GET
       /api/agents` fails (backend briefly down at startup, transient blip), this permanently removes
       every agent-keyed session from `sessionStorage` - including closed-and-retained chat sessions,
       which `useSessions.ts` says have no other eviction path. Silent, no undo; the message
-      histories remain as orphaned `8rack:chat-history:*` keys but are unreachable. Suggested fix:
-      bail on error too - `if (agentsLoading || agentsError) return;` (`agentsError` is already
-      destructured in `App.tsx`).
+      histories remain as orphaned `8rack:chat-history:*` keys but are unreachable. Fixed exactly as
+      suggested: `if (agentsLoading || agentsError) return;` (`agentsError` was already destructured
+      in `App.tsx`, just unused by this guard). 3 new `App.test.tsx` tests (new file - no prior
+      App-level test coverage existed) covering the loading/error/success gating explicitly.
 
 ### Medium
 
-- [ ] **Workspace path-containment is lexical and bypassable** (`backend/src/services/toolManager.ts:141-168`).
+- [x] **Workspace path-containment is lexical and bypassable** (`backend/src/services/toolManager.ts:141-168`).
       `isPathContained` does a pure `path.resolve(base, candidate)` + `path.relative` string check -
       no `realpath`, no `~` handling, no parsing of flag/value pairs, no visibility into shell/script
       strings. Verified bypasses: (1) `bash`/`python` script strings - `arguments: ["-c", "cat
@@ -230,104 +272,206 @@ a findings list, pending a decision on scope like last time. Baseline sanity che
       so `read_file`/`grep`/`find` can read anywhere through one. (Note: a literal `~/.ssh/id_rsa`
       argv element is *not* expanded by `cat`/`tee` - spawn passes it verbatim - so that particular
       sub-case fails with ENOENT rather than reading the file; `bash -c "cat ~/..."` and `git` do
-      expand it.) Suggested fix: resolve candidates via `fs.realpath` and require containment on the
-      real path; reject `~` outright; explicitly reject bare `..`; and surface the script-string and
-      file-writing tools (`bash`/`python`/`curl -o`/`git`/`write_file`) as out-of-confinement in the
-      confirm card rather than claiming workspace containment.
-- [ ] **Mission-scope enforcement is bypassable and silently skipped for unknowns.**
-      `backend/src/services/scopeMatcher.ts:12` matches IPv4 only (no IPv6, no decimal/hex IP forms,
-      no `localhost`/single-label names, no IDN) - so `curl http://[::1]/` or `2130706433` yields
-      zero targets → verdict `"unknown"` → `scopeWarning` only, runs anyway even for an allowlist
-      project where "unknown" *is* the out-of-scope case. Scope is only checked when
-      `getProject(body.projectId)` resolves (`toolManager.ts`); a nonexistent project yields
-      `undefined` → scope silently not checked and *no warning recorded* at all. `confirmExecution`
-      never re-runs the check, so a target can be swapped between request and confirm. Scope entries
-      with a port (`"example.com:8080"`) never match anything (`extractTargets` strips ports).
-      Suggested fix: add IPv6; normalize IP forms before matching; treat "unknown" as blocking when
-      a strict `scope` allowlist is configured; warn/block on `project === undefined`; re-check at
-      confirm time.
-- [ ] **Outbound HTTP has no timeout anywhere** - `backend/src/services/ollama.ts:23` (`ollamaFetch`)
-      and `backend/src/services/cveLookup.ts:117` both `fetch` with no `AbortSignal`. A hung Ollama
-      (wedged model load) or dead-but-open NVD connection blocks the request indefinitely. Note the
-      orchestrator's `maxOrchestratorTaskTimeMs` is only evaluated at `advance()` entry
-      (`orchestrator.ts:527`), so a hung `lookup_cves` pseudo-tool (no human confirmation, called
-      directly by the agent) pins the task past the cap forever. Suggested fix:
-      `AbortSignal.timeout(...)` on all outbound fetches (bounded for NVD, longer but still bounded
-      for Ollama chat).
-- [ ] **Streamed tool output is uncapped and there's no global execution concurrency limit.**
-      `backend/src/services/toolExecutor.ts:64` calls `onOutput` *before* the truncation check, so a
-      tool emitting >1MB (e.g. `bash -c 'head -c 100000000 /dev/urandom | base64'`, huge `ffuf`
-      wordlists) streams unbounded data to the confirming client and memory-buffers `res.write`
-      under backpressure - only the accumulated `stdout` string is capped. Combined with zero
-      in-flight cap on `requestExecution`/scans/tasks, a reachable caller can drive OOM/fork
-      exhaustion. Suggested fix: cap streamed bytes per execution on the `onOutput` path (same 1MB
-      limit), and add a global in-flight execution/scan/task limiter.
-- [ ] **Chat `options` forwarded unvalidated → local Ollama OOM.** `routes/chat.ts:48-51`,
+      expand it.) Fixed exactly as suggested, all four parts: `isPathContained` now resolves both
+      sides via a new `realOrNearestPath()` (real `fs.realpathSync`, falling back to the nearest
+      existing ancestor's real path + the not-yet-created suffix for a `write_file` target that
+      doesn't exist yet) before checking containment, closing the symlink bypass; `looksLikePath` now
+      also flags bare `".."`; and `validateArguments` rejects any `~`-prefixed argument outright
+      (resolving it as a literal path would be actively misleading, since `path.resolve` doesn't do
+      shell tilde-expansion the way `bash`/`git` do). For the flag-value-embedded-path class that
+      genuinely can't be caught by per-argv-token containment, `git`/`curl`/`http_request`'s tool
+      descriptions (`tools/exec/builtins.ts`) now carry the same explicit "NOT fully confined" caveat
+      `bash`/`python` already had. 3 new backend tests, including a real symlink planted in the
+      workspace pointing at the backend root. Verified live against the real running backend:
+      `~/.ssh/id_rsa`, bare `..`, and a real `/etc`-pointing symlink all now rejected with a clean
+      400.
+- [x] **Mission-scope enforcement is bypassable and silently skipped for unknowns.** Fixed, all
+      five parts: `scopeMatcher.ts` now extracts IPv6 (bare and bracketed-in-URL, validated via
+      `node:net`'s `isIPv6` rather than a hand-rolled regex) with a `canonicalizeIPv6()` normalizer
+      so compressed/expanded/cased spellings of the same address compare equal, plus IPv6 CIDR
+      matching (`ipv6ToBigInt` + a 128-bit `BigInt` mask, mirroring the existing IPv4 CIDR check);
+      decimal/hex/octal IPv4 forms embedded in an actual `http(s)://` URL are covered for free since
+      Node's WHATWG `URL` host parser already normalizes those (`http://2130706433/` ->
+      `127.0.0.1`) - a bare schemeless alternate-form IP (as `curl 2130706433` accepts) is a
+      deliberate non-fix: a blanket "any integer could be a decimal IP" heuristic would misfire on
+      ordinary flag values (port numbers, thread counts, ...), so that case still falls through to
+      "unknown" rather than gaining a dedicated parser. New `backend/src/services/toolManager.ts#checkExecutionScope`
+      (extracted from the inline logic previously duplicated as it was added to `confirmExecution`
+      too) now: treats "unknown" as blocking when a strict (non-empty) `scope` allowlist is
+      configured, not just a warning; distinguishes "project not found"/"getProject threw" from "no
+      scope configured" - both now attach a `scopeWarning` ("could not be checked") instead of
+      silently skipping the check with no trace; and is called again in `confirmExecution` right
+      before the tool actually runs, so a mission's scope edited (or the project deleted) in the
+      window between request and confirm is re-checked at the last possible point, blocking the
+      confirm if now out of scope. Also fixed: a `"domain:port"`/`"ip:port"` scope entry now matches
+      by host only (`extractTargets` never carries a port through in the first place, so an entry
+      that included one previously matched nothing). 15 new backend tests (`scopeMatcher.test.ts` +9,
+      `toolManager.test.ts` +6 incl. a confirm-time-re-check race), 364 total, typecheck/oxlint clean.
+      Verified live against the real running backend: a strict-scope project's `bash -c "echo hi"`
+      (no identifiable target) now gets a clean 403 `OUT_OF_SCOPE` instead of silently running;
+      `curl http://[::1]/` against that same project blocks with `offending: ["::1"]` (previously
+      the exact bypass the finding named); a genuine in-scope `curl https://example.com` still runs;
+      and a tool request against a nonexistent `projectId` now returns a `scopeWarning` explaining
+      scope couldn't be checked, instead of silently skipping the check with no trace at all.
+- [x] **Outbound HTTP has no timeout anywhere.** Fixed: three new bounded timeouts, all
+      configurable (`NVD_REQUEST_TIMEOUT_MS`/`OLLAMA_REQUEST_TIMEOUT_MS`/`OLLAMA_CHAT_IDLE_TIMEOUT_MS`,
+      `config/env.ts`). `cveLookup.ts#queryNvd` and `ollama.ts`'s quick non-generation calls
+      (`listModels`/`embed`) now pass `AbortSignal.timeout(...)`, mapped to a clear
+      `OllamaTimeoutError`/`CveLookupError` message distinct from "connection refused". `/api/chat`
+      (`ollama.ts#streamChat`) deliberately does **not** get a fixed-duration timeout - a large local
+      model can legitimately run well past any reasonable fixed bound (confirmed live: a real 27B
+      model's model-load alone took 22s, total generation 32s). Instead it gets an *idle* timeout,
+      mirroring the frontend's existing `IDLE_TIMEOUT_MS` pattern
+      (`frontend/src/hooks/useChat.ts`) exactly: an `AbortController` armed for
+      `ollamaChatIdleTimeoutMs` (default 5 min) and re-armed on every chunk actually received,
+      combined with the caller's own cancellation signal via `AbortSignal.any` so either one stops
+      the stream - a connection gone genuinely silent (wedged Ollama) times out, a slow-but-alive
+      generation never does. This also resolves the sub-point about a hung `lookup_cves`
+      pseudo-tool pinning an orchestrator task past its time cap forever - it now surfaces a timeout
+      error within `NVD_REQUEST_TIMEOUT_MS` instead of hanging indefinitely. 12 new backend tests
+      (`ollama.test.ts` +8 incl. a fake-timers idle-timeout-fires case and a fake-timers
+      slow-but-alive-stream-is-not-killed case, `cveLookup.test.ts` +2), 372 total, typecheck/oxlint
+      clean. Verified live against the real running backend + a real local 27B model: `/api/models`
+      round-trips normally with the new bounded signal attached, and a real `/api/chat` call whose
+      model-load alone took 22s completed normally without being killed by the idle timer.
+- [x] **Streamed tool output is uncapped and there's no global execution concurrency limit.**
+      Fixed, both halves. `toolExecutor.ts#appendOutput` now checks the per-stream `truncated` flag
+      *before* calling `onOutput` (previously called unconditionally at the top, before the cap
+      check) and stops firing it entirely once a stream is truncated - the live-streamed bytes are
+      now bounded by the identical `maxOutputBytes` cap as the accumulated `stdout`/`stderr`, and
+      the boundary-crossing chunk is dropped from both, not just from the accumulated string.
+      Global concurrency: new `env.maxConcurrentExecutions` (`MAX_CONCURRENT_EXECUTIONS`, default 5)
+      enforced in `toolManager.ts#runRecord` - the one real chokepoint every real OS process spawn
+      already funnels through (manual requests, Orchestrator tasks, Scan Profiles alike), so a
+      single check there covers all of them with no separate scan/task-level limiter needed.
+      `runningControllers.size` (already tracking exactly "processes currently spawned") doubles as
+      the live count with no new counter. Not a queue, by design: a confirm beyond the cap fails
+      fast with a new `TooManyConcurrentExecutionsError` (429 `TOO_MANY_CONCURRENT_EXECUTIONS`)
+      *before* anything is spent - the execution record is left untouched at
+      `pending_confirmation`, so the human just confirms again once a slot frees up. 2 new backend
+      tests (`toolExecutor.test.ts` +1 proving `onOutput` stops firing once truncated,
+      `toolManager.test.ts` +1 spinning up `maxConcurrentExecutions` real long-running processes,
+      confirming the next one over the cap is rejected untouched, then confirming it again
+      succeeds once a slot frees). 374 total, typecheck/oxlint clean. Verified live against the
+      real running backend: 6 concurrent `bash -c "sleep 5"` confirms → exactly 5 succeeded, 1 got a
+      clean 429 with the execution still `pending_confirmation` (confirmed via `GET
+      /api/tools/executions`), then confirming that same execution again after the others finished
+      succeeded normally; separately, a `bash -c` emitting 3MB of output → the live-streamed NDJSON
+      total and the final stored `result.stdout` were each independently capped at exactly 1,044,480
+      bytes (`truncated: true`), not the full 3MB.
+- [x] **Chat `options` forwarded unvalidated → local Ollama OOM.** `routes/chat.ts:48-51`,
       `routes/agents.ts:110`, `chatService.ts:47-53` cast `body.options` straight through to Ollama;
       a huge `num_ctx`/`num_predict` (or out-of-range temperature/top_p) makes the local Ollama
-      allocate context RAM per request. Suggested fix: clamp/whitelist server-side (e.g.
-      `num_ctx ≤ 131072`).
-- [ ] **`deleteProject` leaves all in-memory state intact; ghost records persist and can be
-      re-hydrated.** `backend/src/services/projectManager.ts:79-83` only `rm`s the directory. The
-      per-service `Map`s (`orchestrator.ts`, `toolManager.ts`, `findingsManager.ts`, `scanRunner.ts`,
-      `reportManager.ts`, `multiAgentOrchestrator.ts`) still return records for the deleted project,
-      and any later write recreates the dir because `writeProjectJson` does `mkdir(recursive)` -
-      e.g. an in-flight scan/task during deletion, or a new `requestExecution` reusing the id, then
-      next boot re-hydrates from the recreated dir. Suggested fix: purge the project's records from
-      every store on delete (or gate project-scoped writes on project existence).
-- [ ] **Task transcripts grow unboundedly and embed full (1MB each) tool output** -
-      `backend/src/services/orchestrator.ts:692-710` serializes `execution.result.stdout/stderr`
-      verbatim into a tool-role message; there is no cap on `task.messages` length or cumulative
-      bytes, so `orchestrator-tasks.json` grows without bound and each `advance` resends the whole
-      (ever-growing) history to Ollama. Suggested fix: truncate tool-result payloads stored in
-      `task.messages` to a few KB (matching what the frontend renders), and/or cap message count.
-- [ ] **Project-scoped data hooks can land stale responses after a quick project switch.**
-      `frontend/src/hooks/useTools.ts:13-28`, `useFindings.ts:12-27`, `useActivity.ts:16-34`,
-      `useReports.ts:16-31`, `useScans.ts:29-44` - each `refresh` depends only on `[projectId]`, no
-      AbortController and no "still the current project" check; views stay mounted forever and each
-      view has its own project selector, so a slow response for project A resolving after project B
-      can render the wrong project's executions/findings/reports/scans/tasks (and the late
-      `finally { setLoading(false) }` clears loading early). Suggested fix: guard at resolution time
-      with a `projectIdRef` comparison (the pattern `useChat`/`useOrchestratorTask` already use).
-- [ ] **`ProjectPanel.disabled` (the documented mid-task lock) is never wired in the Workbench.**
-      `frontend/src/components/OrchestratorWorkbench.tsx:108-118` renders `<ProjectPanel … />`
-      without `disabled`, though `ProjectPanel.tsx:18-20` documents it as the guard against
-      switching/deleting the project mid-task and `MultiAgentPlanner.tsx:180` shows the intended
-      wiring. While a task session or a scan is running, the user can deselect/delete the project;
-      `useScans.ts:103` then appends a scan that finished for the *old* project into the *new*
-      project's list. Also `ProjectPanel.tsx:158-164` uses `aria-disabled` on a real `<button>`,
-      which doesn't block keyboard activation (Enter/Space still fire `onClick`). Suggested fix:
-      pass `disabled` from the Workbench when any task session is non-terminal or a scan is running,
-      and guard inside the handler or use a real `disabled`.
-- [ ] **`Sheet` is a modal with no focus management** - `frontend/src/components/ui/Sheet.tsx:18-44`:
+      allocate context RAM per request. Fixed: new `sanitizeChatOptions()`
+      (`routes/chatValidation.ts`) replaces the raw cast in both routes - only the four known
+      `ChatOptions` fields survive, each clamped into a safe range (`temperature` 0-2, `top_p` 0-1,
+      `num_predict`/`num_ctx` ≤ 131072, preserving Ollama's `-1`/`-2` `num_predict` sentinels),
+      anything else (unknown keys, wrong types, `NaN`/`Infinity`) silently dropped rather than
+      rejecting the whole request - these are resource knobs, not worth a hard 400 over. 15 new
+      backend tests. Verified live: a request with `num_ctx: 999999999` no longer reaches Ollama
+      unclamped; a normal in-range request round-trips unchanged.
+- [x] **`Sheet` is a modal with no focus management** - `frontend/src/components/ui/Sheet.tsx:18-44`:
       no `role="dialog"`/`aria-modal`, no focus trap (Tab reaches background content), no Escape-to-
       close, no focus move-in/restore. Affects five surfaces: `SettingsPanel.tsx:25`,
       `AgentEditor.tsx:166`, `MissionEditor.tsx:136`, `FindingDetails.tsx:168`, `ReportsPanel.tsx:86`.
-      Suggested fix: `role="dialog" aria-modal="true"`, autofocus, trap Tab, close on Escape, restore
-      focus to the opener on close.
+      Fixed exactly as suggested, all five surfaces at once via the shared component: `role="dialog"
+      aria-modal="true"`, focus moves to the first focusable element on open (`requestAnimationFrame`-
+      deferred so framer-motion has mounted children first), Tab is trapped inside the panel (wraps at
+      both edges instead of reaching background content), Escape closes it, and focus restores to
+      whatever opened it on close. 5 new tests (`Sheet.test.tsx`, new file). Verified live in-browser:
+      Escape closed the Findings details drawer cleanly with no regression across all 5 consuming
+      surfaces (full frontend suite green).
+- [x] **`deleteProject` leaves all in-memory state intact; ghost records persist and can be
+      re-hydrated.** Fixed via the "purge on delete" option: new `projectManager.ts#onProjectDeleted`
+      callback registry - each of the six project-scoped services (`toolManager.ts`,
+      `orchestrator.ts`, `findingsManager.ts`, `scanRunner.ts`, `reportManager.ts`,
+      `multiAgentOrchestrator.ts`) registers a handler at its own module load time that purges that
+      store's `Map` entries for the deleted project id; `deleteProject` calls every registered
+      handler (each wrapped in its own try/catch so one failing can't block the others or the delete
+      itself) right after removing the directory. A callback registry rather than
+      `projectManager.ts` importing each service directly, since those services already import
+      `getProject`/etc. from it - a reverse import would be circular. `toolManager.ts`'s handler also
+      aborts a still-*running* execution's real subprocess (not just removing the stale Map entry) so
+      it can't outlive the project it belonged to; `orchestrator.ts`'s does the same for a
+      still-running task's generation. 13 new backend tests (`projectManager.test.ts` +3 for the
+      registry mechanism itself - a handler is called with the right id, one handler throwing
+      doesn't block the others or the delete, handlers aren't called when deletion itself fails;
+      `toolManager.test.ts` +4 and `orchestrator.test.ts` +3 for the actual purge behavior -
+      including a still-running execution/task genuinely getting aborted, not just delisted). 391
+      total, typecheck/oxlint clean. Verified live against the real running backend: deleted a
+      project mid-execution of a real `sleep 10` subprocess - `ps` confirmed the process was
+      actually killed, and `GET /api/tools/executions` immediately returned `[]` instead of the
+      stale record; a clean delete (nothing in flight) leaves the project directory gone entirely,
+      no residue. **One residual, deliberately-accepted gap found via that same live test**: the
+      in-flight case's own `persistExecutions()` call (already in progress when the abort lands)
+      still fires afterward and recreates an *empty* orphan directory via `writeProjectJson`'s
+      `mkdir(recursive)` - confirmed harmless (the write re-derives from the already-purged Map, so
+      it persists `[]`, not the stale record; `GET /api/projects` correctly omits it since it has no
+      `project.json`; a restart's hydration reads the same empty array). Closing this fully would
+      mean the alternative suggested fix - gating every project-scoped write on project existence -
+      an extra fs check on every write across all six services to prevent a cosmetic empty
+      directory, not a real data leak; left as a known, narrow, low-value edge case rather than
+      pursued.
+- [x] **Task transcripts grow unboundedly and embed full (1MB each) tool output.** Fixed:
+      `orchestrator.ts#resumeTask` (the sole place a tool result gets embedded into `task.messages`)
+      now truncates `stdout`/`stderr` to 4000 bytes each (`truncateForTranscript`, UTF-8-byte-boundary-
+      safe, appends a "...[truncated, showing N of M bytes]" note) and `parsedOutput` shape-aware
+      (`truncateParsedOutputForTranscript`): an array (the common case - subfinder/httpx/etc, easily
+      thousands of entries) capped to 200 items plus a truncation-note entry; a string capped the
+      same way as stdout; any other JSON-serializable shape (an object, from the "json" parser) falls
+      back to a byte-capped serialized string if it's actually over the limit. Deliberately did not
+      add a separate cap on `task.messages` *count* - `env.maxOrchestratorToolCalls` (default 10)
+      already bounds how many tool-result messages one task can ever accumulate, so per-message
+      truncation is what actually bounds total transcript size (worst case now ~10 x a few KB instead
+      of ~10 x 2MB). A completely different concern from `toolExecutor.ts`'s own
+      `DEFAULT_MAX_OUTPUT_BYTES` (1MB per stream) - that bounds one execution's own memory/streamed
+      output and is untouched; this bounds what gets resent to the model on every subsequent
+      `advance()` call and persisted to `orchestrator-tasks.json` forever. 5 new backend tests
+      (large stdout/stderr truncated with the byte count correct, small ones left untouched, a
+      500-item array capped to 200 + a note, an oversized object falling back to a truncated
+      string). 395 total, typecheck/oxlint clean. Verified live against the real running backend
+      with a real local model: asked General Assistant to run `bash -c "head -c 20000 /dev/zero |
+      tr '\0' 'a'"` - the real `ExecutionRecord.result.stdout` correctly held the full 20,000 bytes
+      (toolExecutor's own cap, untouched), while both the task's in-memory transcript and the
+      persisted `orchestrator-tasks.json` on disk correctly held only 4,044 bytes (4000 truncated +
+      the marker text) for that same tool result.
+- [x] **Project-scoped data hooks can land stale responses after a quick project switch.**
+      `frontend/src/hooks/useTools.ts:13-28`, `useFindings.ts:12-27`, `useActivity.ts:16-34`,
+      `useReports.ts:16-31`, `useScans.ts:29-44` - pre-nav-simplification layout; these now guard at
+      resolution time with a `missionIdRef` comparison + request abort (the `useChat`/
+      `useOrchestratorTask` pattern) and cover the mutation-settlement paths too. See POLISH.md A1.
+      (2026-09-20)
+- [x] **`ProjectPanel.disabled` (the documented mid-task lock) is never wired in the Workbench.**
+      Pre-nav-simplification; post-rename the prop (now `MissionPanel`) is fully implemented and IS
+      wired: `WorkOrdersView` passes `disabled={hasActiveTask}` (running/waiting_approval), and the
+      card click/keyboard handlers also guard on `disabled`. See POLISH.md A2. (2026-09-20)
 
 ### Low
 
-- [ ] `assertNotPrivileged` is case-sensitive (`backend/src/services/toolManager.ts:177`) -
+- [x] `assertNotPrivileged` is case-sensitive (`backend/src/services/toolManager.ts:177`) -
       `/\b(sudo|doas|pkexec|su)\b/` misses `Sudo`/`SUDO`; with no TTY most sudo installs still fail,
-      so this is belt-and-suspenders, but make it case-insensitive and also reject `setsid`/`env`-
-      wrapped variants.
-- [ ] Cancel/timeout kills the direct child, not the process group (`backend/src/services/toolExecutor.ts:75-77`) -
-      no `detached:true` + `kill(-pid)`, so `bash -c 'sleep 3600 &'` leaks orphan processes; repeated
-      aborts accumulate.
+      so this is belt-and-suspenders. Now case-insensitive (`/i`) and also rejects `setsid` (escapes
+      the A4 process-group kill); env-wrapped escalations are caught by the verb match, bare `env`
+      stays allowed. See POLISH.md A6. (2026-09-20)
+- [x] Cancel/timeout kills the direct child, not the process group (`backend/src/services/toolExecutor.ts:75-77`) -
+      no `detached:true` + `kill(-pid)`. Now `detached:true` + `process.kill(-pid, SIGTERM)` on
+      external abort / timeout / already-aborted. See POLISH.md A4. (2026-09-20)
 - [ ] Log injection / server-path disclosure - `toolManager.ts` logs `record.resolvedCommand`
       (agent-controlled argv, can contain ANSI/newlines); `InvalidToolArgumentsError` echoes
       `env.workspaceRoot` verbatim to any caller, disclosing the server filesystem layout.
-- [ ] RAG index persists full file text; a misconfigured `WORKSPACE_ROOT` (`.`, `..`, or `backend/`)
+- [x] RAG index persists full file text; a misconfigured `WORKSPACE_ROOT` (`.`, `..`, or `backend/`)
       would index `backend/data/projects/*` (sensitive scope/notes/evidence) and make it retrievable
-      via `search_knowledge_base`. Dotfiles/symlinks are already skipped.
+      via `search_knowledge_base`. Now `walkWorkspace` always skips the app's own `backend/data`
+      subtree (lexical containment in the walk, plus a full no-op if `WORKSPACE_ROOT` lands inside
+      it). Dotfiles/symlinks are still skipped. See POLISH.md A5. (2026-09-20)
 - [ ] Prompt injection surface: scanner/parser output and finding evidence (attacker-controlled web
       content) is fed raw into the report-writer prompt and re-enters the orchestrator transcript;
       and unauthenticated `POST/PUT /api/agents` lets a rebinding/LAN attacker rewrite
       `systemPrompt`/`execTools` of agents the human later drives. Bind this to whatever auth is
       added for the High item.
-- [ ] No security headers (no `X-Content-Type-Options`/`X-Frame-Options`); `CORS_ORIGIN=*` accepted
-      without warning.
+- [x] No security headers (no `X-Content-Type-Options`/`X-Frame-Options`); `CORS_ORIGIN=*` accepted
+      without warning. Now `securityHeaders.ts` middleware sets nosniff / DENY / no-referrer /
+      same-origin CORP / strict CSP. See POLISH.md A8. (2026-09-20)
 - [ ] `maxOrchestratorTaskTimeMs` is only enforced *between* agent calls, not during a single
       generation (`orchestrator.ts:527`) - a single long model call runs past the cap. Document as
       loop-only or pass a deadline into `collectAgentReply`.
@@ -336,39 +480,60 @@ a findings list, pending a decision on scope like last time. Baseline sanity che
       is the only trace. Deliberate, but worth a doc line.
 - [ ] `pendingStdin` entries are never evicted for abandoned `pending_confirmation` executions
       (`toolManager.ts:339`) - a large `write_file` payload stays resident for the process lifetime.
-- [ ] `activeExecutionByScan` leaks a stale id if `confirmExecution` throws (`scanRunner.ts:171-175`);
+- [x] `activeExecutionByScan` leaks a stale id if `confirmExecution` throws (`scanRunner.ts:171-175`);
       a `cancelScanRun` in that window calls `cancelExecution` on a dead id and swallows the throw.
       Put the delete in a `finally`.
-- [ ] `listExecToolsWithStatus` runs synchronous child processes inside request handlers
+- [x] `listExecToolsWithStatus` runs synchronous child processes inside request handlers
       (`toolManager.ts:101-138`, ~20 tools × up to two `spawnSync` probes incl. a 3s version timeout)
-      on every `GET /api/tools`, `PATCH /api/tools/:id`, and scan preview - blocks the event loop.
-      Memoize with a short TTL or probe async.
-- [ ] No timeout/abort on RAG reindex (`ragIndex.ts:119-161`, `routes/rag.ts:12-18`) - a hung Ollama
+      on every `GET /api/tools`, `PATCH /api/tools/:id`, and scan preview. Now memoized with a 10s
+      TTL, invalidated on register/toggle/override-load. See POLISH.md A3. (2026-09-20)
+- [x] No timeout/abort on RAG reindex (`ragIndex.ts:119-161`, `routes/rag.ts:12-18`) - a hung Ollama
       leaves `POST /api/rag/reindex` hanging indefinitely, and a second reindex isn't coordinated.
-- [ ] Frontend `OrchestratorTask` type omits `projectId` and `model`
+      Now: in-flight guard (409) + overall 5-min budget signal (504) threaded through `embed`, plus
+      an always-exclude of `backend/data` from the walk. See POLISH.md A5. (2026-09-20)
+- [x] Frontend `OrchestratorTask` type omits `projectId` and `model`
       (`frontend/src/types/orchestrator.ts:18-31` vs `backend/src/services/orchestrator.ts:59-77`) -
       a strict subset, so it typechecks but future backend fields are silently invisible.
-- [ ] `lastPositionalArg` misattributes the target for `dig <domain> <type>` (`parsers/index.ts:24`,
-      `parsers/shared.ts:16-21`) - `dig example.com A` attributes findings to `"A"`. Use the first
-      non-flag arg for dig/whois.
+- [x] `lastPositionalArg` misattributes the target for `dig <domain> <type>` (`parsers/index.ts:24`,
+      `parsers/shared.ts:16-21`) - `dig example.com A` attributes findings to `"A"`. Now a
+      `firstPositionalArg` helper, used for dig/whois. See POLISH.md A7. (2026-09-20)
 - [ ] Creation status codes are inconsistent (200 for projects/tools, 201 for findings/agents,
       streaming for scans/orchestrator/plans/reports) - cosmetic, but worth standardizing.
 - [ ] Five near-identical NDJSON write/error loops (`streamUtils.ts` vs `routes/orchestrator.ts:32-60`,
       `plans.ts:53-81`, `tools.ts:99-130`, `scanners.ts:94-110`, `reports.ts:70-95`) with subtly
       different event types - a shared "stream terminal object" helper would remove the drift risk.
-- [ ] Confirmed dead/inert code: `extensions/pluginRegistry.ts` + `extensions/retrievalRegistry.ts`
+- [x] Confirmed dead/inert code: `extensions/pluginRegistry.ts` + `extensions/retrievalRegistry.ts`
       zero importers (the still-planned Plugin system); `toolRegistry.ts` empty so any agent setting
       `tools` throws `UnknownToolError`. All documented in CLAUDE.md - keeping them intentional, not
       new findings.
-- [ ] `Markdown.tsx:22` code-block copy button is keyboard-invisible (no `focus-visible:opacity-100`)
+      **Partially resolved 2026-09-20: `pluginRegistry.ts`/`retrievalRegistry.ts` (and
+      `types/plugin.ts`) were deleted in commit a65fb26**; `toolRegistry.ts` remains the intentional
+      inert extension point (zero tools registered, documented).
+- [x] `Markdown.tsx:22` code-block copy button is keyboard-invisible (no `focus-visible:opacity-100`)
       and `handleCopy` (`Markdown.tsx:11-15`) has no `try/catch` - `navigator.clipboard.writeText`
       can reject (permissions/insecure context), producing an unhandled rejection.
-- [ ] Finding drawer can show a stale cross-project finding - `FindingsView.tsx:161` falls back to
+- [x] Finding drawer can show a stale cross-project finding - `FindingsView.tsx:161` falls back to
       the previous project's finding object after a project switch (only `selectedIds` is cleared,
       not `selectedFinding`); an update issued from that drawer would PATCH the old project's finding.
+      Fixed: `setSelectedFinding(null)` added to the same effect that already clears `selectedIds` on
+      `selectedProjectId` change. 1 new `FindingsView.test.tsx` test (new file - no prior FindingsView
+      test coverage existed) reproducing the exact regression (select a finding, switch project,
+      assert the drawer shows nothing rather than the stale object).
 - [ ] Doc drift: DEVELOPMENT.md says "3 pre-existing `only-export-components` warnings" - `oxlint`
       now reports 5 (`FindingsTimeline.tsx` + `OrchestratorTaskView.tsx`). Everything else checked
-      (test counts 328/252, feature claims, `.env.example` keys) is accurate.
+      (test counts 328/252, feature claims, `.env.example` keys) is accurate. **Update (2026-08-17):**
+      back down to 3 (`OrchestratorTaskView.tsx` only) - `FindingsTimeline.tsx`'s 2 were fixed as a
+      side effect of breaking two real import cycles the graph tooling flagged
+      (`FindingDetails.tsx ↔ FindingsTimeline.tsx ↔ FindingsView.tsx` and
+      `FindingsTable.tsx ↔ FindingsTimeline.tsx ↔ FindingsView.tsx`, both caused by
+      `FindingsTimeline.tsx` importing `SELECT_CLASS` back from `FindingsView.tsx` while itself
+      exporting `STATUS_TONE`/`STATUS_VERB` to `FindingsTable.tsx`/`FindingDetails.tsx`) - the shared
+      constants moved to new leaf modules `frontend/src/lib/findingStatus.ts` and
+      `frontend/src/components/ui/selectClass.ts`, which also deduplicated a `FINDING_STATUSES` array
+      that had been copy-pasted verbatim into both `FindingsTimeline.tsx` and `FindingDetails.tsx`.
+      DEVELOPMENT.md's warning count is still stale at "3" from before this session (was accurate
+      when written, now redundant with this note) - worth a one-line correction next time that file
+      is touched, not urgent enough on its own.
 
 ## Next up
 
@@ -658,6 +823,65 @@ a findings list, pending a decision on scope like last time. Baseline sanity che
       confirm card (objective, tool-call bubble, Approve/Reject) was still there byte-for-byte -
       previously this would have reset to a blank "Starting…"/New Task view. See DEVELOPMENT.md's
       "Persistent top-level views (nav-switch state loss)" section.
+- [x] Findings Graph usability pass (2026-08-17). The filter bar (search/severity/type/tool/target/
+      tag/confidence/agent) previously only applied to Table/Timeline mode - switching to Graph hid
+      the filter bar entirely and the graph always rendered every finding, unfiltered. Done:
+      `FindingsGraphView` gained an optional `visibleFindingIds` prop; `FindingsView` now shows the
+      filter bar in Graph mode too and passes the filtered id set through - non-matching finding
+      nodes (and their edges) dim in place rather than the graph ignoring filters silently, with a
+      live "N matching filters" badge next to a new node/edge count. Also added: hover/keyboard-focus
+      highlighting (a node and its direct neighbors light up, everything else dims - makes tracing
+      relationships in a dense graph actually usable, previously mouse-drag-only with no way to trace
+      connections at all); full keyboard accessibility on finding nodes (`tabIndex`, `role="button"`,
+      `aria-label`, Enter/Space to select - previously nothing in the graph was keyboard-reachable);
+      and a real light-theme bug fix (edges were hardcoded to a dark-only white color, now
+      `var(--color-border-strong)`, theme-aware). 4 new `FindingsGraphView.test.tsx` tests. Verified
+      live in-browser against a real 49-node/92-edge project graph: filter dimming, hover highlight,
+      and keyboard selection (via accessibility-tree lookup + Enter) all confirmed working.
+- [x] Tool selection hints (2026-08-18). User-reported: agents reliably used a tool once told which
+      one, but didn't reliably pick the right one on their own from a bare objective. The
+      autonomous decide-and-call loop already existed (Task 2 below) - the gap was that the ~20
+      real `ExecTool` descriptions in the tools preamble were one-liners with no "use this when..."
+      cue or `arguments` example, unlike the pseudo-tools which already had worked examples. Done:
+      new optional `ExecTool.usageHint` field, populated for all 20 builtins
+      (`tools/exec/builtins.ts`) with a short "when to use" clause + a minimal `arguments` example,
+      appended after the description in `orchestrator.ts#buildToolsPreamble` only when present -
+      kept separate from `description` so the Tool Registry UI stays exactly as concise as before.
+      A real side-finding surfaced while writing this pass (fixed separately, see below): the
+      orchestrator's plain-text tool-request convention has no `stdin` field at all, so an
+      agent-driven `write_file` call could never supply real content - always created an empty file.
+      1 new backend test, 375 total, typecheck/oxlint clean. Verified live with real local models:
+      Web Analyzer (system prompt names zero tools) given "Check what web server and technology
+      stack https://scanme.nmap.org is running" (no tool named) correctly requested
+      `{"tool": "httpx", "arguments": ["-u", "https://scanme.nmap.org"]}`, matching httpx's hint
+      example exactly. See DEVELOPMENT.md's "Tool selection hints" section.
+- [x] Agent-driven write_file couldn't actually write content (2026-08-18). The side-finding above,
+      fixed for real - and turned out worse than first assessed: checking every reachable caller
+      showed this wasn't orchestrator-specific at all, the frontend's `requestToolExecution` (the
+      only client function that can attach `stdin`) has zero callers anywhere - there's no "manual
+      new tool request" UI, only confirm/reject/cancel on executions something else already created.
+      So `write_file` (`tee`) was 100% non-functional for real content through any path in the app.
+      Done: `write_file`'s own `usageHint` now tells the model to reply with `arguments: [path,
+      content]` (exactly two elements); new `orchestrator.ts#splitWriteFileContent`, called right
+      before `requestExecution` in `advance()`, translates that into the real shape
+      (`arguments: [path], stdin: content`) - every other tool is untouched, this is a no-op unless
+      `toolRequest.tool === "write_file"`. Kept the existing deliberate design that stdin content
+      never lands in the persisted/listable `ExecutionRecord` (large/sensitive content shouldn't
+      linger in history) - but that meant the confirming human would approve a real write with zero
+      visibility into what's being written, cutting against this app's "human stays the approval
+      authority" principle. Rejected a `bash`+heredoc reimplementation (would reintroduce
+      shell-quoting hazards into the one tool immune to them by construction). Shipped instead: a
+      generic byte-count annotation on `resolvedCommand` whenever `body.stdin` is set - `tee
+      agent-output.txt (stdin: 55 bytes)` - enough to sanity-check without the content itself ever
+      persisting. 6 new backend tests (`orchestrator.test.ts` +3, `toolManager.test.ts` +3 incl. a
+      real UTF-8-vs-JS-string-length case). 381 total, typecheck/oxlint clean. Verified live
+      end-to-end with a real local model: General Assistant given "Save the text '...' to a file
+      named agent-output.txt" correctly requested the two-element `write_file` call; the pending
+      execution's persisted `arguments` were confirmed to be just `["agent-output.txt"]` (content
+      never touched the record) while `resolvedCommand` showed `(stdin: 55 bytes)`; confirming it
+      wrote the real file with the exact content, byte for byte - the precise thing that silently
+      didn't work at all before. See DEVELOPMENT.md's "Fixed: agent-driven write_file couldn't
+      actually write content" section.
 
 ## Later (once a real tool is wired up)
 
@@ -987,28 +1211,144 @@ all render correctly in the browser.
       Orchestrator task (tools + human confirmation all apply), context chained step to step
 - [x] Human stays the approval authority, confirmation-gated — inherited from the single-agent
       Orchestrator underneath every step; nothing in this codebase's design bypasses it anywhere
-- [ ] **Automatic** planning from one high-level instruction — `createPlan` takes a
-      user-*authored*, ordered `{agent, objective}[]` list (`MultiAgentPlanner.tsx`'s step
-      builder); there is no "Assess this target" single-input mode that decides the agent sequence
-      itself
-- [ ] Automatic hand-off / dynamic re-planning (assign specialist agents, create follow-up tasks
-      based on what recon finds) — plans are static once created; a step can't spawn new steps or
-      choose the next agent based on its own results
-- [ ] Asset-inventory updates as an explicit mission-controller responsibility — depends on Task 3's
-      Assets concept existing first
-- [ ] A live "mission graph" UI (current/completed/waiting agents, pending tasks, tool executions,
-      findings, approval requests, mission progress, all in one visual) — `MultiAgentPlanner.tsx`
-      shows a step builder + linear run view with collapsible completed-step summaries, not a graph;
-      `AgentNetwork.tsx` is graph-shaped but visualizes open chat/task *sessions*, not a mission's
-      live execution state
-- [ ] Report preparation as the final automatic step of a mission — Report generation exists
-      (`reportManager.ts`) but is a separate, manually-triggered action (select findings → generate),
-      not something a controller invokes on its own at the end of a run
+- [x] Automatic planning above the existing orchestrator — `services/factoryDirector.ts`
+      (`advanceMission`), built as part of the Bug Bounty Factory transformation (see
+      DEVELOPMENT.md's section of that name). Deliberately **deterministic/rule-based rather than a
+      free-form "Assess this target" single-LLM-instruction planner** (no assets yet → Recon; a new
+      domain/subdomain/ip asset → Enumeration; an unsettled finding → Validation) — a considered v1
+      choice for reliability/testability over the more open-ended design this checklist originally
+      envisioned, documented as a real design call rather than a shortfall. The existing `planner`
+      agent could still be layered in later as a smarter planning step; not done here.
+- [x] Automatic hand-off / dynamic re-planning (assign specialist agents, create follow-up tasks
+      based on what recon finds) — `factoryDirector.ts#seedWorkOrders`, idempotent across repeated
+      `advanceMission` calls, auto-chains through everything that doesn't need human approval; live-
+      verified end to end (recon → asset discovered → enumeration auto-seeded → finding created →
+      validation work order auto-seeded)
+- [x] Asset-inventory updates as an explicit mission-controller responsibility — `services/
+      assetManager.ts` is a real store now (`types/asset.ts`), `upsertAsset` called centrally from
+      `findingsManager.ts`'s ingest path plus a new `upsert_asset` pseudo-tool, exactly as this task
+      anticipated once Task 3's Assets concept existed for real (see the Bug Bounty Factory
+      transformation section — Assets moved from Task 3's deliberate "derive from Findings" choice
+      to a real stored entity as part of this work, on the user's explicit instruction)
+- [x] A live mission visual (current/completed/waiting agents, pending tasks, tool executions,
+      findings, approval requests, mission progress) — `FactoryDashboard.tsx` (stat tiles + a
+      "Start/Advance Factory" action) + `FactoryPipeline.tsx` (10-stage pipeline view) +
+      `ApprovalQueue.tsx` (aggregated pending confirmations) + `WorkOrdersView.tsx`, all built from
+      real `WorkOrder`/`Asset`/`Finding`/activity data — not literally a node-graph like
+      `AgentNetwork.tsx`'s session map, but the same live-status information the original checklist
+      item asked for, in dashboard/pipeline form instead
+- [ ] Report preparation as the final automatic step of a mission — still a separate,
+      human-triggered action (select findings → generate); the Factory Director advances a mission's
+      `status` to `"reporting"` once everything else has settled, but deliberately does **not**
+      auto-invoke `reportManager.ts` itself — report generation crossing into "the AI decided to
+      publish something" felt like it warranted an explicit human trigger even in an otherwise
+      autonomous pipeline, same spirit as every other approval gate in this app. Not pursued further
+      this pass.
 
-**Real gaps**: nearly the whole thing. What exists (`multiAgentOrchestrator.ts`) is a solid
-foundation - a "Mission Controller" could plausibly be built as a layer that (1) takes one
-objective, (2) calls an LLM (e.g. the existing Planner agent) to *decide* the `{agent, objective}[]`
-plan instead of requiring the user to author it, (3) feeds that into the existing `createPlan`, and
-(4) adds a real-time graph view on top of a plan's existing step statuses - but that's a genuinely
-large feature, depends on Task 3's Assets/scope work for the "update asset inventory"/scope-aware
-parts to mean anything, and hasn't been started. Almost certainly the last of the five to tackle.
+**Status: mostly done (see the "Bug Bounty Factory transformation" section of DEVELOPMENT.md for the
+full write-up).** The one remaining item (fully automatic report triggering) is a deliberate scope
+boundary, not an oversight — reference this list again if that boundary should move.
+
+## Known issues surfaced during the Bug Bounty Factory transformation (2026-08-19)
+
+Found during live end-to-end verification of the transformation above (see DEVELOPMENT.md and
+`rework.md`), not fixed in that pass since none block the transformation itself:
+
+- [x] **`CLAUDE.md`'s "Agents" section is stale/inaccurate.** (Since corrected.) It says agent configs are "Loaded
+      fresh from disk on every GET /api/agents call - not cached at boot." `agentManager.ts` actually
+      caches the agent list in a module-level variable after first load and only refreshes via
+      `reloadAgents()` (hit by create/update/delete, or `POST /api/agents/reload`) — editing a
+      `backend/data/agents/*.json` file directly does *not* take effect until that endpoint is
+      called. Pre-existing, not introduced by this session's work; surfaced by hand-editing an
+      agent's `model` for live testing and seeing the old value keep winning until reload was called
+      explicitly. One-line `CLAUDE.md` correction, whenever that section is next touched.
+- [x] (Retry button exists in `WorkOrdersView.tsx`, verified live 2026-11-05.) **The Factory Director never retries a work order once one exists for an agent, even if it
+      failed.** `factoryDirector.ts#seedWorkOrders`'s dedup check (`existing.some((wo) => wo.agentId
+      === RECON_AGENT_ID)`) matches regardless of status - a deliberate "human-attention signal, not
+      something to paper over" per that file's own doc comment, but there's currently no UI
+      affordance nudging a human toward the obvious recovery (manually create a fresh `WorkOrder` for
+      the same agent via `POST /api/missions/:id/workorders`, confirmed live during verification as
+      the actual working path). Worth a "Retry" button on a failed work order card in
+      `WorkOrdersView.tsx` that does exactly this, rather than requiring a human to know the API.
+- [ ] Local-model tool-call formatting compliance remains an open, pre-existing characteristic (not
+      new): a 27B model validating a finding reasoned in prose before emitting the `validate_finding`
+      tool-call JSON and got cut off by `maxTokens`, so the whole reply was correctly treated as a
+      plain-text final answer rather than a tool call (no state changed, no bug — see the "Two
+      tool-calling mechanisms" section of `CLAUDE.md` and the original "Tool-calling round trip"
+      section of DEVELOPMENT.md for the same gap documented elsewhere). Worth considering a slightly
+      higher default `maxTokens` for `vulnerability-validator` specifically, given its new checklist-
+      driven system prompt now asks for more reasoning before the verdict than the original one did.
+
+## Nav simplification follow-ups (2026-08-19)
+
+Surfaced while cutting Chat/Workbench/Plans/standalone-Evidence per direct user feedback (see
+DEVELOPMENT.md's "Nav simplification" section) - not fixed in that pass, flagged for a decision:
+
+- [x] **`SettingsPanel.tsx`'s settings (temperature/top_p/max tokens/context size/keep-alive) are
+      now fully orphaned.** They existed to configure manual (no-agent) Chat requests; now that Chat
+      is gone, nothing in the app reads `useSettings.ts`'s stored values any more - every agent's
+      sampling settings come from its own `backend/data/agents/*.json` config instead. The gear-icon
+      Settings panel still opens and still persists values to `localStorage`, it just has no effect
+      on anything. Options: remove it entirely (continues the same simplification this session did),
+      or repurpose it as an editable *default* that seeds new agent configs / work order objectives
+      - needs a decision, not a unilateral call.
+      **Resolved 2026-09-20 (POLISH.md B1): removed outright** - `SettingsPanel.tsx`,
+      `useSettings.ts`, `types/settings.ts`, the App wiring, the TopBar gear button, and the
+      Command Palette's settings command (its values ruled nothing; every agent carries its own
+      sampling config).
+- [x] (Retry button exists, verified live 2026-11-05.) A failed Work Order has no in-UI retry affordance - `factoryDirector.ts` will seed a fresh one
+      automatically once the blocking condition changes (e.g. scope gets added), but a work order
+      that failed for an unrelated transient reason (model briefly offline, a flaky tool) currently
+      needs a manual `POST /api/missions/:id/workorders` to retry. Worth a "Retry" button on a failed
+      Work Order card in `WorkOrdersView.tsx` that recreates it with the same agent/objective/target.
+
+## Audit findings (2026-11-05)
+
+Full-project audit and fix pass - see DEVELOPMENT.md's "Audit and fix pass (2026-11-05)" for what was
+fixed and why. Deliberately left open:
+
+- [ ] **The validator rubber-stamps.** In live runs on `qwen2.5-coder:7b` it wrote "Reproduced using
+      nmap" without running anything, and confirmed a misidentified `ppp?` service. `confirmed` currently
+      means an agent said so - consider requiring a tool execution in that task before accepting it.
+- [ ] **Scope has no port or path granularity, and `rules` is only advisory.** Given scope `127.0.0.1`
+      and rules naming one port, the recon agent scanned the host's top 1000 ports. Scope enforcement
+      passed it, correctly by its own definition.
+- [x] `ffuf` can't reach system wordlists (the workspace sandbox refuses them, correctly), so agents
+      stalled on it. `backend/workspace/wordlists/common.txt` now ships and the usage hint names it.
+- [ ] `nomic-embed-text` isn't installed here, so knowledge-base search fails despite a loaded index.
+- [ ] `katana`, `subfinder`, `amass` aren't installed; `/usr/bin/httpx` is not the ProjectDiscovery tool.
+- [x] The same port can land as two assets (`127.0.0.1:8765` from an agent, `8765/tcp` from the parser).
+      `upsertAsset` now merges them. A service still can (`8080` next to `8080/tcp:http`).
+- [ ] Time cap is checked between generations, not during one (the per-chunk idle timeout covers a
+      hung model; a slow-but-streaming reply can overrun by one generation).
+- [ ] Scan and report `GET`/`PATCH` routes look ids up across missions without checking the id in the
+      path belongs to that mission.
+- [ ] `InvalidToolArgumentsError` messages include absolute paths (local-only app, low impact).
+- [ ] An IPv4-mapped IPv6 target isn't matched against an IPv4 `outOfScope` entry.
+- [ ] Prompt injection is reduced, not solved: report prompts now mark finding data as untrusted, and
+      the UI won't auto-load remote images, but a local model can still follow injected text. The human
+      confirmation gate on every real tool run remains the actual control.
+- [ ] Still open from POLISH.md: route-level integration tests (D1), a shared NDJSON helper (D2),
+      status-code consistency (D3).
+- [x] After the UI cleanup (DEVELOPMENT.md, "UI cleanup"), try the Findings filter bar and report bar
+      on a mission with real findings. Done live, see DEVELOPMENT.md's "End-to-end mission run".
+
+## End-to-end mission run (2026-11-05)
+
+Left open by the live run - see DEVELOPMENT.md's "End-to-end mission run":
+
+- [x] **Reports contain evidence the model made up.** Evidence and reproduction sections are now
+      built from recorded executions, and anything else is labelled unverified - see "Report evidence
+      from recorded runs" in DEVELOPMENT.md.
+- [ ] **A report's prose can still overstate a finding.** The model's impact text can treat an unverified
+      finding as real (live run: "the exposure of backup files" over a made-up response) or misread real
+      output. It now sits next to the label that says so, but nothing checks the prose itself.
+- [ ] **Report remediation loses code blocks.** Sanitizing removes all of them, so a genuine config
+      snippet goes too. Accepted for now - a lost snippet costs less than a fake scan result.
+- [ ] **Validators and other agents confirm too easily.** Same root as "The validator rubber-stamps"
+      above: "Outdated Python" was confirmed as high, and `backup` was marked duplicate. Non-validator
+      agents can also call `validate_finding` - the Web Analyzer confirmed a port finding and raised it
+      to medium. Offer that tool to the validator only.
+- [ ] A failed order still counts toward the dashboard's "work orders failed" banner after a successful
+      Retry.
+- [ ] Agents ask for scans already done, and a rejected tool is often just requested again.

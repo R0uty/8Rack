@@ -10,8 +10,7 @@ import {
 } from "../services/agentManager.js";
 import { streamAgentChat } from "../services/chatService.js";
 import { abortOnClientDisconnect, pipeNdjsonStream } from "./streamUtils.js";
-import { isValidMessages, isValidToolNames } from "./chatValidation.js";
-import type { ChatOptions } from "../types/ollama.js";
+import { isValidMessages, isValidToolNames, sanitizeChatOptions } from "./chatValidation.js";
 import type { Agent } from "../types/agent.js";
 
 export const agentsRouter = Router();
@@ -107,7 +106,7 @@ agentsRouter.post("/:id/chat", async (req, res, next) => {
     {
       agentId: req.params.id,
       messages: body.messages,
-      options: body.options as ChatOptions | undefined,
+      options: sanitizeChatOptions(body.options),
       tools: body.tools,
       keepAlive: typeof body.keepAlive === "string" ? body.keepAlive : undefined,
       model: body.model as string | undefined,

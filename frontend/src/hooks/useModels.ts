@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { fetchModels } from "../services/api";
+import { fetchModels } from "../services/modelsApi";
 import { chatCapableModels } from "../lib/modelCapabilities";
 import type { OllamaModel } from "../types/ollama";
 

@@ -4,18 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-8Rack is a lightweight, modular wrapper around a local [Ollama](https://ollama.com) instance,
-built as the foundation for a local multi-agent bug bounty platform. Two workspaces, no shared
-root `package.json`: `backend/` (Express + TypeScript, ESM) and `frontend/` (React + TypeScript +
-Vite). No accounts, no database, no cloud storage — everything is local by design.
+8Rack is a local, no-cloud AI-powered bug bounty factory built on top of a local
+[Ollama](https://ollama.com) instance. An authorized engagement is modeled as a **Mission** (scope,
+out-of-scope, rules of engagement) that runs through a factory pipeline - Scope → Recon → Asset
+Discovery → Enumeration → Analysis → Vulnerability Discovery → Validation → Evidence → Report →
+Human Review - driven by purpose-built agents, real tool execution gated behind human confirmation,
+and a Factory Director that reads a mission's scope/assets/findings and advances that pipeline on
+its own between approvals. Two workspaces, no shared root `package.json`: `backend/` (Express +
+TypeScript, ESM) and `frontend/` (React + TypeScript + Vite). No accounts, no external database, no
+cloud storage - everything is local by design.
 
 For the full build history, key architectural decisions (and why), and known gaps, read
-`DEVELOPMENT.md` before making non-trivial changes — it has context that isn't obvious from the
-code alone. `TODO.md` has the current actionable next-steps list.
+`DEVELOPMENT.md` before making non-trivial changes - it has context that isn't obvious from the
+code alone, including the "Bug Bounty Factory transformation" and "Nav simplification" sections
+covering the most recent large changes. `TODO.md` has the current actionable next-steps list.
 
 ## Commands
 
-Run from the relevant workspace directory (`backend/` or `frontend/`), not the repo root — there
+Run from the relevant workspace directory (`backend/` or `frontend/`), not the repo root - there
 is no root `package.json`.
 
 ```bash
@@ -44,37 +50,39 @@ cd frontend && npm run build      # tsc -b && vite build
 Automated tests exist on both sides: `cd backend && npm test` (Vitest, service-level unit tests)
 and `cd frontend && npm test` (Vitest + React Testing Library). Verification for a given change is
 still routinely rounded out with manual `curl` against the backend and browser automation against
-the frontend — see `DEVELOPMENT.md` for what's been verified live vs. by tests alone.
+the frontend - see `DEVELOPMENT.md` for what's been verified live vs. by tests alone.
 
-Ollama must be running separately (`ollama serve`, default `http://localhost:11434`) — this
+Ollama must be running separately (`ollama serve`, default `http://localhost:11434`) - this
 project only wraps it, it doesn't manage its lifecycle.
 
 ## Architecture
 
-The frontend never talks to Ollama directly — everything goes through the backend, which just
+The frontend never talks to Ollama directly - everything goes through the backend, which just
 calls `/api/*` and stays unaware of Ollama's existence. Every route/feature below is fully built
 (not a placeholder) unless explicitly marked otherwise; `DEVELOPMENT.md` has a dedicated section
-per feature with the full design rationale and what was verified — this section is just the map.
+per feature with the full design rationale and what was verified - this section is just the map.
 
 ```
 backend/src/
 ├── config/env.ts      PORT, HOST (default 127.0.0.1 - no auth on this app, see below),
 │                       OLLAMA_BASE_URL, CORS_ORIGIN, WORKSPACE_ROOT, orchestrator loop-prevention
 │                       caps, EMBEDDING_MODEL, NVD_API_KEY (all from .env)
-├── routes/             one file per concern: models, chat, agents, tools, orchestrator, projects,
-│                       findings, plans (multi-agent), rag, scanners, reports
+├── routes/             one file per concern: models, chat, agents, tools, orchestrator, missions,
+│                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports
 ├── services/           the real logic - see the list below
 ├── middleware/         errorHandler.ts - maps every domain Error subclass (services/errors.ts) to
-│                       an HTTP status + JSON body; every route's catch/next(err) funnels here
+│                       an HTTP status + JSON body; every route's catch/next(err) funnels here.
+│                       hostCheck/originCheck block DNS rebinding and cross-site POSTs (no auth on
+│                       this app); requireMission 404s writes to a mission that doesn't exist
 ├── types/              domain types - Agent, OllamaModel, ChatRequest/ChatResponseChunk, ExecTool,
-│                       Finding, Project, ScanProfile/ScanRun, Report, RagSearchResult, plus the two
-│                       extension-point types that are still genuinely unbuilt (tool.ts, plugin.ts -
-│                       see "Later" in TODO.md)
+│                       Finding, Mission, Asset, WorkOrder, MissionEvent, ScanProfile/ScanRun,
+│                       Report, RagSearchResult, plus the one extension-point type that is still
+│                       genuinely unbuilt (tool.ts - see "Later" in TODO.md)
 ├── extensions/         toolRegistry.ts (wired into the native Ollama tool-calling path, but zero
 │                       tools registered - see "Two tool-calling mechanisms" below) and
 │                       scannerRegistry.ts (real - holds the built-in Scan Profiles) are live;
-│                       retrievalRegistry.ts/pluginRegistry.ts are confirmed dead code (audited, no
-│                       importers anywhere) kept around for the still-unbuilt Plugin system
+│                       the still-unbuilt Plugin system's retrievalRegistry.ts/pluginRegistry.ts/
+│                       types/plugin.ts were deleted (commit a65fb26) rather than kept around dead
 ├── tools/exec/builtins.ts   the ~20 built-in ExecTools (nmap, ffuf, nuclei, httpx, bash, python,
 │                       filesystem ops, ...) - every one requires human confirmation before running
 ├── scanners/builtins.ts     the 4 built-in Scan Profiles (fixed chains of ExecTool steps - Quick
@@ -88,78 +96,87 @@ Key files under `backend/src/services/`:
 | File | Owns |
 | --- | --- |
 | `ollama.ts` | The only place that talks to Ollama's REST API - chat streaming, embeddings, native tool-calling (`streamChatWithTools`) |
-| `agentManager.ts` / `chatService.ts` | Loads `backend/data/agents/*.json` live (not cached), assembles a chat request from an agent's config |
-| `toolManager.ts` / `toolExecutor.ts` | Human-confirmation-gated OS process execution, workspace-sandboxed, per-project execution history |
-| `orchestrator.ts` / `multiAgentOrchestrator.ts` | The autonomous tool-calling loop - single-agent task, or a chained multi-agent plan |
-| `projectManager.ts` / `projectStore.ts` | The project-scoping primitive everything else below is keyed on - see "Projects" below |
-| `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated, graph-correlated findings) + on-demand NVD CVE correlation |
+| `agentManager.ts` / `chatService.ts` | Loads `backend/data/agents/*.json`, assembles a chat request from an agent's config. `agentManager.ts` caches the list after first load - a direct file edit needs `POST /api/agents/reload` (or a create/update/delete through the API) to take effect, it is *not* re-read on every request |
+| `toolManager.ts` / `toolExecutor.ts` | Human-confirmation-gated OS process execution, workspace-sandboxed, per-mission execution history |
+| `orchestrator.ts` / `multiAgentOrchestrator.ts` | The autonomous tool-calling loop - single-agent task, or a chained multi-agent plan. Both still real and load-bearing: every Work Order runs on `orchestrator.ts` underneath, and `factoryDirector.ts` follows the same reuse pattern `multiAgentOrchestrator.ts` established one level down |
+| `missionManager.ts` / `missionStore.ts` | The mission-scoping primitive everything else below is keyed on - see "Missions" below |
+| `assetManager.ts` | The Asset Inventory - a real, deduplicated store (`upsertAsset`) of everything discovered about a mission, with a parent/child relationship tree |
+| `workOrderManager.ts` | Security Work Orders - a trackable unit of agent work backed 1:1 by a real `OrchestratorTask` |
+| `factoryDirector.ts` | The Factory Director - reads a mission's scope/assets/findings/work orders and deterministically seeds/starts Work Orders, auto-chaining through everything that doesn't need human approval. Also resumes paused orders whose execution a human has settled. Request-driven (`POST /api/missions/:id/factory/advance`), not a background timer |
+| `activityLog.ts` | The Mission Activity Timeline - an explicit, named-event append-only log (`logActivity`), not derived from executions/tasks |
+| `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `ragIndex.ts` | The knowledge-base indexer/search over `WORKSPACE_ROOT` |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
-| `reportManager.ts` | Report generation - one Report Writer agent call over a set of selected findings |
+| `reportManager.ts` / `reportEvidence.ts` | Report generation - one Report Writer agent call over a set of selected findings, tracked through a `status` field (`draft/ai_generated/human_review/ready/submitted`). The agent writes only the summary, impact and remediation; evidence and reproduction are built from recorded executions, and anything else on a finding is labelled unverified |
 
 ```
 backend/data/
 ├── agents/*.json          One file per agent (name, model, temperature, systemPrompt, description,
-│                           optional tools[]/execTools[]). Loaded fresh from disk on every
-│                           GET /api/agents call - not cached at boot - so editing a file takes
-│                           effect immediately, no restart needed.
-├── projects/<id>/*.json   Per-project history (executions/tasks/plans/findings/scans/reports.json),
-│                           write-through on every mutation. Gitignored - may contain sensitive
-│                           target/scope info.
+│                           optional tools[]/execTools[]).
+├── missions/<id>/*.json   Per-mission history (mission.json, executions/tasks/plans/findings/scans/
+│                           reports/assets/workorders/activity.json), write-through on every
+│                           mutation. Gitignored - may contain sensitive target/scope info.
 └── rag/index.json         The RAG knowledge-base index. Gitignored.
 ```
 
 ```
 frontend/src/
-├── components/         One top-level component per nav view - ChatView (+ChatSessionPanel/
-│                        ChatTaskPanel), OrchestratorWorkbench (+ScannerPanel), MultiAgentPlanner,
-│                        FindingsView (+ReportsPanel/FindingDetails/FindingsTable/...). components/
-│                        layout/ (AppShell, Sidebar, SessionTabs, CommandPalette) and components/ui/
-│                        (GlassPanel, Button, Sheet, StatusPill, ...) are the shared primitives
-│                        every view is built from.
-├── hooks/               One hook per domain - useModels, useAgents, useChat, useOrchestratorTask,
-│                        useTools, useProjects, useFindings, useScans, useReports,
-│                        useMultiAgentPlan, useSessions, useRag, useSettings, useTheme,
-│                        useBookmarks - each owns its own fetching/state; App.tsx composes them and
-│                        wires cross-cutting behavior (e.g. picking an agent seeds model/temperature).
+├── components/         One top-level component per nav view - FactoryDashboard (+FactoryPipeline/
+│                        ApprovalQueue), AssetsView, WorkOrdersView, FindingsView (+FindingDetails/
+│                        FindingsTable), ReportsView, AgentsView, ToolsView (tabs: ScannerPanel/
+│                        ExecutionHistoryPanel/ToolRegistry/KnowledgeBasePanel). MissionSwitcher +
+│                        MissionEditor are the only mission picker/editor. components/layout/
+│                        (AppShell, Sidebar, TopBar) and components/ui/ (GlassPanel, Button, Sheet,
+│                        StatusPill, ...) are the shared primitives every view is built from. See
+│                        "UI cleanup" in DEVELOPMENT.md for what was cut and why. There is no Chat/
+│                        Workbench/Plans surface any more - see "Nav simplification" in
+│                        DEVELOPMENT.md for why (Work Orders replaced Workbench's freestanding
+│                        agent-run-a-tool UI, the Factory Director replaced hand-authored Plans,
+│                        and plain no-mission Chat never fit the mission model).
+├── hooks/               One hook per domain - useModels, useAgents, useTools, useMissions,
+│                        useAssets, useWorkOrders, useFindings, useScans, useReports, useActivity,
+│                        useRag, useTheme - each owns its own fetching/state; App.tsx composes
+│                        them. Plus useSelectedMission (the one current mission, in localStorage)
+│                        and useRefreshOnActivate (re-fetch when a kept-mounted view is shown again).
 ├── services/            One `*Api.ts` file per domain, all built on `services/httpClient.ts`
 │                        (`apiFetch`/`readNdjsonStream`/`throwForErrorResponse` - the shared
 │                        NDJSON-stream-reading and error-unwrapping logic every domain reuses).
+│                        `orchestratorApi.ts` is trimmed to just `fetchTask` - the one read-only
+│                        task lookup WorkOrdersView's "Inspect" still needs; task creation/resume/
+│                        cancel/guidance only happen server-side now.
 └── types/               Mirrors of the backend types.
 ```
 
 ### Streaming protocol
 
-`POST /api/chat` streams newline-delimited JSON (`application/x-ndjson`), not Server-Sent Events —
+`POST /api/chat` streams newline-delimited JSON (`application/x-ndjson`), not Server-Sent Events -
 SSE's `EventSource` can't send a POST body, and NDJSON is what Ollama's own `/api/chat` speaks, so
 the backend mostly forwards lines through. The frontend reads the response body with
-`ReadableStream` + `TextDecoder`, splitting on `\n` (see `frontend/src/services/api.ts#streamChat`
-and `backend/src/services/ollama.ts#streamChat`).
+`ReadableStream` + `TextDecoder`, splitting on `\n`. Every other long-running route in this app
+(orchestrator tasks, multi-agent plans, scan runs, report generation, the Factory Director's
+`/factory/advance`) follows the same NDJSON convention - see `backend/src/routes/streamUtils.ts`
+and `frontend/src/services/httpClient.ts#readNdjsonStream`, reused rather than reinvented per route.
 
 ### Cancellation
 
-Chat request cancellation on the backend must be detected via `res.on('close')`, **not**
-`req.on('close')` — `req.on('close')` fires as soon as Express finishes reading the request body
+Chat/task request cancellation on the backend must be detected via `res.on('close')`, **not**
+`req.on('close')` - `req.on('close')` fires as soon as Express finishes reading the request body
 (effectively immediately), not on client disconnect, which silently aborted every request during
 development. `res.on('close')` only fires on premature connection termination, which is what
-"cancelled" actually means. See `backend/src/routes/chat.ts`.
-
-The frontend additionally has a 5-minute idle-timeout watchdog (`frontend/src/hooks/useChat.ts`,
-`IDLE_TIMEOUT_MS`) that resets on every received chunk, guarding against a genuinely hung
-connection without interfering with slow-but-alive generation (large local models can take a long
-time to load on constrained hardware).
+"cancelled" actually means. See `backend/src/routes/streamUtils.ts#abortOnClientDisconnect`.
 
 ### Agents
 
-Selecting an agent (sidebar or Command Center) opens/focuses a chat session for it (see "Projects"
-below - sessions, not one global selection) and seeds that session's model/temperature from the
-agent's config; on the next message the backend injects the agent's `systemPrompt` as a system
-message prepended to the request history. The system prompt is never added to the visible chat
-transcript; it's re-injected fresh on every request, not stored as a message.
+Agent configs live in `backend/data/agents/*.json` (one file per agent - name, model, temperature,
+systemPrompt, description, optional `tools[]`/`execTools[]`). Editing a file directly does **not**
+take effect until `POST /api/agents/reload` is hit (or the file is saved through
+`AgentEditor.tsx`, which calls create/update, both of which reload internally) - `agentManager.ts`
+caches the loaded list after first read, it is not re-read fresh on every request.
 `Agent.tools?: string[]` (native Ollama tool-calling) and `Agent.execTools?: string[]` (an
 allowlist into the Tool Execution Framework's ExecTools, enforced in `orchestrator.ts` both in the
 tools preamble shown to the model and again at request time) are both real and read - see "Two
-tool-calling mechanisms" below for why there are two separate fields.
+tool-calling mechanisms" below for why there are two separate fields. Agents are created and edited from
+the Agents view - there is no chat-session concept any more for an agent selection to open instead.
 
 ### Two tool-calling mechanisms - don't conflate them
 
@@ -173,47 +190,41 @@ each other:
 2. **The Orchestrator's plain-text tool-request convention** (`services/orchestrator.ts#buildToolsPreamble`/
    `parseToolRequest`, `Agent.execTools`) - a separate JSON-in-plain-text convention the Orchestrator
    itself parses out of the model's reply (`{"tool": "...", "arguments": [...]}`), used to drive the
-   real Tool Execution Framework (`toolManager.ts`'s ~20 ExecTools). This is the path that's
-   actually reachable from the UI (Workbench, tool-enabled chat).
+   real Tool Execution Framework (`toolManager.ts`'s ~20 ExecTools) *and* three pseudo-tools that
+   record structured data instead of executing anything (`create_finding`, `upsert_asset`,
+   `validate_finding` - each requires no human confirmation for exactly that reason). This is the
+   path every Work Order and every orchestrator task actually reaches. A reply with several calls runs
+   them in order (`OrchestratorTask.queuedToolCalls`), each real tool behind its own approval.
 
 `chatService.ts#streamAgentChat` only activates native `tools` when `toolsPreamble` is absent
 (the Orchestrator's own tell that a request came from it) - see the comment there for why activating
 both on the same request would be actively harmful (the model could reply in whichever format it
 prefers instead of the one actually being parsed).
 
-### Projects
+### Missions
 
-Nearly everything project-scoped (tool execution history, Orchestrator tasks, multi-agent plans,
-findings, scan runs, reports) is keyed by a `projectId` and persisted to
-`backend/data/projects/<id>/*.json` via `services/projectStore.ts`, hydrated back into each
-service's in-memory `Map` at startup. `projectStore.ts#projectDir(id)` is the one real chokepoint
-every one of those files' paths funnels through - it rejects anything that isn't UUID-shaped before
-ever building a path, which is the fix for a real path-traversal finding (see `DEVELOPMENT.md`'s
-"Fixed: projectId path-traversal" section) - if you add a new project-scoped store, route it through
-`readProjectJson`/`writeProjectJson`, not a hand-rolled path.
+Nearly everything mission-scoped (tool execution history, Orchestrator tasks, multi-agent plans,
+findings, scan runs, reports, assets, work orders, activity events) is keyed by a `missionId` and
+persisted to `backend/data/missions/<id>/*.json` via `services/missionStore.ts`, hydrated back into
+each service's in-memory `Map` at startup. `missionStore.ts#missionDir(id)` is the one real
+chokepoint every one of those files' paths funnels through - it rejects anything that isn't
+UUID-shaped before ever building a path (the fix for a real path-traversal finding, see
+`DEVELOPMENT.md`'s "Fixed: projectId path-traversal" section - the finding predates the rename but
+the fix and its reasoning are unchanged) - if you add a new mission-scoped store, route it through
+`readMissionJson`/`writeMissionJson`, not a hand-rolled path.
 
-Chat sessions dedup per **(agent, project)** pair, not per agent alone - `ChatView.tsx` has its own
-page-level "current project" selector (a `ProjectPanel`, same pattern as Workbench/Findings/
-Scanners/Reports, not shared globally across views), and picking an agent while a project is
-selected opens/resumes that project's own thread with the agent (`hooks/useSessions.ts#openChatSession`'s
-optional third `projectId` param). Picking a project - whether via that page-level selector at
-creation time, or later via `ChatSessionPanel.tsx`'s own per-session Project dropdown - switches a
-chat's body over to `ChatTaskPanel.tsx`: backed by a real project-scoped `OrchestratorTask`, not
-plain `useChat`, starting a fresh thread with no memory of any prior plain-chat messages in that
-same session (an explicit in-UI notice says so; see `DEVELOPMENT.md`'s Medium-audit-findings
-section for why this couldn't be a lossless conversion instead). A chat with **no** project picked
-stays exactly the old way - one global `sessionStorage` thread per agent, `useChat.ts`, no backend
-persistence (that non-goal didn't change - see `DEVELOPMENT.md`'s "Project-scoped chat" section for
-what did and didn't). The frontend's own session concept (`hooks/useSessions.ts` - which agent/task
-tabs are open) is a different, unrelated meaning of "session" from the backend's project-scoped
-history - don't conflate the two when reading
-either codebase.
+There is one current mission, owned by `App.tsx` (`useSelectedMission`, remembered in `localStorage`)
+and picked in the sidebar's `MissionSwitcher`; every mission-scoped view receives it as a `mission`
+prop. This reverses the earlier per-view `MissionPanel` pattern - see "UI cleanup" in
+`DEVELOPMENT.md` for why. The switcher locks while the Factory is advancing, since that view's live
+output belongs to the selected mission.
 
-### Settings vs. session storage
+### Settings
 
-Settings (temperature, top_p, max tokens, context size, keep-alive) persist in `localStorage` —
-they're a standing user preference. Chat history persists in `sessionStorage` — intentionally
-scoped to the current browser session (cleared on tab close or "Clear Chat"), to keep with the
-"no accounts, no database, no cloud" constraint while still surviving an accidental page reload.
-`maxTokens: 0` and `contextSize: 0` mean "omit from the request" (use the model's own default),
-not "generate zero tokens" (see `frontend/src/App.tsx#handleSubmit`).
+`SettingsPanel.tsx` (temperature/top_p/max tokens/context size/keep-alive, persisted in
+`localStorage` via `useSettings.ts`) previously configured manual (no-agent) Chat requests. Once
+Chat was removed (see "Nav simplification" in DEVELOPMENT.md), nothing in the app read those values
+any more - every agent's own sampling settings come from its own `backend/data/agents/*.json`
+config. **Removed outright (POLISH.md Phase B, 2026-09-20)** - `SettingsPanel.tsx`,
+`useSettings.ts`, `types/settings.ts`, the App wiring, the TopBar gear button, and the Command
+Palette's settings command. There is no settings surface any more.

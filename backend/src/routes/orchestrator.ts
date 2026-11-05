@@ -18,7 +18,7 @@ export const orchestratorRouter = Router();
 interface CreateTaskBody {
   agentId?: unknown;
   objective?: unknown;
-  projectId?: unknown;
+  missionId?: unknown;
   model?: unknown;
 }
 
@@ -69,8 +69,8 @@ orchestratorRouter.post("/tasks", async (req, res, next) => {
     res.status(400).json({ error: "objective is required", code: "INVALID_REQUEST" });
     return;
   }
-  if (typeof body.projectId !== "string" || !body.projectId.trim()) {
-    res.status(400).json({ error: "projectId is required", code: "INVALID_REQUEST" });
+  if (typeof body.missionId !== "string" || !body.missionId.trim()) {
+    res.status(400).json({ error: "missionId is required", code: "INVALID_REQUEST" });
     return;
   }
   if (body.model !== undefined && typeof body.model !== "string") {
@@ -81,7 +81,7 @@ orchestratorRouter.post("/tasks", async (req, res, next) => {
     createTask(
       body.agentId as string,
       body.objective as string,
-      body.projectId as string,
+      body.missionId as string,
       onChunk,
       signal,
       body.model as string | undefined,
@@ -90,12 +90,12 @@ orchestratorRouter.post("/tasks", async (req, res, next) => {
 });
 
 orchestratorRouter.get("/tasks", (req, res) => {
-  const { projectId } = req.query;
-  if (typeof projectId !== "string" || !projectId.trim()) {
-    res.status(400).json({ error: "projectId query parameter is required", code: "INVALID_REQUEST" });
+  const { missionId } = req.query;
+  if (typeof missionId !== "string" || !missionId.trim()) {
+    res.status(400).json({ error: "missionId query parameter is required", code: "INVALID_REQUEST" });
     return;
   }
-  res.json({ tasks: listTasks(projectId) });
+  res.json({ tasks: listTasks(missionId) });
 });
 
 orchestratorRouter.get("/tasks/:id", (req, res) => {

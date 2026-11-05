@@ -1,16 +1,21 @@
 import { useState } from "react";
 import { Download, FileText, Trash2 } from "lucide-react";
 import { Markdown } from "./Markdown";
-import { Button, GlassPanel, IconButton, Sheet, Skeleton } from "./ui";
+import { Button, GlassPanel, IconButton, SELECT_CLASS, Sheet, Skeleton } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
-import type { Report } from "../types/report";
+import type { Report, ReportStatus } from "../types/report";
 
 interface ReportsPanelProps {
   reports: Report[];
   loading: boolean;
   error: string | null;
   onDelete: (id: string) => void;
+  /** Omit to render the status pill read-only (e.g. embedded read-only contexts) - present in
+   * every real caller today. */
+  onChangeStatus?: (id: string, status: ReportStatus) => void;
 }
+
+const REPORT_STATUSES: ReportStatus[] = ["draft", "ai_generated", "human_review", "ready", "submitted"];
 
 function exportMarkdown(report: Report): void {
   const blob = new Blob([report.markdown], { type: "text/markdown" });
@@ -23,13 +28,13 @@ function exportMarkdown(report: Report): void {
 }
 
 /**
- * Report history for a project - list, full-document viewer, export, delete. Generation itself
- * happens from FindingsView's "Generate Report" bar (select findings in the Table view first);
+ * Report history for a mission - list, full-document viewer, export, delete. Generation itself
+ * happens from FindingsView's "Generate Report" bar (select findings there first);
  * this component is purely presentational, taking already-loaded state as props the same way
- * ToolRegistry/ExecutionHistoryPanel take `tools`/`executions` from OrchestratorWorkbench's single
- * owned `useTools()` call, rather than each fetching its own copy.
+ * ToolRegistry/ExecutionHistoryPanel take `tools`/`executions` from ToolsView's single owned
+ * `useTools()` call, rather than each fetching its own copy.
  */
-export function ReportsPanel({ reports, loading, error, onDelete }: ReportsPanelProps) {
+export function ReportsPanel({ reports, loading, error, onDelete, onChangeStatus }: ReportsPanelProps) {
   const [openReport, setOpenReport] = useState<Report | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
@@ -38,7 +43,7 @@ export function ReportsPanel({ reports, loading, error, onDelete }: ReportsPanel
   if (reports.length === 0) {
     return (
       <p className="text-xs text-muted">
-        No reports yet - select findings in the Table view and click "Generate Report".
+        No reports yet - select findings on the Findings page to generate one.
       </p>
     );
   }
@@ -57,6 +62,20 @@ export function ReportsPanel({ reports, loading, error, onDelete }: ReportsPanel
                 {r.findingIds.length} finding{r.findingIds.length === 1 ? "" : "s"} · {relativeTime(r.createdAt)}
               </p>
             </button>
+            {onChangeStatus && (
+              <select
+                value={r.status}
+                onChange={(e) => onChangeStatus(r.id, e.target.value as ReportStatus)}
+                onClick={(e) => e.stopPropagation()}
+                className={`${SELECT_CLASS} shrink-0`}
+              >
+                {REPORT_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s.replace(/_/g, " ")}
+                  </option>
+                ))}
+              </select>
+            )}
             {confirmDeleteId === r.id ? (
               <div className="flex shrink-0 items-center gap-1.5">
                 <Button

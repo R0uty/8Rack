@@ -1,14 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { MissionStatus, Project } from "../types/project";
+import type { MissionStatus, Mission } from "../types/mission";
 import { Button, Sheet } from "./ui";
 import { cn } from "../lib/cn";
 
 interface MissionEditorProps {
   open: boolean;
-  /** The project being edited - MissionEditor is edit-only (creation stays ProjectPanel's quick
-   * name+notes form), so this is never null while open. */
-  project: Project | null;
-  onSave: (id: string, patch: Partial<Project>) => Promise<unknown>;
+  /** The mission being edited, or null to create a new one. */
+  mission: Mission | null;
+  onSave: (id: string | null, patch: Partial<Mission>) => Promise<unknown>;
+  onDelete: (id: string) => Promise<unknown>;
   onClose: () => void;
 }
 
@@ -17,7 +17,6 @@ interface FormState {
   notes: string;
   description: string;
   status: MissionStatus | "";
-  startDate: string;
   scope: string;
   outOfScope: string;
   rules: string;
@@ -28,30 +27,23 @@ const EMPTY_FORM: FormState = {
   notes: "",
   description: "",
   status: "",
-  startDate: "",
   scope: "",
   outOfScope: "",
   rules: "",
 };
 
-const STATUS_OPTIONS: MissionStatus[] = ["planning", "active", "paused", "completed"];
-
-/** epoch ms -> "YYYY-MM-DD" for the date input's value, in the local timezone (not UTC) so the
- * displayed date matches what the user picked when it was originally saved. */
-function toDateInputValue(epochMs: number | undefined): string {
-  if (!epochMs) return "";
-  const d = new Date(epochMs);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function fromDateInputValue(value: string): number | undefined {
-  if (!value) return undefined;
-  const ms = new Date(value).getTime();
-  return Number.isNaN(ms) ? undefined : ms;
-}
+const STATUS_OPTIONS: MissionStatus[] = [
+  "draft",
+  "ready",
+  "recon",
+  "investigating",
+  "validating",
+  "reporting",
+  "review",
+  "completed",
+  "paused",
+  "cancelled",
+];
 
 function linesToList(value: string): string[] {
   return value
@@ -60,16 +52,15 @@ function linesToList(value: string): string[] {
     .filter(Boolean);
 }
 
-function formFromProject(project: Project): FormState {
+function formFromMission(mission: Mission): FormState {
   return {
-    name: project.name,
-    notes: project.notes,
-    description: project.description ?? "",
-    status: project.status ?? "",
-    startDate: toDateInputValue(project.startDate),
-    scope: (project.scope ?? []).join("\n"),
-    outOfScope: (project.outOfScope ?? []).join("\n"),
-    rules: project.rules ?? "",
+    name: mission.name,
+    notes: mission.notes,
+    description: mission.description ?? "",
+    status: mission.status ?? "",
+    scope: (mission.scope ?? []).join("\n"),
+    outOfScope: (mission.outOfScope ?? []).join("\n"),
+    rules: mission.rules ?? "",
   };
 }
 
@@ -92,34 +83,30 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 const TEXT_INPUT_CLASS =
   "w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60";
 
-/**
- * Edits a mission's structured fields (see types/project.ts) - opened from ProjectPanel's per-card
- * Edit affordance. Quick create (name + notes only) stays in ProjectPanel itself; this is
- * deliberately edit-only so a brand-new mission doesn't have to be filled out in full before it
- * even has an id to key everything else (findings, executions, tasks) against.
- */
-export function MissionEditor({ open, project, onSave, onClose }: MissionEditorProps) {
+/** Creates or edits a mission - scope belongs here from the start, since nothing can run without it. */
+export function MissionEditor({ open, mission, onSave, onDelete, onClose }: MissionEditorProps) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    setForm(project ? formFromProject(project) : EMPTY_FORM);
+    setForm(mission ? formFromMission(mission) : EMPTY_FORM);
     setError(null);
-  }, [open, project]);
+    setConfirmingDelete(false);
+  }, [open, mission]);
 
   const handleSave = async () => {
-    if (!project || !form.name.trim() || busy) return;
+    if (!form.name.trim() || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await onSave(project.id, {
+      await onSave(mission?.id ?? null, {
         name: form.name.trim(),
         notes: form.notes,
         description: form.description.trim(),
         status: form.status || undefined,
-        startDate: fromDateInputValue(form.startDate),
         scope: linesToList(form.scope),
         outOfScope: linesToList(form.outOfScope),
         rules: form.rules.trim(),
@@ -132,8 +119,22 @@ export function MissionEditor({ open, project, onSave, onClose }: MissionEditorP
     }
   };
 
+  const handleDelete = async () => {
+    if (!mission || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onDelete(mission.id);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete mission");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <Sheet open={open} onClose={onClose} title={project ? `Edit ${project.name}` : "Edit Mission"} width="max-w-lg">
+    <Sheet open={open} onClose={onClose} title={mission ? `Edit ${mission.name}` : "New mission"} width="max-w-lg">
       <Field label="Name">
         <input
           type="text"
@@ -144,7 +145,7 @@ export function MissionEditor({ open, project, onSave, onClose }: MissionEditorP
         />
       </Field>
 
-      <Field label="Notes">
+      <Field label="Notes" hint="Just for you - agents never see these.">
         <textarea
           value={form.notes}
           disabled={busy}
@@ -154,7 +155,7 @@ export function MissionEditor({ open, project, onSave, onClose }: MissionEditorP
         />
       </Field>
 
-      <Field label="Description">
+      <Field label="Description" hint="Given to every agent working this mission.">
         <textarea
           placeholder="What is this engagement, at a glance?"
           value={form.description}
@@ -165,7 +166,7 @@ export function MissionEditor({ open, project, onSave, onClose }: MissionEditorP
         />
       </Field>
 
-      <div className="mb-4 flex gap-3">
+      {mission && (
         <Field label="Status">
           <select
             value={form.status}
@@ -181,16 +182,7 @@ export function MissionEditor({ open, project, onSave, onClose }: MissionEditorP
             ))}
           </select>
         </Field>
-        <Field label="Start date">
-          <input
-            type="date"
-            value={form.startDate}
-            disabled={busy}
-            onChange={(e) => setForm((f) => ({ ...f, startDate: e.target.value }))}
-            className={TEXT_INPUT_CLASS}
-          />
-        </Field>
-      </div>
+      )}
 
       <Field
         label="Scope"
@@ -230,9 +222,26 @@ export function MissionEditor({ open, project, onSave, onClose }: MissionEditorP
 
       {error && <p className="mb-3 text-xs text-critical">{error}</p>}
 
-      <Button variant="primary" size="sm" onClick={handleSave} disabled={busy || !form.name.trim()}>
-        {busy ? "Saving…" : "Save changes"}
-      </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button variant="primary" size="sm" onClick={handleSave} disabled={busy || !form.name.trim()}>
+          {busy ? "Saving…" : mission ? "Save changes" : "Create mission"}
+        </Button>
+        {mission &&
+          (confirmingDelete ? (
+            <span className="flex items-center gap-1.5">
+              <Button variant="danger" size="sm" onClick={handleDelete} disabled={busy}>
+                Delete permanently
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setConfirmingDelete(false)} disabled={busy}>
+                Keep
+              </Button>
+            </span>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => setConfirmingDelete(true)} disabled={busy}>
+              Delete mission
+            </Button>
+          ))}
+      </div>
     </Sheet>
   );
 }

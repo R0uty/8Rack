@@ -1,8 +1,7 @@
 import { Router } from "express";
 import { resolveOllamaTools, streamChat, streamChatWithTools } from "../services/ollama.js";
 import { abortOnClientDisconnect, pipeNdjsonStream } from "./streamUtils.js";
-import { isValidMessages, isValidToolNames } from "./chatValidation.js";
-import type { ChatOptions } from "../types/ollama.js";
+import { isValidMessages, isValidToolNames, sanitizeChatOptions } from "./chatValidation.js";
 
 export const chatRouter = Router();
 
@@ -45,7 +44,7 @@ chatRouter.post("/", async (req, res, next) => {
   const chatRequest = {
     model: body.model,
     messages: body.messages,
-    options: body.options as ChatOptions | undefined,
+    options: sanitizeChatOptions(body.options),
     keep_alive: typeof body.keepAlive === "string" ? body.keepAlive : undefined,
     tools: toolSpecs,
   };

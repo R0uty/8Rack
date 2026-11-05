@@ -1,14 +1,22 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchExecutions, fetchTools, setToolEnabled } from "../services/toolsApi";
 import type { ExecToolWithStatus, ExecutionRecord } from "../types/execTool";
 
-/** Execution history is project-scoped; pass null when no project is selected yet (tools list
+/** Execution history is mission-scoped; pass null when no mission is selected yet (tools list
  * still loads, but there's nothing to fetch execution history for). */
-export function useTools(projectId: string | null) {
+export function useTools(missionId: string | null) {
   const [tools, setTools] = useState<ExecToolWithStatus[]>([]);
   const [executions, setExecutions] = useState<ExecutionRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  /** Tracks the mission the view currently means to show, so a slow in-flight response for a
+   * previous mission can't land in the new one's state (views stay mounted across a mission
+   * switch). Updated before `refresh`'s effect fires, so a stale resolution is always caught. */
+  const missionIdRef = useRef(missionId);
+  useEffect(() => {
+    missionIdRef.current = missionId;
+  }, [missionId]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -16,16 +24,18 @@ export function useTools(projectId: string | null) {
     try {
       const [toolList, executionList] = await Promise.all([
         fetchTools(),
-        projectId ? fetchExecutions(projectId) : Promise.resolve([]),
+        missionId ? fetchExecutions(missionId) : Promise.resolve([]),
       ]);
+      if (missionIdRef.current !== missionId) return;
       setTools(toolList);
       setExecutions(executionList);
     } catch (err) {
+      if (missionIdRef.current !== missionId) return;
       setError(err instanceof Error ? err.message : "Failed to load tools");
     } finally {
-      setLoading(false);
+      if (missionIdRef.current === missionId) setLoading(false);
     }
-  }, [projectId]);
+  }, [missionId]);
 
   useEffect(() => {
     refresh();

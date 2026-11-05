@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useAgents } from "./useAgents";
-import { fetchAgents, reloadAgents } from "../services/api";
+import { fetchAgents, reloadAgents } from "../services/agentsApi";
 import type { AgentWithStatus } from "../types/agent";
 
-vi.mock("../services/api", () => ({ fetchAgents: vi.fn(), reloadAgents: vi.fn() }));
+vi.mock("../services/agentsApi", () => ({ fetchAgents: vi.fn(), reloadAgents: vi.fn() }));
 
 const mockFetchAgents = vi.mocked(fetchAgents);
 const mockReloadAgents = vi.mocked(reloadAgents);

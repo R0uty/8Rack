@@ -1,12 +1,12 @@
-import { useState } from "react";
-import { Play, Radar, RefreshCw, Square, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Play, Radar, Square, X } from "lucide-react";
 import { useScans } from "../hooks/useScans";
-import { Button, GlassPanel, ProgressRing, SectionHeading, Skeleton, StatusPill, type Tone } from "./ui";
+import { Button, GlassPanel, ProgressRing, Skeleton, StatusPill, type Tone } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
 import type { ScanRunStatus, ScanStepStatus } from "../types/scanner";
 
 interface ScannerPanelProps {
-  projectId: string | null;
+  missionId: string | null;
 }
 
 const STEP_STATUS_LABEL: Record<ScanStepStatus, string> = {
@@ -38,7 +38,7 @@ const RUN_STATUS_TONE: Record<ScanRunStatus, Tone> = {
  * scanRunner.ts and DEVELOPMENT.md's "Security scanners" section for why this differs from the
  * Orchestrator's per-tool-call confirmation.
  */
-export function ScannerPanel({ projectId }: ScannerPanelProps) {
+export function ScannerPanel({ missionId }: ScannerPanelProps) {
   const {
     profiles,
     scans,
@@ -49,16 +49,24 @@ export function ScannerPanel({ projectId }: ScannerPanelProps) {
     previewing,
     running,
     error,
-    refresh,
     runPreview,
     clearPreview,
     runScan,
     cancel,
     reset,
-  } = useScans(projectId);
+  } = useScans(missionId);
 
   const [profileId, setProfileId] = useState("");
   const [target, setTarget] = useState("");
+
+  // The hook's run/preview are keyed to whatever missionId it was constructed with; when the
+  // selected mission changes (a scan for the old mission may still be settling server-side), drop
+  // the now-stale run/preview so the panel doesn't keep showing the old mission's scan. The A1
+  // stream guards in useScans keep the old run's late events out of the new mission's data either
+  // way; this just keeps the live view coherent.
+  useEffect(() => {
+    reset();
+  }, [missionId, reset]);
 
   const handlePreview = () => {
     if (!profileId || !target.trim()) return;
@@ -75,22 +83,12 @@ export function ScannerPanel({ projectId }: ScannerPanelProps) {
 
   return (
     <section>
-      <SectionHeading
-        actions={
-          <Button variant="secondary" size="sm" icon={RefreshCw} onClick={refresh} disabled={loading}>
-            Refresh
-          </Button>
-        }
-      >
-        Security Scan
-      </SectionHeading>
-
-      {!projectId && <p className="mb-2 text-xs text-muted">Select or create a project above to run a scan.</p>}
+      {!missionId && <p className="mb-2 text-xs text-muted">Select or create a mission above to run a scan.</p>}
       {error && <p className="mb-2 text-xs text-critical">{error}</p>}
 
       {loading && profiles.length === 0 && <Skeleton className="h-24 w-full" />}
 
-      {projectId && showForm && (
+      {missionId && showForm && (
         <GlassPanel padding="lg" className="flex flex-col gap-3">
           <select
             value={profileId}

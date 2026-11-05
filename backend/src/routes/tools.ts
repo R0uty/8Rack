@@ -16,7 +16,7 @@ export const toolsRouter = Router();
 interface ToolRequestBodyRaw {
   tool?: unknown;
   arguments?: unknown;
-  projectId?: unknown;
+  missionId?: unknown;
   stdin?: unknown;
   agentId?: unknown;
 }
@@ -27,8 +27,8 @@ function isValidToolRequest(body: ToolRequestBodyRaw): body is ToolRequestBody {
     body.tool.trim().length > 0 &&
     Array.isArray(body.arguments) &&
     body.arguments.every((a) => typeof a === "string") &&
-    typeof body.projectId === "string" &&
-    body.projectId.trim().length > 0 &&
+    typeof body.missionId === "string" &&
+    body.missionId.trim().length > 0 &&
     (body.stdin === undefined || typeof body.stdin === "string") &&
     (body.agentId === undefined || typeof body.agentId === "string")
   );
@@ -56,12 +56,12 @@ toolsRouter.patch("/:id", async (req, res, next) => {
 });
 
 toolsRouter.get("/executions", (req, res) => {
-  const { projectId } = req.query;
-  if (typeof projectId !== "string" || !projectId.trim()) {
-    res.status(400).json({ error: "projectId query parameter is required", code: "INVALID_REQUEST" });
+  const { missionId } = req.query;
+  if (typeof missionId !== "string" || !missionId.trim()) {
+    res.status(400).json({ error: "missionId query parameter is required", code: "INVALID_REQUEST" });
     return;
   }
-  res.json({ executions: listExecutions(projectId) });
+  res.json({ executions: listExecutions(missionId) });
 });
 
 toolsRouter.get("/executions/:id", (req, res) => {
@@ -78,7 +78,7 @@ toolsRouter.post("/request", async (req, res, next) => {
   const body = req.body as ToolRequestBodyRaw;
   if (!isValidToolRequest(body)) {
     res.status(400).json({
-      error: 'Request must be {"tool": string, "arguments": string[], "projectId": string, "stdin"?: string}',
+      error: 'Request must be {"tool": string, "arguments": string[], "missionId": string, "stdin"?: string}',
       code: "INVALID_REQUEST",
     });
     return;

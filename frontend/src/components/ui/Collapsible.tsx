@@ -11,8 +11,7 @@ interface CollapsibleProps {
   className?: string;
 }
 
-/** Shared expand/collapse primitive - replaces the duplicated local useState toggles in
- * OrchestratorTaskView's ToolResultCard and MultiAgentPlanner's CompletedStepCard. */
+/** Shared expand/collapse primitive - used by AgentEditor and ExecutionHistoryPanel. */
 export function Collapsible({ trigger, children, defaultOpen = false, className }: CollapsibleProps) {
   const [open, setOpen] = useState(defaultOpen);
 

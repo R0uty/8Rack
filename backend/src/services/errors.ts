@@ -30,6 +30,17 @@ export class RequestCancelledError extends Error {
   }
 }
 
+/** Distinct from OllamaConnectionError: the connection was made fine, but Ollama went silent for
+ * longer than the configured bound (env.ollamaRequestTimeoutMs/ollamaChatIdleTimeoutMs) - a wedged
+ * model load or a hung generation, not "isn't running". See services/ollama.ts#ollamaFetch. */
+export class OllamaTimeoutError extends Error {
+  constructor(cause?: unknown) {
+    super("Ollama did not respond in time - it may be wedged (e.g. mid model-load) or overloaded.");
+    this.name = "OllamaTimeoutError";
+    this.cause = cause;
+  }
+}
+
 export class AgentNotFoundError extends Error {
   constructor(agentId: string) {
     super(`Agent "${agentId}" was not found`);
@@ -110,10 +121,10 @@ export class ExecutableUnavailableError extends Error {
 export class PrivilegedCommandError extends Error {
   constructor(command: string) {
     super(
-      `Command "${command}" invokes a privilege-escalation tool (sudo/su/doas/pkexec). Tools run ` +
-        "non-interactively with no TTY, so a password prompt cannot be answered and this would only " +
-        "hang until it times out. Ask the user to run the privileged command themselves in their own " +
-        "terminal, or find an approach that doesn't require root.",
+      `Command "${command}" invokes a privilege-escalation tool (sudo/su/doas/pkexec/setsid). Tools ` +
+        "run non-interactively with no TTY, so a password prompt cannot be answered and this would " +
+        "only hang until it times out. Ask the user to run the privileged command themselves in " +
+        "their own terminal, or find an approach that doesn't require root.",
     );
     this.name = "PrivilegedCommandError";
   }
@@ -125,6 +136,18 @@ export class OutOfScopeError extends Error {
       `Execution blocked: target(s) outside this mission's configured scope: ${offendingTargets.join(", ")}`,
     );
     this.name = "OutOfScopeError";
+  }
+}
+
+/** Global cap on concurrently-running real OS processes (env.maxConcurrentExecutions) - see
+ * services/toolManager.ts#runRecord. The execution stays at pending_confirmation, not consumed -
+ * confirming again once a slot frees up runs it normally. */
+export class TooManyConcurrentExecutionsError extends Error {
+  constructor(limit: number) {
+    super(
+      `Too many tools are running at once (limit: ${limit}). Wait for one to finish and confirm again.`,
+    );
+    this.name = "TooManyConcurrentExecutionsError";
   }
 }
 
@@ -142,17 +165,17 @@ export class InvalidTaskStateError extends Error {
   }
 }
 
-export class ProjectNotFoundError extends Error {
-  constructor(projectId: string) {
-    super(`Project "${projectId}" was not found`);
-    this.name = "ProjectNotFoundError";
+export class MissionNotFoundError extends Error {
+  constructor(missionId: string) {
+    super(`Mission "${missionId}" was not found`);
+    this.name = "MissionNotFoundError";
   }
 }
 
-export class InvalidProjectIdError extends Error {
-  constructor(projectId: string) {
-    super(`"${projectId}" is not a valid project id`);
-    this.name = "InvalidProjectIdError";
+export class InvalidMissionIdError extends Error {
+  constructor(missionId: string) {
+    super(`"${missionId}" is not a valid mission id`);
+    this.name = "InvalidMissionIdError";
   }
 }
 
@@ -237,6 +260,27 @@ export class InvalidScanStateError extends Error {
   }
 }
 
+export class AssetNotFoundError extends Error {
+  constructor(assetId: string) {
+    super(`Asset "${assetId}" was not found`);
+    this.name = "AssetNotFoundError";
+  }
+}
+
+export class WorkOrderNotFoundError extends Error {
+  constructor(workOrderId: string) {
+    super(`Work order "${workOrderId}" was not found`);
+    this.name = "WorkOrderNotFoundError";
+  }
+}
+
+export class InvalidWorkOrderStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidWorkOrderStateError";
+  }
+}
+
 export class EmbeddingModelUnavailableError extends Error {
   constructor(model: string, cause?: unknown) {
     super(
@@ -245,5 +289,22 @@ export class EmbeddingModelUnavailableError extends Error {
     );
     this.name = "EmbeddingModelUnavailableError";
     this.cause = cause;
+  }
+}
+
+export class RagReindexInProgressError extends Error {
+  constructor() {
+    super("A RAG reindex is already in progress - wait for it to finish before starting another.");
+    this.name = "RagReindexInProgressError";
+  }
+}
+
+export class RagReindexTimeoutError extends Error {
+  constructor() {
+    super(
+      "RAG reindex timed out - the workspace is too large or the embedding model is unresponsive. " +
+        "Check WORKSPACE_ROOT and that Ollama is healthy, then try again.",
+    );
+    this.name = "RagReindexTimeoutError";
   }
 }

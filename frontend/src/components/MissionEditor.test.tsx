@@ -2,29 +2,30 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MissionEditor } from "./MissionEditor";
-import type { Project } from "../types/project";
+import type { Mission } from "../types/mission";
 
-function project(overrides: Partial<Project> = {}): Project {
+function mission(overrides: Partial<Mission> = {}): Mission {
   return { id: "p1", name: "Acme", notes: "", createdAt: 0, ...overrides };
 }
 
 function setup(overrides: Partial<React.ComponentProps<typeof MissionEditor>> = {}) {
   const onSave = vi.fn().mockResolvedValue(undefined);
+  const onDelete = vi.fn().mockResolvedValue(undefined);
   const onClose = vi.fn();
-  const props = { open: true, project: project(), onSave, onClose, ...overrides };
+  const props = { open: true, mission: mission(), onSave, onDelete, onClose, ...overrides };
   render(<MissionEditor {...props} />);
-  return { onSave, onClose };
+  return { onSave, onDelete, onClose };
 }
 
 describe("MissionEditor", () => {
-  it("pre-fills the form from the project's existing fields", () => {
+  it("pre-fills the form from the mission's existing fields", () => {
     setup({
-      project: project({
+      mission: mission({
         description: "External assessment",
         scope: ["example.com", "*.example.com"],
         outOfScope: ["staging.example.com"],
         rules: "No DoS",
-        status: "active",
+        status: "recon",
       }),
     });
 
@@ -32,7 +33,7 @@ describe("MissionEditor", () => {
     expect(screen.getByLabelText("Scope")).toHaveValue("example.com\n*.example.com");
     expect(screen.getByLabelText("Out of scope")).toHaveValue("staging.example.com");
     expect(screen.getByLabelText("Rules of engagement")).toHaveValue("No DoS");
-    expect(screen.getByLabelText("Status")).toHaveValue("active");
+    expect(screen.getByLabelText("Status")).toHaveValue("recon");
   });
 
   it("splits scope/outOfScope textareas into arrays, one entry per non-empty line", async () => {
@@ -60,21 +61,34 @@ describe("MissionEditor", () => {
     );
   });
 
-  it("converts the date input to an epoch-ms startDate", async () => {
-    const { onSave } = setup();
+  it("creates a mission with its scope in one go when mission is null", async () => {
+    const { onSave } = setup({ mission: null });
     const user = userEvent.setup();
+    expect(screen.getByRole("button", { name: "Create mission" })).toBeDisabled();
+    expect(screen.queryByLabelText("Status")).not.toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("Start date"), "2026-01-15");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.type(screen.getByLabelText("Name"), "New one");
+    await user.type(screen.getByLabelText("Scope"), "example.com");
+    await user.click(screen.getByRole("button", { name: "Create mission" }));
 
-    const [, patch] = onSave.mock.calls[0] as [string, { startDate?: number }];
-    expect(new Date(patch.startDate!).toISOString().slice(0, 10)).toBe("2026-01-15");
+    expect(onSave).toHaveBeenCalledWith(null, expect.objectContaining({ name: "New one", scope: ["example.com"] }));
   });
 
-  it("closes without saving when there is nothing to edit yet (project is null)", () => {
-    setup({ project: null });
-    expect(screen.getByText("Edit Mission")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  it("only deletes after a second, explicit confirmation", async () => {
+    const { onDelete, onClose } = setup();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Delete mission" }));
+    expect(onDelete).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+    expect(onDelete).toHaveBeenCalledWith("p1");
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("offers no delete while creating", () => {
+    setup({ mission: null });
+    expect(screen.queryByRole("button", { name: "Delete mission" })).not.toBeInTheDocument();
   });
 
   it("Save changes is disabled once the name is cleared", async () => {

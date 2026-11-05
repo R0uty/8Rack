@@ -17,7 +17,7 @@ import type { MultiAgentPlan, PlanStep } from "../types/orchestration.js";
 export const plansRouter = Router();
 
 interface CreatePlanBody {
-  projectId?: unknown;
+  missionId?: unknown;
   description?: unknown;
   steps?: unknown;
 }
@@ -82,8 +82,8 @@ async function runAndStreamPlan(
 
 plansRouter.post("/", async (req, res, next) => {
   const body = req.body as CreatePlanBody;
-  if (typeof body.projectId !== "string" || !body.projectId.trim()) {
-    res.status(400).json({ error: "projectId is required", code: "INVALID_REQUEST" });
+  if (typeof body.missionId !== "string" || !body.missionId.trim()) {
+    res.status(400).json({ error: "missionId is required", code: "INVALID_REQUEST" });
     return;
   }
   if (typeof body.description !== "string" || !body.description.trim()) {
@@ -109,17 +109,17 @@ plansRouter.post("/", async (req, res, next) => {
     return;
   }
 
-  const { projectId, description, steps } = body;
-  await runAndStreamPlan(res, next, (onChunk, signal) => createPlan(projectId, description, steps, onChunk, signal));
+  const { missionId, description, steps } = body;
+  await runAndStreamPlan(res, next, (onChunk, signal) => createPlan(missionId, description, steps, onChunk, signal));
 });
 
 plansRouter.get("/", (req, res) => {
-  const { projectId } = req.query;
-  if (typeof projectId !== "string" || !projectId.trim()) {
-    res.status(400).json({ error: "projectId query parameter is required", code: "INVALID_REQUEST" });
+  const { missionId } = req.query;
+  if (typeof missionId !== "string" || !missionId.trim()) {
+    res.status(400).json({ error: "missionId query parameter is required", code: "INVALID_REQUEST" });
     return;
   }
-  res.json({ plans: listPlans(projectId) });
+  res.json({ plans: listPlans(missionId) });
 });
 
 plansRouter.get("/:id", (req, res) => {
