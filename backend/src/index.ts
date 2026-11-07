@@ -10,6 +10,7 @@ import { orchestratorRouter } from "./routes/orchestrator.js";
 import { missionsRouter } from "./routes/missions.js";
 import { plansRouter } from "./routes/plans.js";
 import { ragRouter } from "./routes/rag.js";
+import { mcpRouter } from "./routes/mcp.js";
 import { findingsRouter, missionFindingsRouter } from "./routes/findings.js";
 import { missionScansRouter, scannersRouter } from "./routes/scanners.js";
 import { missionReportsRouter } from "./routes/reports.js";
@@ -38,6 +39,7 @@ import { loadReportsFromDisk } from "./services/reportManager.js";
 import { loadActivityFromDisk } from "./services/activityLog.js";
 import { listMissions } from "./services/missionManager.js";
 import { getStatus as getRagStatus, loadIndexFromDisk } from "./services/ragIndex.js";
+import { listServers as listMcpServers, refreshServers as refreshMcpServers } from "./services/mcpClient.js";
 import { builtinExecTools } from "./tools/exec/builtins.js";
 import { registerScanProfile } from "./extensions/scannerRegistry.js";
 import { builtinScanProfiles } from "./scanners/builtins.js";
@@ -76,6 +78,7 @@ app.use("/api/findings", findingsRouter);
 app.use("/api/plans", (req, res, next) => (req.path === "/" ? requireMission(req, res, next) : next()));
 app.use("/api/plans", plansRouter);
 app.use("/api/rag", ragRouter);
+app.use("/api/mcp", mcpRouter);
 app.use("/api/scanners", scannersRouter);
 app.use("/api/missions/:missionId/scans", requireMission, missionScansRouter);
 app.use("/api/missions/:missionId/reports", requireMission, missionReportsRouter);
@@ -136,6 +139,18 @@ const server = app.listen(env.port, env.host, async (listenError?: Error) => {
         ? `RAG index loaded: ${ragStatus.chunkCount} chunk(s) across ${ragStatus.fileCount} file(s) (${ragStatus.embeddingModel})`
         : "RAG index not built yet - POST /api/rag/reindex once an embedding model is pulled",
     );
+
+    // Not awaited - a slow or unreachable MCP server shouldn't hold up anything else, and the Tools
+    // page shows each server as "checking" until this finishes.
+    if (listMcpServers().length > 0) {
+      void refreshMcpServers().then((servers) =>
+        console.log(
+          `MCP: ${servers
+            .map((s) => (s.state === "online" ? `${s.id} online (${s.tools.length} tool(s))` : `${s.id} ${s.state}: ${s.error}`))
+            .join("; ")}`,
+        ),
+      );
+    }
   } catch (err) {
     console.error(
       "Startup hydration failed partway through - some persisted history (agents/tools/executions/" +

@@ -3591,3 +3591,145 @@ Known limits:
 - While a report generates, the view streams the model's raw reply, including anything sanitizing later
   removes. It's replaced by the assembled report when generation finishes, and only that is stored.
 - Reports generated before this change keep their old Markdown - regenerate them.
+
+## Planned: MCP servers as the tool and RAG providers (design, 2026-11-08)
+
+Not built yet - this is the agreed direction and the reasoning behind it. The steps are in TODO.md under
+the same heading.
+
+**Goal.** The model stays on this machine (Ollama, through `ollama.ts`, unchanged). Recon tools and the
+knowledge base move behind MCP servers, and 8Rack becomes their MCP client. MCP sits between the
+Orchestrator and tool execution, not between 8Rack and Ollama.
+
+**Why.** Today every ExecTool is an OS process on the same machine as 8Rack, confined only by
+argument checks against `WORKSPACE_ROOT` - and `curl`'s own description admits a flag can embed an output
+path that passes that check. A tool server in its own container or VM is a much stronger boundary than a
+path check, and it doesn't have to be this machine: a dedicated scanning host fits a bug bounty tool. It
+also gives a real plugin boundary (tools in any language, existing MCP servers) where today there's only
+the unbuilt `extensions/toolRegistry.ts` / `types/tool.ts`.
+
+### What stays in 8Rack
+
+MCP's model is "the model asks, the server runs it". 8Rack's is "the model asks, a human approves, then
+it runs". So every decision stays in the backend, and servers only execute:
+
+- **The approval gate.** `requestExecution` (`toolManager.ts`) creates a `pending_confirmation` record and
+  the Orchestrator pauses at `waiting_confirmation` until a human confirms. That flow wraps the MCP call:
+  model asks, record created, human approves, *then* the client calls the server. MCP has no "ask a human
+  first" of its own to rely on.
+- **Scope.** `checkExecutionScope` runs at request time and again at confirm time. It reads the
+  arguments, so it works the same whoever executes them.
+- **Enabled/disabled tools** (the Tool Registry overrides) apply to MCP tools too.
+- **Findings, assets, history and activity.** `ingestExecution` and the per-mission execution log wrap a
+  run, so they wrap an MCP result the same way. The parsers need raw output, so the tool server must
+  return stdout, stderr and exit code, not a summary.
+- **All six pseudo-tools.** `create_finding`, `upsert_asset`, `validate_finding`, `query_findings` and
+  `lookup_cves` read or write 8Rack's own records, so they stay in-process. `search_knowledge_base` is the
+  exception: it becomes a call to the RAG server.
+
+### What changes
+
+- **New `services/mcpClient.ts`:** connects the servers listed in config, discovers their tools, and
+  merges them into the catalog the Orchestrator's preamble is built from. Uses the official TypeScript
+  MCP SDK (a new dependency).
+- **Orchestrator:** keeps the current plain-text `{"tool": ..., "arguments": [...]}` convention at first.
+  Only what happens after parsing changes - dispatch to the MCP client instead of `toolExecutor.ts`.
+  Switching to Ollama's native tool-calling is a separate, later decision; it trades a parser 8Rack
+  controls for the model's own tool-call reliability.
+- **Argument checks split.** `validateArguments` checks paths against *this* machine's workspace. On a
+  remote server those paths mean nothing here, so path containment moves to the server, which owns its own
+  filesystem. Checks that don't depend on a filesystem (types, allowed flags, scope) stay here.
+- **"Is this tool installed"** (`resolveToolExecutable`) becomes "does a connected server offer it".
+- **Live output.** The confirm route streams stdout chunks today. MCP's progress notifications aren't a
+  stdout stream, so live output in the Execution Console may be coarser over MCP until a server sends
+  output as progress messages.
+- **Cancellation** maps to MCP's cancel notification; the server is then responsible for killing the
+  process group, as `toolExecutor.ts` does now.
+
+### Trust
+
+- **Server output is untrusted** - it already is (tool output is target-controlled). So are a server's
+  tool names and descriptions, which the model reads in the preamble. Only connect servers named in
+  config, and show newly discovered tools in the Tool Registry disabled until a human turns them on.
+- **Remote transport needs auth.** stdio has none to configure; streamable HTTP to another host must be
+  authenticated, or anyone who can reach that port can run scans.
+
+### RAG specifics
+
+`ragIndex.ts` indexes `WORKSPACE_ROOT` and embeds through Ollama. A RAG server elsewhere needs the files
+to be there too, and needs its own way to embed - either its own embedding model or a call back to this
+machine's Ollama. Reindex and status (`/api/rag/*`, the Knowledge Base panel) become calls to that server.
+
+### Decided: HTTP to a separate scanning host (2026-11-08)
+
+The tool server runs on its own host and 8Rack reaches it over streamable HTTP. What that commits to:
+
+- **Auth and TLS are required.** The server runs whatever an approved request names, so anyone who can
+  reach it unauthenticated can run scans. HTTPS, plus a bearer token checked on every request; the server
+  listens only on the interface 8Rack reaches it through. Server URL and token are new `.env` settings,
+  never in the repo or the UI. 8Rack's own `HOST`/`hostCheck` rules are unaffected - 8Rack is the client
+  here, making outbound calls.
+- **The approval gate is only as strong as the token.** The server can't tell an approved request from an
+  unapproved one; it trusts 8Rack to only call after a human confirms. Anyone else holding the token
+  bypasses approval entirely. Treat the token like a credential for the scanning host.
+- **Scans come from a different IP.** Targets see the scanning host's address, not this machine's. Some
+  programs require registered source IPs, so the mission should record which address it scans from, and
+  the approval prompt should show it.
+- **The connection can drop.** An unreachable server shows as offline and requests fail fast with a clear
+  error. A run in progress when the connection drops is marked failed rather than left running, and the
+  server kills its process group when the client goes away, as `toolExecutor.ts` does on cancel today.
+- **Tool output crosses the network.** It's target data, possibly sensitive, so HTTPS matters for it as
+  much as for the token.
+
+### Order
+
+RAG first: it needs no approval, so it proves the client, config and discovery with the least risk. Then
+the tool server, running beside the local executor behind a setting so both can be compared on the same
+mission. The local executor is removed only after a full mission run matches.
+
+## MCP client (step 1, 2026-11-08)
+
+Step 1 of "Planned: MCP servers as the tool and RAG providers" above. 8Rack can now connect to MCP
+servers and list their tools. **Nothing calls an MCP tool yet** - agents don't see them, and the Tools
+page says so.
+
+- **Config** (`.env`): `MCP_SERVERS` is comma-separated `id=url` entries, and each server's token is in
+  its own `MCP_TOKEN_<ID>`. A token never goes in the URL - an entry with credentials in its URL is
+  rejected, since URLs are shown in the UI and logs. https is required, except http to localhost, so a
+  local test server doesn't need a certificate. A bad entry shows as `misconfigured` with the reason
+  instead of failing the backend or the other servers.
+- **`services/mcpClient.ts`** uses the official TypeScript SDK (`@modelcontextprotocol/sdk` 1.32.2, the
+  backend's first runtime dependency beyond Express/cors/dotenv) over streamable HTTP. Each check
+  connects, lists tools (following pagination) and disconnects. Nothing needs a held connection yet,
+  and this way a server that restarts needs no reconnect logic - revisit when tools are called.
+  - The token is sent as a bearer header. Redirects are only followed within the same origin (the SDK
+    default, set explicitly), so a redirect can't carry the token to another host.
+  - Each request is bounded by `MCP_REQUEST_TIMEOUT_MS` (default 10s).
+  - Errors are reported by what to fix: a 401/403 names the `MCP_TOKEN_<ID>` variable, an unreachable
+    host gives the network error code, a silent server gives the timeout. The token never appears in
+    any response or log.
+  - Tool names and descriptions are untrusted (they'll be shown to the model later). Only names
+    matching `[A-Za-z0-9_.-]{1,64}` are kept, duplicates are dropped, there's a cap of 200 per server,
+    and descriptions are cut at 1000 characters. The count of skipped tools is shown.
+  - Concurrent checks share one round of connections.
+- **Startup** checks every configured server in the background (not awaited) and logs one line, e.g.
+  `MCP: tools online (2 tool(s)); rag misconfigured: MCP_TOKEN_RAG is not set`.
+- **API:** `GET /api/mcp/servers` (last result, or `checking` before the first check finishes) and
+  `POST /api/mcp/servers/refresh`.
+- **Frontend:** a read-only "MCP servers" tab on the Tools page (`McpServersPanel`, `useMcpServers`,
+  `mcpApi.ts`) with each server's state, its error, and its tools. If a server is still `checking` when
+  the page loads, the hook asks for a check, which joins the one already running.
+
+Moved out of step 1, because neither does anything until agents can call an MCP tool: adding MCP tools to
+the Orchestrator's catalog, and the enable switch. Both now belong to step 2. `extensions/toolRegistry.ts`
+/ `types/tool.ts` were considered as the adapter and rejected: their `execute()` runs a tool directly, with
+no approval step.
+
+Tests: `mcpClient.test.ts` (13) runs a real MCP server from the same SDK on a local port that checks the
+token - discovery, a wrong token, an unreachable server, a server that never answers, unsafe tool names,
+config parsing. Frontend: `McpServersPanel.test.tsx` (5) and `useMcpServers.test.ts` (4). Verified live:
+the backend started with a throwaway local MCP server and a second entry missing its token. The tab showed
+one online with 2 tools (a third, with an unsafe name, skipped) and one misconfigured. After the test server
+was stopped, "Check again" showed `Can't reach the server (ECONNREFUSED)`. The tab fits at phone width with
+no console errors. Not verified: a real remote host over https - no scanning host exists yet.
+

@@ -3,6 +3,7 @@ import { ToolRegistry } from "./ToolRegistry";
 import { ExecutionHistoryPanel } from "./ExecutionHistoryPanel";
 import { ScannerPanel } from "./ScannerPanel";
 import { KnowledgeBasePanel } from "./KnowledgeBasePanel";
+import { McpServersPanel } from "./McpServersPanel";
 import { NoMission } from "./NoMission";
 import { Button } from "./ui";
 import { cn } from "../lib/cn";
@@ -11,12 +12,13 @@ import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
 import type { AgentWithStatus } from "../types/agent";
 import type { Mission } from "../types/mission";
 
-type Tab = "scans" | "history" | "registry" | "knowledge";
+type Tab = "scans" | "history" | "registry" | "knowledge" | "mcp";
 const TABS: { tab: Tab; label: string }[] = [
   { tab: "scans", label: "Scans" },
   { tab: "history", label: "History" },
   { tab: "registry", label: "Registry" },
   { tab: "knowledge", label: "Knowledge base" },
+  { tab: "mcp", label: "MCP servers" },
 ];
 
 interface ToolsViewProps {
@@ -25,7 +27,8 @@ interface ToolsViewProps {
   active?: boolean;
 }
 
-/** Running tools (Scans), what ran (History), and what's available to run (Registry, Knowledge base).
+/** Running tools (Scans), what ran (History), and what's available to run (Registry, Knowledge base, MCP
+ * servers).
  * Tabs stay mounted when hidden, so a scan keeps streaming while you look at something else. */
 export function ToolsView({ agents, mission, active = true }: ToolsViewProps) {
   const [tab, setTab] = useState<Tab>("scans");
@@ -51,6 +54,9 @@ export function ToolsView({ agents, mission, active = true }: ToolsViewProps) {
       </div>
       <div className={cn(tab !== "knowledge" && "hidden")}>
         <KnowledgeBasePanel />
+      </div>
+      <div className={cn(tab !== "mcp" && "hidden")}>
+        <McpServersPanel />
       </div>
     </div>
   );

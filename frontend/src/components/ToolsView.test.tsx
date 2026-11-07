@@ -8,6 +8,7 @@ vi.mock("../hooks/useTools", () => ({ useTools: vi.fn() }));
 vi.mock("./ToolRegistry", () => ({ ToolRegistry: () => <div data-testid="tool-registry" /> }));
 vi.mock("./ExecutionHistoryPanel", () => ({ ExecutionHistoryPanel: () => <div data-testid="execution-history" /> }));
 vi.mock("./KnowledgeBasePanel", () => ({ KnowledgeBasePanel: () => <div data-testid="knowledge-base" /> }));
+vi.mock("./McpServersPanel", () => ({ McpServersPanel: () => <div data-testid="mcp-servers" /> }));
 vi.mock("./ScannerPanel", () => ({ ScannerPanel: () => <div data-testid="scanner-panel" /> }));
 
 const mission = { id: "m1", name: "Test Mission", notes: "", createdAt: 1 };

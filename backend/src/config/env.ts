@@ -93,4 +93,10 @@ export const env = {
    * this, only a connection that has gone genuinely silent (a wedged/dead Ollama process). Mirrors
    * the frontend's own IDLE_TIMEOUT_MS (frontend/src/hooks/useChat.ts) for the same reasoning. */
   ollamaChatIdleTimeoutMs: numberFromEnv("OLLAMA_CHAT_IDLE_TIMEOUT_MS", 5 * 60 * 1000),
+  /** MCP servers 8Rack connects to as a client (services/mcpClient.ts): comma-separated `id=url`
+   * entries. Each server's token is read from its own MCP_TOKEN_<ID> variable, never from here. */
+  mcpServers: process.env.MCP_SERVERS ?? "",
+  /** Bounds each request to an MCP server - a server that accepts the connection and then goes silent
+   * would otherwise hang a check indefinitely. */
+  mcpRequestTimeoutMs: numberFromEnv("MCP_REQUEST_TIMEOUT_MS", 10_000),
 };

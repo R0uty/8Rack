@@ -66,9 +66,10 @@ per feature with the full design rationale and what was verified - this section 
 backend/src/
 ├── config/env.ts      PORT, HOST (default 127.0.0.1 - no auth on this app, see below),
 │                       OLLAMA_BASE_URL, CORS_ORIGIN, WORKSPACE_ROOT, orchestrator loop-prevention
-│                       caps, EMBEDDING_MODEL, NVD_API_KEY (all from .env)
+│                       caps, EMBEDDING_MODEL, NVD_API_KEY, MCP_SERVERS (all from .env; each MCP
+│                       server's token comes from its own MCP_TOKEN_<ID>)
 ├── routes/             one file per concern: models, chat, agents, tools, orchestrator, missions,
-│                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports
+│                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports, mcp
 ├── services/           the real logic - see the list below
 ├── middleware/         errorHandler.ts - maps every domain Error subclass (services/errors.ts) to
 │                       an HTTP status + JSON body; every route's catch/next(err) funnels here.
@@ -106,6 +107,7 @@ Key files under `backend/src/services/`:
 | `activityLog.ts` | The Mission Activity Timeline - an explicit, named-event append-only log (`logActivity`), not derived from executions/tasks |
 | `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `ragIndex.ts` | The knowledge-base indexer/search over `WORKSPACE_ROOT` |
+| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS` and lists their tools (Tools → MCP servers). Nothing calls an MCP tool yet; see "Planned: MCP servers as the tool and RAG providers" in `DEVELOPMENT.md` |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
 | `reportManager.ts` / `reportEvidence.ts` | Report generation - one Report Writer agent call over a set of selected findings, tracked through a `status` field (`draft/ai_generated/human_review/ready/submitted`). The agent writes only the summary, impact and remediation; evidence and reproduction are built from recorded executions, and anything else on a finding is labelled unverified |
 
