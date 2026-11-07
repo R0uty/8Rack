@@ -119,8 +119,15 @@ export async function queryNvd(keyword: string): Promise<CveLookupResult[]> {
         "User-Agent": "8Rack/1.0",
         ...(env.nvdApiKey ? { apiKey: env.nvdApiKey } : {}),
       },
+      // A dead-but-open connection to NVD would otherwise hang this indefinitely - there's no
+      // caller-supplied signal to combine with here, this is the only outbound internet call the
+      // app ever makes and it's not user-cancellable mid-flight.
+      signal: AbortSignal.timeout(env.nvdRequestTimeoutMs),
     });
   } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      throw new CveLookupError("NVD API did not respond in time", err);
+    }
     throw new CveLookupError("Could not reach the NVD API - check network connectivity", err);
   }
 

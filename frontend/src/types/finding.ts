@@ -34,14 +34,17 @@ export type EvidenceType =
   | "note";
 
 export interface EvidenceItem {
+  id: string;
   type: EvidenceType;
   content: string;
   createdAt: number;
+  agentId?: string;
+  executionId?: string;
 }
 
 export interface Finding {
   id: string;
-  projectId: string;
+  missionId: string;
   type: FindingType;
   severity: FindingSeverity;
   title: string;
@@ -62,6 +65,7 @@ export interface Finding {
   sourceCount: number;
   executionIds: string[];
   relatedAgents: string[];
+  validatedBy?: string;
   firstSeenAt: number;
   lastSeenAt: number;
   createdAt: number;
@@ -76,25 +80,15 @@ export type FindingCreateInput = Pick<Finding, "type" | "severity" | "title" | "
 export type FindingPatchInput = Partial<
   Pick<
     Finding,
-    "severity" | "status" | "tags" | "description" | "title" | "confidence" | "parameter" | "impact" | "reproductionSteps"
+    | "severity"
+    | "status"
+    | "tags"
+    | "description"
+    | "title"
+    | "confidence"
+    | "parameter"
+    | "impact"
+    | "reproductionSteps"
+    | "validatedBy"
   >
 >;
-
-export interface FindingsGraphNode {
-  id: string;
-  type: FindingType | "target" | "tool";
-  label: string;
-}
-
-export type FindingsGraphRelation = "runs_on" | "discovered_by" | "uses" | "contains" | "connected_to" | "related_to";
-
-export interface FindingsGraphEdge {
-  source: string;
-  target: string;
-  relation: FindingsGraphRelation;
-}
-
-export interface FindingsGraph {
-  nodes: FindingsGraphNode[];
-  edges: FindingsGraphEdge[];
-}

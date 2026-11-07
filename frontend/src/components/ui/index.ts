@@ -7,3 +7,4 @@ export { ProgressRing } from "./ProgressRing";
 export { StreamingCursor } from "./StreamingCursor";
 export { SectionHeading } from "./SectionHeading";
 export { Skeleton, SkeletonRow, SkeletonRows } from "./Skeleton";
+export { SELECT_CLASS } from "./selectClass";

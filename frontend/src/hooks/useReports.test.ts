@@ -17,20 +17,21 @@ const mockDeleteReport = vi.mocked(deleteReport);
 function fixtureReport(overrides: Partial<Report> = {}): Report {
   return {
     id: "report-1",
-    projectId: "proj-1",
+    missionId: "proj-1",
     title: "My Report",
     findingIds: ["finding-1"],
     agentId: "report-writer",
     model: "test-model",
     markdown: "## Executive Summary\nAll good.",
     sections: [{ heading: "Executive Summary", content: "All good." }],
+    status: "ai_generated",
     createdAt: 0,
     ...overrides,
   };
 }
 
 describe("useReports", () => {
-  it("skips fetching and stays empty when projectId is null", async () => {
+  it("skips fetching and stays empty when missionId is null", async () => {
     const { result } = renderHook(() => useReports(null));
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -38,7 +39,7 @@ describe("useReports", () => {
     expect(mockFetchReports).not.toHaveBeenCalled();
   });
 
-  it("loads report history scoped to a projectId", async () => {
+  it("loads report history scoped to a missionId", async () => {
     mockFetchReports.mockResolvedValue([fixtureReport()]);
     const { result } = renderHook(() => useReports("proj-1"));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -47,16 +48,66 @@ describe("useReports", () => {
     expect(result.current.reports).toEqual([fixtureReport()]);
   });
 
-  it("re-fetches when projectId changes", async () => {
+  it("re-fetches when missionId changes", async () => {
     mockFetchReports.mockResolvedValue([]);
-    const { result, rerender } = renderHook(({ projectId }) => useReports(projectId), {
-      initialProps: { projectId: "proj-1" as string | null },
+    const { result, rerender } = renderHook(({ missionId }) => useReports(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(mockFetchReports).toHaveBeenCalledWith("proj-1");
 
-    rerender({ projectId: "proj-2" });
+    rerender({ missionId: "proj-2" });
     await waitFor(() => expect(mockFetchReports).toHaveBeenLastCalledWith("proj-2"));
+  });
+
+  it("ignores a stale previous-mission response that resolves after a mission switch", async () => {
+    let resolveOld!: (reports: Report[]) => void;
+    mockFetchReports.mockImplementation((id: string) =>
+      id === "proj-1" ? new Promise<Report[]>((r) => { resolveOld = r; }) : Promise.resolve([]),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useReports(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(mockFetchReports).toHaveBeenCalledWith("proj-1"));
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchReports).toHaveBeenLastCalledWith("proj-2"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      resolveOld([fixtureReport({ id: "stale-report" })]);
+    });
+
+    expect(result.current.reports).toEqual([]);
+  });
+
+  it("does not append a report that finishes after the mission changed", async () => {
+    mockFetchReports.mockResolvedValue([]);
+    let resolveCreate!: (report: Report) => void;
+    mockCreateReport.mockImplementation(
+      () => new Promise<Report>((r) => { resolveCreate = r; }),
+    );
+
+    const { result, rerender } = renderHook(({ missionId }) => useReports(missionId), {
+      initialProps: { missionId: "proj-1" as string | null },
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let generation!: Promise<Report | undefined>;
+    await act(async () => {
+      generation = result.current.generate("Report", ["finding-1"]);
+    });
+
+    rerender({ missionId: "proj-2" });
+    await waitFor(() => expect(mockFetchReports).toHaveBeenLastCalledWith("proj-2"));
+
+    await act(async () => {
+      resolveCreate(fixtureReport());
+    });
+    await generation;
+
+    expect(result.current.reports).toEqual([]);
   });
 
   it("surfaces a load failure", async () => {
@@ -69,7 +120,7 @@ describe("useReports", () => {
   it("generate() streams chunks into streamingText, then settles into reports and clears streamingText", async () => {
     mockFetchReports.mockResolvedValue([]);
     let onChunkRef!: (c: string) => void;
-    mockCreateReport.mockImplementation(async (_projectId, _title, _findingIds, onChunk) => {
+    mockCreateReport.mockImplementation(async (_missionId, _title, _findingIds, onChunk) => {
       onChunkRef = onChunk;
       onChunk("## Executive Summary\n");
       return fixtureReport();
@@ -91,7 +142,7 @@ describe("useReports", () => {
     expect(onChunkRef).toBeDefined();
   });
 
-  it("generate() is a no-op without a projectId or with no findings selected", async () => {
+  it("generate() is a no-op without a missionId or with no findings selected", async () => {
     const { result } = renderHook(() => useReports(null));
     await waitFor(() => expect(result.current.loading).toBe(false));
     await act(async () => {

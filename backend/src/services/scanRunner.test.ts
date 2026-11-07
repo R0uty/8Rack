@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { registerScanProfile } from "../extensions/scannerRegistry.js";
 import { registerExecTool } from "./toolManager.js";
-import { cancelScanRun, createScanRun, getScan, listScans, previewScan } from "./scanRunner.js";
+import { cancelScanRun, createScanRun, getScan, listScans, loadScansFromDisk, previewScan } from "./scanRunner.js";
+import { listMissionIds, readMissionJson } from "./missionStore.js";
 import {
   InvalidScanStateError,
   InvalidScanTargetError,
@@ -12,10 +13,10 @@ import {
 import type { ExecTool } from "../types/execTool.js";
 import type { ScanEvent } from "./scanRunner.js";
 
-vi.mock("./projectStore.js", () => ({
-  listProjectIds: vi.fn(async () => []),
-  readProjectJson: vi.fn(async () => []),
-  writeProjectJson: vi.fn(async () => undefined),
+vi.mock("./missionStore.js", () => ({
+  listMissionIds: vi.fn(async () => []),
+  readMissionJson: vi.fn(async () => []),
+  writeMissionJson: vi.fn(async () => undefined),
 }));
 
 const echoTool: ExecTool = {
@@ -165,14 +166,39 @@ describe("cancelScanRun", () => {
 });
 
 describe("listScans / getScan", () => {
-  it("only returns scans for the requested project, and getScan finds by id across projects", async () => {
+  it("only returns scans for the requested mission, and getScan finds by id across missions", async () => {
     await createScanRun("proj-list-a", "test-profile", "example.com");
     await createScanRun("proj-list-a", "test-profile", "example.com");
     const runB = await createScanRun("proj-list-b", "test-profile", "example.com");
 
     expect(listScans("proj-list-a")).toHaveLength(2);
     expect(listScans("proj-list-b")).toHaveLength(1);
-    expect(getScan(runB.id)?.projectId).toBe("proj-list-b");
+    expect(getScan(runB.id)?.missionId).toBe("proj-list-b");
     expect(getScan("nope")).toBeUndefined();
+  });
+});
+
+describe("loadScansFromDisk", () => {
+  it("settles a scan left running by a previous process", async () => {
+    vi.mocked(listMissionIds).mockResolvedValueOnce(["proj-scan-hydrate"]);
+    vi.mocked(readMissionJson).mockResolvedValueOnce([
+      {
+        id: "scan-hydrate",
+        missionId: "proj-scan-hydrate",
+        status: "running",
+        steps: [
+          { toolId: "a", status: "completed" },
+          { toolId: "b", status: "running" },
+          { toolId: "c", status: "pending" },
+        ],
+      },
+    ]);
+
+    await loadScansFromDisk();
+
+    const run = getScan("scan-hydrate");
+    expect(run?.status).toBe("cancelled");
+    expect(run?.finishedAt).toBeTruthy();
+    expect(run?.steps.map((s) => s.status)).toEqual(["completed", "skipped", "skipped"]);
   });
 });

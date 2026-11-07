@@ -6,7 +6,7 @@ interface SectionHeadingProps {
 }
 
 /** Small uppercase section label + optional right-aligned actions (refresh button, etc.) - used
- * atop every sidebar/panel section (Model, Agents, Projects, Tool Registry, ...). */
+ * atop every sidebar/panel section (Model, Agents, Missions, Tool Registry, ...). */
 export function SectionHeading({ children, actions }: SectionHeadingProps) {
   return (
     <div className="mb-3 flex items-center justify-between">

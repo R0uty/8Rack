@@ -3,11 +3,13 @@ import { getScanProfile } from "../extensions/scannerRegistry.js";
 import {
   cancelExecution,
   confirmExecution,
+  rejectExecution,
   getExecTool,
   listExecToolsWithStatus,
   requestExecution,
 } from "./toolManager.js";
-import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
+import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStore.js";
+import { onMissionDeleted } from "./missionManager.js";
 import {
   InvalidScanStateError,
   InvalidScanTargetError,
@@ -37,26 +39,53 @@ function stepLabel(step: ScanProfileStep): string {
   return step.label ?? getExecTool(step.toolId)?.name ?? step.toolId;
 }
 
-function projectScans(projectId: string): ScanRun[] {
-  return [...scans.values()].filter((s) => s.projectId === projectId).sort((a, b) => b.createdAt - a.createdAt);
+function missionScans(missionId: string): ScanRun[] {
+  return [...scans.values()].filter((s) => s.missionId === missionId).sort((a, b) => b.createdAt - a.createdAt);
 }
 
-async function persistScans(projectId: string): Promise<void> {
-  await writeProjectJson(projectId, SCANS_FILE, projectScans(projectId));
+async function persistScans(missionId: string): Promise<void> {
+  await writeMissionJson(missionId, SCANS_FILE, missionScans(missionId));
 }
+
+// See missionManager.ts#onMissionDeleted. The actual running subprocess for an active step is
+// already aborted by toolManager.ts's own purge handler (same missionId, independently
+// registered) - this just stops the scan record itself from lingering as a ghost.
+onMissionDeleted((missionId) => {
+  for (const [id, scan] of scans) {
+    if (scan.missionId !== missionId) continue;
+    cancelledScans.delete(id);
+    activeExecutionByScan.delete(id);
+    scans.delete(id);
+  }
+});
 
 /** Hydrates in-memory scan history from disk - called once at server startup so history survives
  * a restart, same pattern as toolManager.ts#loadExecutionsFromDisk / orchestrator.ts#loadTasksFromDisk. */
 export async function loadScansFromDisk(): Promise<void> {
-  const projectIds = await listProjectIds();
-  for (const projectId of projectIds) {
-    const records = await readProjectJson<ScanRun>(projectId, SCANS_FILE);
-    for (const record of records) scans.set(record.id, record);
+  const missionIds = await listMissionIds();
+  for (const missionId of missionIds) {
+    const records = await readMissionJson<ScanRun>(missionId, SCANS_FILE);
+    for (const record of records) scans.set(record.id, recoverInterruptedScan(record));
   }
 }
 
-export function listScans(projectId: string): ScanRun[] {
-  return projectScans(projectId);
+/** The loop driving a "running" scan died with the old process - left as is, it would read as running
+ * forever, and cancelling it would only set a flag nothing checks any more. */
+function recoverInterruptedScan(run: ScanRun): ScanRun {
+  if (run.status !== "running") return run;
+  run.status = "cancelled";
+  run.finishedAt = Date.now();
+  for (const step of run.steps) {
+    if (step.status === "pending" || step.status === "running") {
+      step.status = "skipped";
+      step.error = "The backend restarted during this scan.";
+    }
+  }
+  return run;
+}
+
+export function listScans(missionId: string): ScanRun[] {
+  return missionScans(missionId);
 }
 
 export function getScan(id: string): ScanRun | undefined {
@@ -116,7 +145,7 @@ export type ScanEvent =
  * Runs every step of a profile against a target, sequentially, through the existing
  * requestExecution/confirmExecution pipeline - so workspace path containment, executable
  * availability checks, and Execution -> Parser -> Findings ingestion all apply exactly as they do
- * for a manually-run Workbench tool. Each step is auto-confirmed the instant it's requested: the
+ * for a manually-run tool. Each step is auto-confirmed the instant it's requested: the
  * human already confirmed the whole chain by starting this scan (see the "Confirm & Run All" UX),
  * unlike the Orchestrator where an LLM picks tools/arguments at runtime and each one needs its own
  * approval. A step that fails doesn't abort the scan - later steps still run, since a real recon
@@ -124,7 +153,7 @@ export type ScanEvent =
  * cancel skips the remaining steps.
  */
 export async function createScanRun(
-  projectId: string,
+  missionId: string,
   profileId: string,
   targetInput: string,
   onEvent?: (event: ScanEvent) => void,
@@ -134,7 +163,7 @@ export async function createScanRun(
 
   const run: ScanRun = {
     id: randomUUID(),
-    projectId,
+    missionId,
     profileId: profile.id,
     profileName: profile.name,
     target,
@@ -149,7 +178,7 @@ export async function createScanRun(
     startedAt: Date.now(),
   };
   scans.set(run.id, run);
-  await persistScans(projectId);
+  await persistScans(missionId);
   onEvent?.({ type: "scan", scan: run });
 
   for (const step of run.steps) {
@@ -164,15 +193,33 @@ export async function createScanRun(
     onEvent?.({ type: "step", scanId: run.id, step });
 
     try {
-      const record = await requestExecution({ projectId, tool: step.toolId, arguments: step.arguments });
+      const record = await requestExecution({ missionId, tool: step.toolId, arguments: step.arguments });
       step.resolvedCommand = record.resolvedCommand;
 
       if (record.status === "pending_confirmation") {
+        // A cancel can land while requestExecution is awaiting - this step must not start after it.
+        if (cancelledScans.has(run.id)) {
+          rejectExecution(record.id);
+          step.executionId = record.id;
+          step.status = "skipped";
+          step.finishedAt = Date.now();
+          onEvent?.({ type: "step", scanId: run.id, step });
+          continue;
+        }
         activeExecutionByScan.set(run.id, record.id);
-        const finished = await confirmExecution(record.id, (chunk: OutputChunk) => {
-          onEvent?.({ type: "output", scanId: run.id, toolId: step.toolId, stream: chunk.stream, data: chunk.data });
-        });
-        activeExecutionByScan.delete(run.id);
+        let finished;
+        try {
+          finished = await confirmExecution(record.id, (chunk: OutputChunk) => {
+            onEvent?.({ type: "output", scanId: run.id, toolId: step.toolId, stream: chunk.stream, data: chunk.data });
+          });
+        } catch (err) {
+          // Refused before it ran (e.g. the concurrency cap) - a scan has no human to retry it, so
+          // don't leave it sitting in the mission's Approval Queue.
+          rejectExecution(record.id);
+          throw err;
+        } finally {
+          activeExecutionByScan.delete(run.id);
+        }
         step.executionId = finished.id;
         step.status =
           finished.status === "completed" ? "completed" : finished.status === "cancelled" ? "skipped" : "failed";
@@ -192,22 +239,20 @@ export async function createScanRun(
 
     step.finishedAt = Date.now();
     onEvent?.({ type: "step", scanId: run.id, step });
-    await persistScans(projectId);
+    await persistScans(missionId);
   }
 
   run.status = cancelledScans.has(run.id) ? "cancelled" : "completed";
   run.finishedAt = Date.now();
   cancelledScans.delete(run.id);
   activeExecutionByScan.delete(run.id);
-  await persistScans(projectId);
+  await persistScans(missionId);
   onEvent?.({ type: "scan", scan: run });
   return run;
 }
 
 /** Flags a running scan to stop scheduling further steps and aborts whichever step is currently
- * in flight (best effort - if the abort lands in the brief window between requesting and
- * confirming a step's execution, that one step still runs to completion, but no further steps
- * will start). */
+ * in flight. */
 export function cancelScanRun(id: string): ScanRun {
   const run = scans.get(id);
   if (!run) throw new ScanRunNotFoundError(id);

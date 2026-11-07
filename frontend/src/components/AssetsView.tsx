@@ -1,115 +1,88 @@
 import { useMemo } from "react";
-import type { Finding, FindingType } from "../types/finding";
-import { GlassPanel, SectionHeading } from "./ui";
+import { NoMission } from "./NoMission";
+import { GlassPanel, SectionHeading, SkeletonRows, StatusPill, type Tone } from "./ui";
+import { useAssets } from "../hooks/useAssets";
+import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
+import { relativeTime } from "../lib/relativeTime";
+import type { Mission } from "../types/mission";
+import type { Asset, AssetStatus, AssetType } from "../types/asset";
 
-interface AssetsViewProps {
-  findings: Finding[];
-}
-
-/** Which FindingTypes count as "assets" for this view, and their display label - a subset of
- * FindingType, deliberately excluding vulnerability/credential/cookie/header/information findings
- * (those belong in the Findings table, not an asset inventory). */
-const ASSET_TYPE_LABELS: Partial<Record<FindingType, string>> = {
+const TYPE_LABELS: Record<AssetType, string> = {
   domain: "Domains",
   subdomain: "Subdomains",
+  url: "URLs",
+  ip: "IP addresses",
   port: "Ports",
-  technology: "Technologies",
+  service: "Services",
   api: "APIs",
-  endpoint: "Endpoints / URLs",
+  technology: "Technologies",
 };
 
-const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+const TYPE_ORDER: AssetType[] = ["domain", "subdomain", "ip", "url", "port", "service", "api", "technology"];
 
-interface AssetItem {
-  value: string;
-  target: string;
-  count: number;
-  lastSeenAt: number;
+const STATUS_TONE: Record<AssetStatus, Tone> = {
+  active: "primary",
+  unverified: "warning",
+  inactive: "neutral",
+};
+
+function groupByType(assets: Asset[], type: AssetType): Asset[] {
+  return assets.filter((a) => a.type === type).sort((a, b) => b.lastSeen - a.lastSeen);
 }
 
-function upsert(map: Map<string, AssetItem>, key: string, finding: Finding) {
-  const existing = map.get(key);
-  if (existing) {
-    existing.count += 1;
-    existing.lastSeenAt = Math.max(existing.lastSeenAt, finding.lastSeenAt);
-  } else {
-    map.set(key, { value: key, target: finding.target, count: 1, lastSeenAt: finding.lastSeenAt });
-  }
-}
+/** A mission's real Asset Inventory (backend/src/services/assetManager.ts), grouped by type. */
+export function AssetsView({ mission, active = true }: { mission: Mission | null; active?: boolean }) {
+  const { assets, loading, error, refresh } = useAssets(mission?.id ?? null);
+  useRefreshOnActivate(active, refresh);
 
-function groupByType(findings: Finding[], type: FindingType): AssetItem[] {
-  const map = new Map<string, AssetItem>();
-  for (const f of findings) {
-    if (f.type === type) upsert(map, f.value, f);
-  }
-  return [...map.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
-}
+  const byId = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets]);
+  const groups = useMemo(
+    () =>
+      TYPE_ORDER.map((type) => ({ type, label: TYPE_LABELS[type], items: groupByType(assets, type) })).filter(
+        (g) => g.items.length > 0,
+      ),
+    [assets],
+  );
 
-/**
- * There's no dedicated "ip" FindingType (see DEVELOPMENT.md's Assets view section for why) - IP
- * addresses are instead recovered from any finding whose `target` happens to already be one,
- * which every port/service finding from an IP-based nmap scan already satisfies.
- */
-function distinctIps(findings: Finding[]): AssetItem[] {
-  const map = new Map<string, AssetItem>();
-  for (const f of findings) {
-    if (IPV4_RE.test(f.target)) upsert(map, f.target, f);
-  }
-  return [...map.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
-}
-
-/**
- * A read-only Assets inventory derived entirely from the project's existing Findings - no new
- * backend entity (see DEVELOPMENT.md). Regroups findings the Findings Engine already parsed out of
- * tool output into the asset categories the task asked for (domains, subdomains, IPs, ports,
- * technologies, APIs, endpoints/URLs), deduplicated by each finding's canonical `value`.
- */
-export function AssetsView({ findings }: AssetsViewProps) {
-  const groups = useMemo(() => {
-    const entries = [
-      { key: "ip", label: "IP addresses", items: distinctIps(findings) },
-      ...(Object.keys(ASSET_TYPE_LABELS) as FindingType[]).map((type) => ({
-        key: type,
-        label: ASSET_TYPE_LABELS[type]!,
-        items: groupByType(findings, type),
-      })),
-    ];
-    return entries.filter((g) => g.items.length > 0);
-  }, [findings]);
-
-  if (groups.length === 0) {
-    return (
-      <p className="text-xs text-muted">
-        No assets discovered yet — run recon tools or a Scan Profile against this project's target(s).
-      </p>
-    );
-  }
+  if (!mission) return <NoMission />;
 
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-      {groups.map((group) => (
-        <GlassPanel key={group.key} padding="md">
-          <SectionHeading>
-            {group.label} ({group.items.length})
-          </SectionHeading>
-          <div className="flex flex-col gap-1.5">
-            {group.items.map((item) => (
-              <div
-                key={item.value}
-                className="flex items-center justify-between gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs"
-              >
-                <span
-                  className="truncate font-mono text-text"
-                  title={item.target !== item.value ? `on ${item.target}` : undefined}
-                >
-                  {item.value}
-                </span>
-                {item.count > 1 && <span className="shrink-0 text-muted">×{item.count}</span>}
-              </div>
-            ))}
-          </div>
-        </GlassPanel>
-      ))}
+    <div className="flex flex-col gap-4">
+      {error && <p className="text-xs text-critical">{error}</p>}
+      {loading && assets.length === 0 && <SkeletonRows count={5} />}
+      {!loading && groups.length === 0 && (
+        <p className="text-xs text-muted">No assets yet - advance the factory or run a scan to discover some.</p>
+      )}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {groups.map((group) => (
+          <GlassPanel key={group.type} padding="md">
+            <SectionHeading>
+              {group.label} ({group.items.length})
+            </SectionHeading>
+            <div className="flex flex-col gap-1.5">
+              {group.items.map((asset) => {
+                const parent = asset.parentId ? byId.get(asset.parentId) : undefined;
+                return (
+                  <div key={asset.id} className="flex items-center justify-between gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs">
+                    <div className="min-w-0 flex-1">
+                      <span className="truncate font-mono text-text" title={parent ? `on ${parent.value}` : undefined}>
+                        {asset.value}
+                      </span>
+                      <div className="mt-0.5 flex gap-1.5 text-[10px] text-muted">
+                        <span>{asset.discoveredBy}</span>
+                        <span>· {relativeTime(asset.lastSeen)}</span>
+                      </div>
+                    </div>
+                    <StatusPill tone={STATUS_TONE[asset.status]} dot className="shrink-0 px-1.5 py-0.5 text-[10px]">
+                      {asset.status}
+                    </StatusPill>
+                  </div>
+                );
+              })}
+            </div>
+          </GlassPanel>
+        ))}
+      </div>
     </div>
   );
 }

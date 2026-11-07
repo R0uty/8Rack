@@ -44,7 +44,7 @@ export type ScanRunStatus = "running" | "completed" | "cancelled";
 
 export interface ScanRun {
   id: string;
-  projectId: string;
+  missionId: string;
   profileId: string;
   /** Snapshot of the profile's name at run time, so a later profile edit doesn't rewrite history. */
   profileName: string;

@@ -1,7 +1,7 @@
 /**
  * A minimal in-memory double for the handful of `node:fs/promises` functions this codebase
- * actually uses (`mkdir`/`readFile`/`writeFile`/`readdir`/`rm`), for tests that exercise
- * agentManager.ts/projectManager.ts/projectStore.ts without touching the real filesystem. Files
+ * actually uses (`mkdir`/`readFile`/`writeFile`/`rename`/`readdir`/`rm`), for tests that exercise
+ * agentManager.ts/missionManager.ts/missionStore.ts without touching the real filesystem. Files
  * are stored as full-path -> content entries; directories are inferred from path prefixes, so
  * `mkdir` is a no-op and `readdir` distinguishes "file directly here" from "nested under a
  * subdirectory here" by whether more path segments follow.
@@ -11,6 +11,7 @@ export interface FakeFs {
   mkdir(path: string, opts?: { recursive?: boolean }): Promise<string | undefined>;
   readFile(path: string, encoding?: string): Promise<string>;
   writeFile(path: string, content: string): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
   readdir(path: string, opts?: { withFileTypes?: boolean }): Promise<string[] | FakeDirent[]>;
   rm(path: string, opts?: { recursive?: boolean; force?: boolean }): Promise<void>;
 }
@@ -45,6 +46,13 @@ export function createFakeFs(): FakeFs {
 
     async writeFile(path: string, content: string) {
       files.set(path, content);
+    },
+
+    async rename(from: string, to: string) {
+      const content = files.get(from);
+      if (content === undefined) throw enoent(from);
+      files.delete(from);
+      files.set(to, content);
     },
 
     async readdir(path: string, opts?: { withFileTypes?: boolean }) {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { createAgent, deleteAgent, fetchAgents, reloadAgents, updateAgent } from "../services/api";
+import { createAgent, deleteAgent, fetchAgents, reloadAgents, updateAgent } from "../services/agentsApi";
 import type { Agent, AgentConfigWarning, AgentWithStatus } from "../types/agent";
 
 export function useAgents() {

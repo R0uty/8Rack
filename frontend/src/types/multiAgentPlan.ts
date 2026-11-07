@@ -23,7 +23,7 @@ export type MultiAgentPlanStatus =
 
 export interface MultiAgentPlan {
   id: string;
-  projectId: string;
+  missionId: string;
   description: string;
   steps: PlanStep[];
   stepRuns: PlanStepRun[];

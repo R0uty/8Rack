@@ -1,16 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createFinding, deleteFinding, fetchFindings, updateFinding } from "../services/findingsApi";
 import type { Finding, FindingCreateInput, FindingPatchInput } from "../types/finding";
 
-/** Findings are project-scoped, like useTools' executions - pass null when no project is selected
+/** Findings are mission-scoped, like useTools' executions - pass null when no mission is selected
  * yet (findings stay empty, nothing is fetched). */
-export function useFindings(projectId: string | null) {
+export function useFindings(missionId: string | null) {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  /** Guard against a stale previous-mission response landing after a quick mission switch - see
+   * useTools.ts's identical ref for the pattern and why it matters. */
+  const missionIdRef = useRef(missionId);
+  useEffect(() => {
+    missionIdRef.current = missionId;
+  }, [missionId]);
+
   const refresh = useCallback(async () => {
-    if (!projectId) {
+    if (!missionId) {
       setFindings([]);
       setLoading(false);
       return;
@@ -18,13 +25,16 @@ export function useFindings(projectId: string | null) {
     setLoading(true);
     setError(null);
     try {
-      setFindings(await fetchFindings(projectId));
+      const data = await fetchFindings(missionId);
+      if (missionIdRef.current !== missionId) return;
+      setFindings(data);
     } catch (err) {
+      if (missionIdRef.current !== missionId) return;
       setError(err instanceof Error ? err.message : "Failed to load findings");
     } finally {
-      setLoading(false);
+      if (missionIdRef.current === missionId) setLoading(false);
     }
-  }, [projectId]);
+  }, [missionId]);
 
   useEffect(() => {
     refresh();
@@ -32,12 +42,12 @@ export function useFindings(projectId: string | null) {
 
   const create = useCallback(
     async (input: FindingCreateInput) => {
-      if (!projectId) throw new Error("No project selected");
-      const finding = await createFinding(projectId, input);
+      if (!missionId) throw new Error("No mission selected");
+      const finding = await createFinding(missionId, input);
       await refresh();
       return finding;
     },
-    [projectId, refresh],
+    [missionId, refresh],
   );
 
   const update = useCallback(

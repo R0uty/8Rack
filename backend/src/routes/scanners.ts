@@ -4,20 +4,20 @@ import { abortOnClientDisconnect } from "./streamUtils.js";
 import { cancelScanRun, createScanRun, getScan, listScans, previewScan } from "../services/scanRunner.js";
 import type { ScanEvent } from "../services/scanRunner.js";
 
-/** Flat, unscoped route - the profile roster isn't per-project. GET /api/scanners. */
+/** Flat, unscoped route - the profile roster isn't per-mission. GET /api/scanners. */
 export const scannersRouter = Router();
 
 scannersRouter.get("/", (_req, res) => {
   res.json({ profiles: listScanProfiles() });
 });
 
-/** Project-scoped scan routes - GET/POST /api/projects/:projectId/scans[...]. MUST be created with
- * { mergeParams: true } or req.params.projectId is undefined once mounted under a parent router's
- * :projectId segment (backend/src/index.ts) - see routes/findings.ts for the same requirement. */
-export const projectScansRouter = Router({ mergeParams: true });
+/** Mission-scoped scan routes - GET/POST /api/missions/:missionId/scans[...]. MUST be created with
+ * { mergeParams: true } or req.params.missionId is undefined once mounted under a parent router's
+ * :missionId segment (backend/src/index.ts) - see routes/findings.ts for the same requirement. */
+export const missionScansRouter = Router({ mergeParams: true });
 
-function projectIdOf(req: { params: Record<string, string> }): string {
-  return req.params.projectId;
+function missionIdOf(req: { params: Record<string, string> }): string {
+  return req.params.missionId;
 }
 
 interface ScanRequestBody {
@@ -34,11 +34,11 @@ function isValidScanRequest(body: ScanRequestBody): body is { profileId: string;
   );
 }
 
-projectScansRouter.get("/", (req, res) => {
-  res.json({ scans: listScans(projectIdOf(req)) });
+missionScansRouter.get("/", (req, res) => {
+  res.json({ scans: listScans(missionIdOf(req)) });
 });
 
-projectScansRouter.get("/:id", (req, res) => {
+missionScansRouter.get("/:id", (req, res) => {
   const scan = getScan(req.params.id);
   if (!scan) {
     res.status(404).json({ error: `Scan "${req.params.id}" was not found`, code: "SCAN_NOT_FOUND" });
@@ -47,7 +47,7 @@ projectScansRouter.get("/:id", (req, res) => {
   res.json({ scan });
 });
 
-projectScansRouter.post("/preview", (req, res, next) => {
+missionScansRouter.post("/preview", (req, res, next) => {
   const body = req.body as ScanRequestBody;
   if (!isValidScanRequest(body)) {
     res
@@ -68,7 +68,7 @@ projectScansRouter.post("/preview", (req, res, next) => {
  * runAndStreamTask/routes/tools.ts's confirm-execution stream. A client disconnect cancels the
  * scan the same way it cancels a single tool execution or an orchestrator task.
  */
-projectScansRouter.post("/", async (req, res, next) => {
+missionScansRouter.post("/", async (req, res, next) => {
   const body = req.body as ScanRequestBody;
   if (!isValidScanRequest(body)) {
     res
@@ -92,7 +92,7 @@ projectScansRouter.post("/", async (req, res, next) => {
   res.setHeader("Cache-Control", "no-cache");
 
   try {
-    const scan = await createScanRun(projectIdOf(req), body.profileId, body.target, (event: ScanEvent) => {
+    const scan = await createScanRun(missionIdOf(req), body.profileId, body.target, (event: ScanEvent) => {
       if (event.type === "scan") scanId = event.scan.id;
       res.write(`${JSON.stringify(event)}\n`);
     });
@@ -109,7 +109,7 @@ projectScansRouter.post("/", async (req, res, next) => {
   }
 });
 
-projectScansRouter.post("/:id/cancel", (req, res, next) => {
+missionScansRouter.post("/:id/cancel", (req, res, next) => {
   try {
     res.json({ scan: cancelScanRun(req.params.id) });
   } catch (err) {

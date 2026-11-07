@@ -7,7 +7,8 @@ import {
   resumeTask as resumeOrchestratorTask,
 } from "./orchestrator.js";
 import type { ChunkListener, OrchestratorTask } from "./orchestrator.js";
-import { listProjectIds, readProjectJson, writeProjectJson } from "./projectStore.js";
+import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStore.js";
+import { onMissionDeleted } from "./missionManager.js";
 import { InvalidPlanStateError, PlanNotFoundError, RequestCancelledError } from "./errors.js";
 import type { MultiAgentPlan, PlanStep, PlanStepRun } from "../types/orchestration.js";
 
@@ -22,21 +23,37 @@ import type { MultiAgentPlan, PlanStep, PlanStepRun } from "../types/orchestrati
 const plans = new Map<string, MultiAgentPlan>();
 const PLANS_FILE = "multi-agent-plans.json";
 
-function projectPlans(projectId: string): MultiAgentPlan[] {
-  return [...plans.values()].filter((p) => p.projectId === projectId).sort((a, b) => b.createdAt - a.createdAt);
+function missionPlans(missionId: string): MultiAgentPlan[] {
+  return [...plans.values()].filter((p) => p.missionId === missionId).sort((a, b) => b.createdAt - a.createdAt);
 }
 
-async function persistPlans(projectId: string): Promise<void> {
-  await writeProjectJson(projectId, PLANS_FILE, projectPlans(projectId));
+async function persistPlans(missionId: string): Promise<void> {
+  await writeMissionJson(missionId, PLANS_FILE, missionPlans(missionId));
 }
+
+// See missionManager.ts#onMissionDeleted. A plan's current-step task is a real entry in
+// orchestrator.ts's own `tasks` map (same missionId) and is aborted by that module's own,
+// independently-registered handler - this just stops the plan record itself from lingering.
+onMissionDeleted((missionId) => {
+  for (const [id, plan] of plans) {
+    if (plan.missionId === missionId) plans.delete(id);
+  }
+});
 
 /** Hydrates in-memory plans from disk - called once at server startup so plan history survives a
  * restart instead of only being written-through from that point on. */
 export async function loadPlansFromDisk(): Promise<void> {
-  const projectIds = await listProjectIds();
-  for (const projectId of projectIds) {
-    const projectPlansOnDisk = await readProjectJson<MultiAgentPlan>(projectId, PLANS_FILE);
-    for (const plan of projectPlansOnDisk) plans.set(plan.id, plan);
+  const missionIds = await listMissionIds();
+  for (const missionId of missionIds) {
+    const missionPlansOnDisk = await readMissionJson<MultiAgentPlan>(missionId, PLANS_FILE);
+    for (const plan of missionPlansOnDisk) {
+      // Same as orchestrator.ts#loadTasksFromDisk - nothing is driving a "running" plan any more.
+      if (plan.status === "running") {
+        plan.status = "failed";
+        plan.error = "The backend restarted while this plan was running.";
+      }
+      plans.set(plan.id, plan);
+    }
   }
 }
 
@@ -101,7 +118,7 @@ async function continueAfterStepTask(
     plan.currentStepIndex++;
     const nextStep = plan.steps[plan.currentStepIndex];
     const objective = await buildStepObjective(plan, nextStep);
-    const nextTask = await createOrchestratorTask(nextStep.agentId, objective, plan.projectId, onChunk, signal);
+    const nextTask = await createOrchestratorTask(nextStep.agentId, objective, plan.missionId, onChunk, signal);
     plan.stepRuns.push({
       agentId: nextStep.agentId,
       objective,
@@ -120,8 +137,20 @@ async function continueAfterStepTask(
   return plan;
 }
 
+/** A step that throws (e.g. its agent was deleted between steps) must still settle the plan, not
+ * leave it at "running" forever. */
+function settleThrownPlan(plan: MultiAgentPlan, err: unknown): void {
+  if (err instanceof RequestCancelledError) {
+    plan.status = "cancelled";
+  } else {
+    plan.status = "failed";
+    plan.error = err instanceof Error ? err.message : "Plan step failed";
+  }
+  touch(plan);
+}
+
 export async function createPlan(
-  projectId: string,
+  missionId: string,
   description: string,
   steps: PlanStep[],
   onChunk?: ChunkListener,
@@ -129,7 +158,7 @@ export async function createPlan(
 ): Promise<MultiAgentPlan> {
   const plan: MultiAgentPlan = {
     id: randomUUID(),
-    projectId,
+    missionId,
     description,
     steps,
     stepRuns: [],
@@ -142,7 +171,7 @@ export async function createPlan(
 
   try {
     const firstStep = steps[0];
-    const task = await createOrchestratorTask(firstStep.agentId, firstStep.objective, projectId, onChunk, signal);
+    const task = await createOrchestratorTask(firstStep.agentId, firstStep.objective, missionId, onChunk, signal);
     plan.stepRuns.push({
       agentId: firstStep.agentId,
       objective: firstStep.objective,
@@ -151,14 +180,11 @@ export async function createPlan(
       finalResponse: task.finalResponse,
     });
     const result = await continueAfterStepTask(plan, task, onChunk, signal);
-    await persistPlans(plan.projectId);
+    await persistPlans(plan.missionId);
     return result;
   } catch (err) {
-    if (err instanceof RequestCancelledError) {
-      plan.status = "cancelled";
-      touch(plan);
-    }
-    await persistPlans(plan.projectId).catch(() => {});
+    settleThrownPlan(plan, err);
+    await persistPlans(plan.missionId).catch(() => {});
     throw err;
   }
 }
@@ -180,14 +206,11 @@ export async function resumePlan(id: string, onChunk?: ChunkListener, signal?: A
   try {
     const task = await resumeOrchestratorTask(currentRun.orchestratorTaskId, onChunk, signal);
     const result = await continueAfterStepTask(plan, task, onChunk, signal);
-    await persistPlans(plan.projectId);
+    await persistPlans(plan.missionId);
     return result;
   } catch (err) {
-    if (err instanceof RequestCancelledError) {
-      plan.status = "cancelled";
-      touch(plan);
-    }
-    await persistPlans(plan.projectId).catch(() => {});
+    settleThrownPlan(plan, err);
+    await persistPlans(plan.missionId).catch(() => {});
     throw err;
   }
 }
@@ -215,14 +238,11 @@ export async function provideStepGuidance(
   try {
     const task = await provideOrchestratorGuidance(currentRun.orchestratorTaskId, note, onChunk, signal);
     const result = await continueAfterStepTask(plan, task, onChunk, signal);
-    await persistPlans(plan.projectId);
+    await persistPlans(plan.missionId);
     return result;
   } catch (err) {
-    if (err instanceof RequestCancelledError) {
-      plan.status = "cancelled";
-      touch(plan);
-    }
-    await persistPlans(plan.projectId).catch(() => {});
+    settleThrownPlan(plan, err);
+    await persistPlans(plan.missionId).catch(() => {});
     throw err;
   }
 }
@@ -230,6 +250,9 @@ export async function provideStepGuidance(
 export function cancelPlan(id: string): MultiAgentPlan {
   const plan = plans.get(id);
   if (!plan) throw new PlanNotFoundError(id);
+  if (plan.status === "completed" || plan.status === "failed" || plan.status === "cancelled") {
+    throw new InvalidPlanStateError(`Plan "${id}" has already finished (status: ${plan.status})`);
+  }
   const currentRun = plan.stepRuns[plan.currentStepIndex];
   if (currentRun) {
     try {
@@ -242,7 +265,7 @@ export function cancelPlan(id: string): MultiAgentPlan {
   touch(plan);
   // Fire-and-forget: cancelPlan stays synchronous (its route calls it inline) - same tradeoff as
   // orchestrator.ts#cancelTask/toolManager.ts's reject/cancel.
-  void persistPlans(plan.projectId).catch((err) => console.error("[plans] persist failed:", err));
+  void persistPlans(plan.missionId).catch((err) => console.error("[plans] persist failed:", err));
   return plan;
 }
 
@@ -250,6 +273,6 @@ export function getPlan(id: string): MultiAgentPlan | undefined {
   return plans.get(id);
 }
 
-export function listPlans(projectId: string): MultiAgentPlan[] {
-  return projectPlans(projectId);
+export function listPlans(missionId: string): MultiAgentPlan[] {
+  return missionPlans(missionId);
 }

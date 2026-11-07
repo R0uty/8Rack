@@ -13,6 +13,13 @@ export interface ExecTool {
   id: string;
   name: string;
   description: string;
+  /** Guidance for an agent autonomously deciding *whether and how* to call this tool from a bare
+   * objective, with no tool named by the user - "when to reach for this" plus a minimal example of
+   * the caller-supplied `arguments` shape (i.e. the part after `defaultArguments`, which the model
+   * never sees or supplies itself). Kept separate from `description` (shown to the human in the
+   * Tool Registry UI, which stays short) rather than folded into it - see
+   * orchestrator.ts#buildToolsPreamble, the only place this is read. */
+  usageHint?: string;
   category: ExecToolCategory;
   /** Binary name (resolved via PATH) or absolute path. */
   executable: string;
@@ -34,7 +41,7 @@ export interface ExecTool {
    * misread as a query argument) - version is then left undetected rather than guessed. */
   versionFlag?: string;
   /** For tools whose command name collides with an unrelated program on some systems - e.g.
-   * ProjectDiscovery `httpx` (the recon prober this tool is built for) vs `python-httpx`'s CLI, both
+   * MissionDiscovery `httpx` (the recon prober this tool is built for) vs `python-httpx`'s CLI, both
    * of which install as `httpx`. A regex (source string, matched case-insensitively) that the
    * resolved binary's `versionFlag` output must contain for it to count as the genuine tool. A
    * binary that resolves but doesn't match is reported `unavailable` (and refused at execution)
@@ -57,7 +64,7 @@ export interface ExecToolWithStatus extends ExecTool {
 export interface ToolRequestBody {
   tool: string;
   arguments: string[];
-  projectId: string;
+  missionId: string;
   /** Piped to the process's stdin — used by tools like write_file. */
   stdin?: string;
   /** Set by the Orchestrator (from OrchestratorTask.agentId) when a request is agent-driven -
@@ -89,7 +96,7 @@ export type ExecutionStatus =
 
 export interface ExecutionRecord {
   id: string;
-  projectId: string;
+  missionId: string;
   toolId: string;
   /** The agent that requested this execution, if any - see ToolRequestBody.agentId. */
   agentId?: string;

@@ -7,7 +7,7 @@ import type { Finding } from "../types/finding";
 function fixtureFinding(overrides: Partial<Finding> = {}): Finding {
   return {
     id: "finding-1",
-    projectId: "proj-1",
+    missionId: "proj-1",
     type: "port",
     severity: "info",
     title: "Port 80/tcp open",

@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { env } from "../config/env.js";
+import { writeFileAtomic } from "./missionStore.js";
 import { embed } from "./ollama.js";
+import { RagReindexInProgressError, RagReindexTimeoutError } from "./errors.js";
 import type { RagChunk, RagIndexStatus, RagSearchResult } from "../types/rag.js";
 
 const execFileAsync = promisify(execFile);
@@ -12,6 +14,11 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RAG_DIR = path.resolve(__dirname, "../../data/rag");
 const INDEX_FILE = path.join(RAG_DIR, "index.json");
+
+/** The app's own data store (missions, executions, findings, the RAG index itself, ...). Never
+ * index it, even if a misconfigured WORKSPACE_ROOT points at the app's own tree or the repo root -
+ * that would embed sensitive mission/scope/finding data into the (persisted) index. */
+const APP_DATA_DIR = path.resolve(__dirname, "../../data");
 
 const SKIP_DIRS = new Set(["node_modules", "dist", "build", "__pycache__"]);
 const MAX_FILE_BYTES = 500 * 1024;
@@ -23,6 +30,10 @@ const CHUNK_OVERLAP_LINES = 5;
 /** Keeps individual /api/embed requests bounded rather than sending an entire codebase's chunks
  * in one call. */
 const EMBED_BATCH_SIZE = 32;
+/** Hard ceiling on one full reindex (walk + chunk + embed + persist). Each /api/embed call is
+ * already individually bounded by env.ollamaRequestTimeoutMs, so this caps the *accumulated* time
+ * across many batches/file reads on a large or wedged workspace. */
+const REINDEX_TIMEOUT_MS = 5 * 60 * 1000;
 
 let chunks: RagChunk[] = [];
 let status: RagIndexStatus = {
@@ -32,6 +43,9 @@ let status: RagIndexStatus = {
   embeddingModel: env.embeddingModel,
   workspaceRoot: env.workspaceRoot,
 };
+/** True while a reindex is running - a second concurrent one would interleave reads/embed batches
+ * and both write the index file; refuse it cleanly instead of corrupting anything. */
+let reindexing = false;
 
 /** Crude but cheap binary-file heuristic: a null byte essentially never appears in real text. */
 function isBinary(buf: Buffer): boolean {
@@ -44,6 +58,14 @@ function isBinary(buf: Buffer): boolean {
 
 function isPdf(name: string): boolean {
   return name.toLowerCase().endsWith(".pdf");
+}
+
+/** True if `candidate` is the app's own data dir or anything under it - the always-excluded
+ * subtree (see APP_DATA_DIR). Lexical containment is fine here (both paths are absolute, app-derived
+ * locations, not attacker-controlled strings). */
+function isInsideAppData(candidate: string): boolean {
+  const rel = path.relative(APP_DATA_DIR, candidate);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
 /** Extracts a PDF's text via the poppler `pdftotext` CLI - shelling out (the same pattern the
@@ -68,6 +90,9 @@ async function extractPdfText(absPath: string): Promise<string | undefined> {
 }
 
 async function walkWorkspace(): Promise<string[]> {
+  // WORKSPACE_ROOT pointing into the app's own data dir is a misconfiguration, not a legitimately
+  // indexable target - if that ever happens, index nothing rather than the app's own mission state.
+  if (isInsideAppData(env.workspaceRoot)) return [];
   const results: string[] = [];
 
   async function walk(dir: string): Promise<void> {
@@ -85,7 +110,7 @@ async function walkWorkspace(): Promise<string[]> {
 
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
+        if (SKIP_DIRS.has(entry.name) || isInsideAppData(full)) continue;
         await walk(full);
       } else if (entry.isFile()) {
         try {
@@ -137,69 +162,91 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-async function embedBatched(texts: string[]): Promise<number[][]> {
+async function embedBatched(texts: string[], signal?: AbortSignal): Promise<number[][]> {
   const results: number[][] = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
     const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
-    results.push(...(await embed(env.embeddingModel, batch)));
+    results.push(...(await embed(env.embeddingModel, batch, signal)));
   }
   return results;
 }
 
 /** Rebuilds the whole index from scratch - walk, chunk, embed, persist. No incremental updates;
  * a bounded review folder is small enough that a full rebuild is simple, correct, and fast
- * enough, without stale-chunk bookkeeping. */
+ * enough, without stale-chunk bookkeeping. Guarded against two problems: a hung Ollama embedding
+ * an oversized/misconfigured workspace (bounded by an overall budget signal on top of the per-call
+ * embedding timeout), and a second reindex racing the first (refused, not interleaved). */
 export async function reindex(): Promise<RagIndexStatus> {
-  const files = await walkWorkspace();
-  const pending: { filePath: string; startLine: number; endLine: number; text: string }[] = [];
+  if (reindexing) throw new RagReindexInProgressError();
+  reindexing = true;
+  const budgetSignal = AbortSignal.timeout(REINDEX_TIMEOUT_MS);
+  try {
+    const files = await walkWorkspace();
+    const pending: { filePath: string; startLine: number; endLine: number; text: string }[] = [];
 
-  for (const absPath of files) {
-    let text: string;
-    if (isPdf(absPath)) {
-      // PDFs are binary and over the text cap, so they go through pdftotext rather than a raw read.
-      const extracted = await extractPdfText(absPath);
-      if (extracted === undefined) continue;
-      text = extracted;
-    } else {
-      let buf: Buffer;
-      try {
-        buf = await readFile(absPath);
-      } catch {
-        continue;
+    for (const absPath of files) {
+      // pdftotext and huge reads aren't covered by the embedding calls' signal - a timeout must also
+      // be able to land during this loop.
+      if (budgetSignal.aborted) throw new RagReindexTimeoutError();
+      let text: string;
+      if (isPdf(absPath)) {
+        // PDFs are binary and over the text cap, so they go through pdftotext rather than a raw read.
+        const extracted = await extractPdfText(absPath);
+        if (extracted === undefined) continue;
+        text = extracted;
+      } else {
+        let buf: Buffer;
+        try {
+          buf = await readFile(absPath);
+        } catch {
+          continue;
+        }
+        if (isBinary(buf)) continue;
+        text = buf.toString("utf-8");
       }
-      if (isBinary(buf)) continue;
-      text = buf.toString("utf-8");
+
+      const relPath = path.relative(env.workspaceRoot, absPath);
+      for (const chunk of chunkText(text)) {
+        pending.push({ filePath: relPath, ...chunk });
+      }
     }
 
-    const relPath = path.relative(env.workspaceRoot, absPath);
-    for (const chunk of chunkText(text)) {
-      pending.push({ filePath: relPath, ...chunk });
+    const embeddings = pending.length > 0 ? await embedBatched(pending.map((c) => c.text), budgetSignal) : [];
+
+    const rebuilt: RagChunk[] = pending.map((c, i) => ({
+      id: `${c.filePath}:${c.startLine}-${c.endLine}`,
+      filePath: c.filePath,
+      startLine: c.startLine,
+      endLine: c.endLine,
+      text: c.text,
+      embedding: embeddings[i] ?? [],
+    }));
+
+    const rebuiltStatus: RagIndexStatus = {
+      indexedAt: Date.now(),
+      fileCount: new Set(pending.map((c) => c.filePath)).size,
+      chunkCount: rebuilt.length,
+      embeddingModel: env.embeddingModel,
+      workspaceRoot: env.workspaceRoot,
+    };
+
+    if (budgetSignal.aborted) throw new RagReindexTimeoutError();
+    await mkdir(RAG_DIR, { recursive: true });
+    await writeFileAtomic(INDEX_FILE, JSON.stringify({ status: rebuiltStatus, chunks: rebuilt }, null, 2));
+
+    // Only now - a timed-out or failed reindex must leave the previous index searchable, and memory
+    // agreeing with what's on disk.
+    chunks = rebuilt;
+    status = rebuiltStatus;
+    return status;
+  } catch (err) {
+    if (budgetSignal.aborted && !(err instanceof RagReindexTimeoutError)) {
+      throw new RagReindexTimeoutError();
     }
+    throw err;
+  } finally {
+    reindexing = false;
   }
-
-  const embeddings = pending.length > 0 ? await embedBatched(pending.map((c) => c.text)) : [];
-
-  chunks = pending.map((c, i) => ({
-    id: `${c.filePath}:${c.startLine}-${c.endLine}`,
-    filePath: c.filePath,
-    startLine: c.startLine,
-    endLine: c.endLine,
-    text: c.text,
-    embedding: embeddings[i] ?? [],
-  }));
-
-  status = {
-    indexedAt: Date.now(),
-    fileCount: new Set(pending.map((c) => c.filePath)).size,
-    chunkCount: chunks.length,
-    embeddingModel: env.embeddingModel,
-    workspaceRoot: env.workspaceRoot,
-  };
-
-  await mkdir(RAG_DIR, { recursive: true });
-  await writeFile(INDEX_FILE, JSON.stringify({ status, chunks }, null, 2));
-
-  return status;
 }
 
 export function getStatus(): RagIndexStatus {

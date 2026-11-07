@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useModels } from "./useModels";
-import { fetchModels } from "../services/api";
+import { fetchModels } from "../services/modelsApi";
 import type { OllamaModel } from "../types/ollama";
 
-vi.mock("../services/api", () => ({ fetchModels: vi.fn() }));
+vi.mock("../services/modelsApi", () => ({ fetchModels: vi.fn() }));
 
 const mockFetchModels = vi.mocked(fetchModels);
 

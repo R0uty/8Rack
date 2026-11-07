@@ -12,12 +12,20 @@ export function extractFlagValue(args: string[], flag: string): string | undefin
 }
 
 /** Returns the last argument that doesn't look like a flag or a flag's value-in-waiting - the
- * conventional trailing positional target for tools like `nmap <target>`, `whois <target>`. */
+ * conventional trailing positional target for tools like `nmap <target>`. */
 export function lastPositionalArg(args: string[]): string | undefined {
   for (let i = args.length - 1; i >= 0; i--) {
     if (!args[i].startsWith("-")) return args[i];
   }
   return undefined;
+}
+
+/** Returns the first argument that doesn't look like a flag or a flag's value-in-waiting - the
+ * conventional leading positional target for tools that name the target first and put further
+ * positionals after it, e.g. `dig example.com A` (last positional is the query type, not the target)
+ * and `whois example.com`. */
+export function firstPositionalArg(args: string[]): string | undefined {
+  return args.find((a) => !a.startsWith("-"));
 }
 
 /** httpx/katana in `-silent` mode (their only default argument) both just print one live URL per

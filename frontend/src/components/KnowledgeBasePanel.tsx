@@ -5,8 +5,8 @@ import { relativeTime } from "../lib/relativeTime";
 
 /**
  * Status + reindex control for the RAG knowledge base (see backend/src/services/ragIndex.ts) —
- * a global index over env.workspaceRoot, not project-scoped, so this lives alongside ProjectPanel
- * as a workspace-level setup concern rather than inside any one project's UI.
+ * a global index over env.workspaceRoot, not mission-scoped, so this is a workspace-level setup
+ * concern on the Tools page rather than inside any one mission's UI.
  */
 export function KnowledgeBasePanel() {
   const { status, loading, reindexing, error, reindex } = useRag();

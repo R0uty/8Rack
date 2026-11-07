@@ -1,37 +1,24 @@
 import { useState } from "react";
-import type { ExecToolWithStatus, ExecutionRecord, ExecutionStatus } from "../types/execTool";
+import type { ExecToolWithStatus } from "../types/execTool";
 import { iconFor, ToolFallbackIcon } from "../lib/icons";
-import { GlassPanel, IconButton, SectionHeading, SkeletonRows, StatusPill, type Tone } from "./ui";
-import { Power, RefreshCw } from "lucide-react";
+import { GlassPanel, IconButton, SkeletonRows, StatusPill } from "./ui";
+import { Power } from "lucide-react";
 
 interface ToolRegistryProps {
   tools: ExecToolWithStatus[];
-  executions: ExecutionRecord[];
   loading: boolean;
   error: string | null;
-  onRefresh: () => void;
   /** Runtime enable/disable toggle - author-level, distinct from `availability` (whether the
    * executable actually resolves on this machine). Omit to render the registry read-only. */
   onToggleEnabled?: (toolId: string, enabled: boolean) => Promise<void>;
 }
 
-const LAST_RUN_TONE: Record<ExecutionStatus, Tone> = {
-  pending_confirmation: "warning",
-  running: "info",
-  completed: "primary",
-  rejected: "neutral",
-  cancelled: "neutral",
-  failed: "critical",
-};
-
-/** executions is already newest-first from the backend, so the first match is the most recent. */
-function lastExecutionFor(toolId: string, executions: ExecutionRecord[]): ExecutionRecord | undefined {
-  return executions.find((e) => e.toolId === toolId);
-}
-
-export function ToolRegistry({ tools, executions, loading, error, onRefresh, onToggleEnabled }: ToolRegistryProps) {
+export function ToolRegistry({ tools, loading, error, onToggleEnabled }: ToolRegistryProps) {
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
+
+  // What can actually run first - an uninstalled tool is the exception worth seeing last.
+  const sorted = [...tools].sort((a, b) => Number(b.availability === "available") - Number(a.availability === "available"));
 
   async function handleToggle(tool: ExecToolWithStatus) {
     if (!onToggleEnabled) return;
@@ -48,29 +35,13 @@ export function ToolRegistry({ tools, executions, loading, error, onRefresh, onT
 
   return (
     <section>
-      <SectionHeading
-        actions={
-          <IconButton
-            icon={RefreshCw}
-            label="Refresh tool list"
-            size="sm"
-            onClick={onRefresh}
-            disabled={loading}
-            className={loading ? "animate-spin" : undefined}
-          />
-        }
-      >
-        Tool Registry
-      </SectionHeading>
-
       {error && <p className="mb-2 text-xs text-critical">{error}</p>}
       {toggleError && <p className="mb-2 text-xs text-critical">{toggleError}</p>}
       {loading && tools.length === 0 && <SkeletonRows count={5} />}
       {!error && !loading && tools.length === 0 && <p className="text-xs text-muted">No tools registered</p>}
 
       <div className="flex flex-col gap-2">
-        {tools.map((tool) => {
-          const last = lastExecutionFor(tool.id, executions);
+        {sorted.map((tool) => {
           const Icon = iconFor(tool.icon, ToolFallbackIcon);
           return (
             <GlassPanel
@@ -121,13 +92,6 @@ export function ToolRegistry({ tools, executions, loading, error, onRefresh, onT
                     >
                       {tool.version}
                     </span>
-                  )}
-                  {last ? (
-                    <StatusPill tone={LAST_RUN_TONE[last.status]} dot={false} className="ml-auto shrink-0 px-1.5 py-0.5">
-                      {last.status}
-                    </StatusPill>
-                  ) : (
-                    <span className="ml-auto shrink-0 italic text-muted">never run</span>
                   )}
                 </div>
               </div>
