@@ -3681,6 +3681,55 @@ The tool server runs on its own host and 8Rack reaches it over streamable HTTP. 
 - **Tool output crosses the network.** It's target data, possibly sensitive, so HTTPS matters for it as
   much as for the token.
 
+### Decided: Python for the MCP servers (2026-11-08)
+
+Both servers - RAG and tools - are written in Python, with the official Python MCP SDK. The client stays
+TypeScript in the backend; MCP doesn't care which language either side uses.
+
+- **Why Python.** Security tooling and custom recon tools are mostly Python, and so is the embedding and
+  vector-search ecosystem. Neither server does heavy work itself (nmap or the embedding model does), so
+  Rust's speed wouldn't show. Rust's main draw was a single binary to deploy on the scanning host; not
+  worth a smaller MCP ecosystem and slower changes. TypeScript would have reused the most existing code,
+  and that's the cost of this choice: step 3 becomes a reimplementation rather than a move.
+- **Layout.** In this repo, under `mcp-servers/` - `mcp-servers/rag/` and `mcp-servers/tools/`, each its
+  own Python project with its own tests, deployed from there. The repo goes from two workspaces to
+  three.
+- **The tool server reimplements what `toolExecutor.ts` does**: run each tool with an argument list and
+  never a shell, bound it by a timeout and an output limit, and kill the whole process group on cancel or
+  disconnect. `toolExecutor.ts` and `tools/exec/builtins.ts` are the reference until step 4 removes them,
+  and step 4's side-by-side run is what shows the two behave the same.
+- **Tool definitions move to Python, so the per-tool checks move with them.** That opens one question
+  for step 3: the scope check uses the tool id today - tools in `LOCAL_ONLY_TOOL_IDS` skip it, and a
+  command with no identifiable target is refused. MCP tools must default to being scope-checked. A tool
+  with no target is exempted in 8Rack's own config, never on the server's word, since the server's tool
+  descriptions are untrusted.
+- **RAG embedding** - decided right after this; see the next section.
+
+### Decided: the RAG server embeds through local Ollama (2026-11-08)
+
+The RAG server calls this machine's Ollama for embeddings rather than running its own model. That keeps
+one place where models live and keeps today's `EMBEDDING_MODEL` (`nomic-embed-text`).
+
+**So the RAG server runs on this machine, not on the scanning host.** Ollama has no authentication and
+listens on localhost only by default. A RAG server elsewhere could only reach it if Ollama listened on the
+network, and then anyone who can reach that port could use Ollama's whole API - not just embeddings, but
+pulling, creating and deleting models. Keeping the RAG server here avoids that entirely, and it also
+settles where the indexed files live: `WORKSPACE_ROOT` is on this machine already.
+
+- The RAG server listens on 127.0.0.1 only, and 8Rack reaches it over plain http, which the client
+  already accepts for localhost and nowhere else.
+- It still requires a bearer token (`MCP_TOKEN_RAG`). On localhost that's what stops other programs on
+  the machine, or a web page in a browser, from using it.
+- Only the tool server goes on the scanning host. The two servers no longer share a location, which is
+  fine: 8Rack treats each server in `MCP_SERVERS` separately.
+- The index is rebuilt by the new server rather than carried over from `backend/data/rag/index.json`.
+  The model is the same, so old vectors would still compare correctly, but the index format is the
+  server's own and reindexing a workspace is cheap.
+
+If the RAG server ever does need to run elsewhere, Ollama would need a proxy in front of it that requires
+a token and allows only the embedding endpoint, with a firewall rule limiting it to that host. Not
+planned.
+
 ### Order
 
 RAG first: it needs no approval, so it proves the client, config and discovery with the least risk. Then
@@ -3721,7 +3770,8 @@ page says so.
   the page loads, the hook asks for a check, which joins the one already running.
 
 Moved out of step 1, because neither does anything until agents can call an MCP tool: adding MCP tools to
-the Orchestrator's catalog, and the enable switch. Both now belong to step 2. `extensions/toolRegistry.ts`
+the Orchestrator's catalog, and the enable switch. Both went to step 2 first, then on to step 3 - see
+"RAG server (step 2)" below for why. `extensions/toolRegistry.ts`
 / `types/tool.ts` were considered as the adapter and rejected: their `execute()` runs a tool directly, with
 no approval step.
 
@@ -3733,3 +3783,85 @@ one online with 2 tools (a third, with an unsafe name, skipped) and one misconfi
 was stopped, "Check again" showed `Can't reach the server (ECONNREFUSED)`. The tab fits at phone width with
 no console errors. Not verified: a real remote host over https - no scanning host exists yet.
 
+## RAG server (step 2, 2026-11-08)
+
+Step 2 of "Planned: MCP servers as the tool and RAG providers". The knowledge base can now be served by an
+MCP server, `mcp-servers/rag/`, the first Python code in the repo. With `MCP_RAG_SERVER` unset nothing
+changes: the built-in index in `ragIndex.ts` is still used.
+
+**Plan change.** Step 2 was going to bring the enable switch and add MCP tools to the Orchestrator's
+catalog. It doesn't: agents keep the existing `search_knowledge_base` pseudo-tool, and 8Rack calls the
+server's `search` behind it. So no server tool name or description ever reaches the model, and nothing
+needs enabling. Both items move to step 3, where agents first call a server's tools by name - and where
+the approval gate they need already lives.
+
+### The server (`mcp-servers/rag/`)
+
+- Python, official MCP SDK (`mcp` 2.3.0, pinned), served by uvicorn over streamable HTTP in stateless
+  JSON mode. Three tools, each with structured output: `search(query, top_k=5)` → `{results: [...]}`,
+  `reindex()` → status, `status()` → status. The shapes match the backend's `RagSearchResult` and
+  `RagIndexStatus`, camelCase included, so 8Rack passes them through after validating them.
+- **Always 127.0.0.1** - the host isn't configurable. The SDK's DNS-rebinding protection (Host/Origin
+  allowlist for 127.0.0.1, localhost and [::1]) is on. Every HTTP request needs
+  `Authorization: Bearer <RAG_MCP_TOKEN>`, compared in constant time; the token must be at least 16
+  characters or the server won't start.
+- **Index** (`rag_server/index.py`) is a port of `ragIndex.ts` with the same rules: 50-line chunks with 5
+  lines of overlap, the same skip list, size caps, `pdftotext` for PDFs (argument list, no shell),
+  null-byte binary detection. Hidden entries and symlinks are skipped, so nothing outside the workspace
+  is followed. It never walks into its own index folder or 8Rack's `backend/data`. Reindex holds a lock
+  (a second one is refused, not queued), times out after 5 minutes, writes the index atomically
+  (temp file + rename) and swaps it in only on success, so a failed reindex keeps the previous index.
+- **Embeddings** come from local Ollama's `/api/embed` (decided above). A missing model says
+  `Run: ollama pull <model>`; an unreachable Ollama says so with its URL. Errors reach 8Rack as tool
+  errors.
+- Settings come from the environment or `mcp-servers/rag/.env` (see its `.env.example`); the environment
+  wins.
+
+### The backend
+
+- **`mcpClient.ts#callTool(serverId, name, args, timeout)`** - connect, call, close, like the tool listing.
+  It returns the tool's structured result. Every failure is an `McpRequestError` naming the server:
+  not in `MCP_SERVERS`, misconfigured, unreachable, token rejected (names `MCP_TOKEN_<ID>`, never shows
+  the token), timed out, a tool error (its text, truncated) or no structured result. `errorHandler`
+  maps it to 502 `MCP_REQUEST_FAILED`.
+- **`services/knowledgeBase.ts`** is the one place that decides local index vs. server; the
+  Orchestrator, `routes/rag.ts` and startup all call it instead of `ragIndex.ts`.
+  - Server answers are validated field by field; a malformed answer is an error, not passed on.
+    Results are capped at the requested `top_k` (max 20) and each text at 20,000 characters.
+  - `getStatus()` stays synchronous because the Orchestrator builds every tool list from it. For the
+    server it returns the last status the server sent, kept from startup, each status request and each
+    reindex. Until the server first answers, the status is "not indexed", so agents aren't offered
+    `search_knowledge_base`.
+  - Reindex gets 6 minutes - longer than the server's own 5-minute limit, so the server's clearer
+    timeout message arrives first.
+  - **No fallback.** If the server is configured but down, status and reindex return 502 and an
+    agent's search fails with the reason. Silently searching a different (local, possibly stale) index
+    would hide the problem.
+- `GET /api/rag/status` now asks the server each time (it was a synchronous read). The local index is
+  only loaded at startup when no server is configured.
+- `MCP_SERVERS` entries now say which one is the knowledge base (`knowledgeBase: true`).
+
+### Frontend
+
+The Knowledge Base tab says where the index lives ("Served by MCP server rag" or "Local index on this
+machine"); server errors show above it. The MCP servers tab tags the knowledge-base server, and its
+note now says agents reach that server's search through `search_knowledge_base` only.
+
+### Tests and verification
+
+Python: 29 (`tests/` - chunking, the walk's skip rules incl. symlinks and excluded folders, reindex
+locking/atomicity/failure, reload after restart, config errors, tool errors, the token middleware).
+Backend: `knowledgeBase.test.ts` (12) against a real SDK server on a local port - local mode, status
+caching, reindex, search arguments, the `top_k` cap, malformed answers, tool errors, a wrong token, an
+unconfigured or misconfigured server, no fallback when down; plus the 502 mapping. Frontend:
+`KnowledgeBasePanel.test.tsx` (3) and a knowledge-base tag test in `McpServersPanel.test.tsx`.
+
+Verified live with the real Python server and the TypeScript client (SDK 1.32.2 against Python 2.3.0 -
+they agree on the protocol). No embedding model is pulled on this machine, so Ollama's `/api/embed` was
+stood in for by a small local script. Startup logged the server online with 3 tools; reindex and status
+through `/api/rag/*` returned the server's status; a search ranked the right file first; an empty query
+and a wrong token came back as clear errors. In the UI both tabs showed the server. With the server
+stopped, Reindex showed `Can't reach the server (ECONNREFUSED)` and `/api/rag/status` returned 502. Not
+verified: real embeddings from `nomic-embed-text`, and an agent calling `search_knowledge_base` against
+the server during a mission (the Orchestrator path is covered by its existing tests with the module
+mocked).

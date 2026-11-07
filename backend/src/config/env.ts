@@ -96,6 +96,9 @@ export const env = {
   /** MCP servers 8Rack connects to as a client (services/mcpClient.ts): comma-separated `id=url`
    * entries. Each server's token is read from its own MCP_TOKEN_<ID> variable, never from here. */
   mcpServers: process.env.MCP_SERVERS ?? "",
+  /** The id (from MCP_SERVERS) of the server that serves the knowledge base, e.g. "rag". Unset = the
+   * local index in services/ragIndex.ts. See services/knowledgeBase.ts. */
+  mcpRagServer: process.env.MCP_RAG_SERVER?.trim() || undefined,
   /** Bounds each request to an MCP server - a server that accepts the connection and then goes silent
    * would otherwise hang a check indefinitely. */
   mcpRequestTimeoutMs: numberFromEnv("MCP_REQUEST_TIMEOUT_MS", 10_000),

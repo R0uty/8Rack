@@ -10,7 +10,7 @@ const mockFetch = vi.mocked(fetchMcpServers);
 const mockRefresh = vi.mocked(refreshMcpServers);
 
 function server(overrides: Partial<McpServerStatus> = {}): McpServerStatus {
-  return { id: "tools", url: "https://scan.example/mcp", state: "online", tools: [], skippedTools: 0, checkedAt: 1, ...overrides };
+  return { id: "tools", url: "https://scan.example/mcp", knowledgeBase: false, state: "online", tools: [], skippedTools: 0, checkedAt: 1, ...overrides };
 }
 
 describe("useMcpServers", () => {

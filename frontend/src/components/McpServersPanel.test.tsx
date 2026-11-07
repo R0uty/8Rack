@@ -14,7 +14,7 @@ function setup(servers: McpServerStatus[] | null, overrides: Partial<ReturnType<
 }
 
 function server(overrides: Partial<McpServerStatus> = {}): McpServerStatus {
-  return { id: "tools", url: "https://scan.example/mcp", state: "online", tools: [], skippedTools: 0, checkedAt: Date.now(), ...overrides };
+  return { id: "tools", url: "https://scan.example/mcp", knowledgeBase: false, state: "online", tools: [], skippedTools: 0, checkedAt: Date.now(), ...overrides };
 }
 
 describe("McpServersPanel", () => {
@@ -34,7 +34,14 @@ describe("McpServersPanel", () => {
     expect(screen.getByText("nmap")).toBeInTheDocument();
     expect(screen.getByText(/Port scanner/)).toBeInTheDocument();
     expect(screen.getByText(/2 tools · 1 not listed/)).toBeInTheDocument();
-    expect(screen.getByText(/Agents can't use them yet/)).toBeInTheDocument();
+    expect(screen.getByText(/Agents can't call them directly yet/)).toBeInTheDocument();
+    expect(screen.queryByText("knowledge base")).not.toBeInTheDocument();
+  });
+
+  it("marks the server that serves the knowledge base", () => {
+    setup([server({ id: "rag", knowledgeBase: true })]);
+    render(<McpServersPanel />);
+    expect(screen.getByText("knowledge base")).toBeInTheDocument();
   });
 
   it("shows why a server failed or is misconfigured", () => {
