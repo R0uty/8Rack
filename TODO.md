@@ -1352,3 +1352,50 @@ Left open by the live run - see DEVELOPMENT.md's "End-to-end mission run":
 - [ ] A failed order still counts toward the dashboard's "work orders failed" banner after a successful
       Retry.
 - [ ] Agents ask for scans already done, and a rejected tool is often just requested again.
+
+## MCP tool and RAG providers (planned 2026-11-08)
+
+Design and reasoning: "Planned: MCP servers as the tool and RAG providers" in DEVELOPMENT.md. The model
+stays local; tools and RAG move behind MCP servers; approval, scope, ingestion and history stay in 8Rack.
+
+Decide before step 3:
+
+- [x] **Transport: streamable HTTP.** Decided 2026-11-08.
+- [x] **Where the tool server runs: a separate scanning host.** Decided 2026-11-08. What follows from
+      both is under "Decided: HTTP to a separate scanning host" in DEVELOPMENT.md.
+- [ ] **How the RAG server embeds.** Its own embedding model, or a call back to this machine's Ollama.
+      Also where the indexed files live if the server isn't on this machine.
+
+Steps:
+
+- [x] **1. MCP client.** Done 2026-11-08 - see "MCP client (step 1)" in DEVELOPMENT.md.
+      `services/mcpClient.ts` connects to the servers in `MCP_SERVERS` and lists their tools on Tools →
+      MCP servers, read-only. Two parts of the original step moved to where they can do something:
+      adding MCP tools to the Orchestrator's catalog, and the enable switch, both go with the first
+      server agents actually call (step 2). `extensions/toolRegistry.ts` / `types/tool.ts` are not the
+      adapter: their `execute()` runs a tool directly, with no approval step.
+- [ ] **Delete `extensions/toolRegistry.ts` and `types/tool.ts`** once step 3 lands, along with the
+      native tool-calling branch in `chatService.ts` that reads them, unless native tool-calling is
+      picked up by then.
+- [ ] **2. RAG server.** Move `search_knowledge_base`, reindex and status behind an MCP server. Keep
+      the Knowledge Base panel working against it. This is the first MCP tool agents call, so it also
+      brings the enable switch (discovered tools start disabled) and adds enabled MCP tools to the
+      Orchestrator's catalog.
+- [ ] **3. Tool server beside the local executor.** Runs on the scanning host over HTTPS, with a bearer
+      token from `.env` (server URL and token are new settings; the token never goes in the repo or the
+      UI). Wrap the existing ExecTools. The server returns raw
+      stdout, stderr and exit code so the parsers keep working, owns path containment for its own
+      filesystem, and handles cancellation. 8Rack keeps the approval gate, scope checks (request and
+      confirm time), enabled/disabled overrides, `ingestExecution` and history. A setting picks local or
+      MCP execution.
+- [ ] **Scan source IP.** Tools now run from the scanning host's address, not this machine's. Record
+      that address on each mission (some programs require registered source IPs) and show it before a
+      run is approved.
+- [ ] **Server unreachable.** Show the tool server as offline in the Tool Registry and fail requests with a
+      clear error, instead of leaving orders waiting. A run in progress when the connection drops is
+      marked failed, not left running.
+- [ ] **4. Compare, then remove the local executor.** Run the same mission both ways; remove
+      `toolExecutor.ts` execution only once findings, assets and reports match.
+- [ ] **Later, separately:** consider Ollama's native tool-calling for MCP tools instead of the
+      plain-text convention.
+
