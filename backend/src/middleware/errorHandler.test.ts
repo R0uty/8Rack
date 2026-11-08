@@ -27,3 +27,12 @@ describe("errorHandler body-parser failures", () => {
     spy.mockRestore();
   });
 });
+
+describe("errorHandler MCP failures", () => {
+  it("maps an MCP request failure to a 502 with its message", async () => {
+    const { McpRequestError } = await import("../services/errors.js");
+    const res = run(new McpRequestError('MCP server "rag": No answer within 10000 ms'));
+    expect(res.status).toHaveBeenCalledWith(502);
+    expect(res.json).toHaveBeenCalledWith({ error: 'MCP server "rag": No answer within 10000 ms', code: "MCP_REQUEST_FAILED" });
+  });
+});

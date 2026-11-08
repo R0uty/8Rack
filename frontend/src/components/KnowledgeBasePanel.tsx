@@ -4,9 +4,10 @@ import { Button, GlassPanel, SectionHeading, Skeleton } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
 
 /**
- * Status + reindex control for the RAG knowledge base (see backend/src/services/ragIndex.ts) —
- * a global index over env.workspaceRoot, not mission-scoped, so this is a workspace-level setup
- * concern on the Tools page rather than inside any one mission's UI.
+ * Status + reindex control for the RAG knowledge base (see backend/src/services/knowledgeBase.ts) —
+ * either the local index over env.workspaceRoot or the RAG MCP server named by MCP_RAG_SERVER. Not
+ * mission-scoped, so this is a workspace-level setup concern on the Tools page rather than inside any
+ * one mission's UI.
  */
 export function KnowledgeBasePanel() {
   const { status, loading, reindexing, error, reindex } = useRag();
@@ -44,6 +45,15 @@ export function KnowledgeBasePanel() {
           </div>
           <p className="mt-2 truncate font-mono text-[11px] text-muted" title={status.workspaceRoot}>
             {status.workspaceRoot}
+          </p>
+          <p className="mt-1 text-xs text-muted">
+            {status.server ? (
+              <>
+                Served by MCP server <span className="font-mono">{status.server}</span>
+              </>
+            ) : (
+              "Local index on this machine"
+            )}
           </p>
           <p className="mt-1 text-xs text-muted">
             {status.indexedAt ? `Indexed ${relativeTime(status.indexedAt)} · ` : ""}

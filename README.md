@@ -21,8 +21,9 @@ reports — is scoped to that mission and stays on your machine, with no account
 cloud storage.
 
 **In progress: tools and the knowledge base are moving behind [MCP](https://modelcontextprotocol.io)
-servers.** The model stays on your machine; the recon tools and RAG move to MCP servers that can run on a
-separate scanning host. 8Rack keeps every approval, scope check and record. See
+servers.** The model stays on your machine. The recon tools move to an MCP server on a separate scanning
+host, and the knowledge base to one on this machine, next to Ollama. 8Rack keeps every approval, scope
+check and record. See
 [Moving tools and RAG to MCP servers](#moving-tools-and-rag-to-mcp-servers) below.
 
 ## Features
@@ -73,10 +74,12 @@ separate scanning host. 8Rack keeps every approval, scope check and record. See
   Markdown export. The Report Writer agent writes only the summary, impact and remediation. Evidence
   and reproduction come from the tool runs 8Rack actually recorded, and anything it can't match to
   real tool output is labelled unverified.
-- **Knowledge base (RAG)** — index your own workspace codebase locally via an Ollama embedding
-  model; agents can search it as a read-only tool. Moving to an MCP server next.
+- **Knowledge base (RAG)** — index your own workspace codebase via a local Ollama embedding model;
+  agents can search it as a read-only tool. Built in, or served by the RAG MCP server in
+  `mcp-servers/rag/` on the same machine.
 - **MCP servers** — connect 8Rack to MCP servers over HTTPS with a token per server; the Tools page
-  lists each server's state and the tools it offers. Agents can't call MCP tools yet.
+  lists each server's state and the tools it offers. Agents reach the knowledge base server through
+  their search tool; they can't call other MCP tools yet.
 - **A focused UI** — one mission picked in the sidebar, a Factory Dashboard (pipeline, approval queue,
   live stats) as the default view, and a dark/light theme. Seven top-level views: Factory, Work Orders,
   Assets, Findings, Reports, Agents, Tools.
@@ -103,8 +106,10 @@ edit or add one and hit "Reload" in the sidebar, no restart needed.
 
 ```
 8Rack/
-├── backend/    # Express + TypeScript API server wrapping the Ollama REST API
-└── frontend/   # React + TypeScript + Vite UI
+├── backend/       # Express + TypeScript API server wrapping the Ollama REST API
+├── frontend/      # React + TypeScript + Vite UI
+└── mcp-servers/
+    └── rag/       # Python MCP server for the knowledge base (optional - see its README)
 ```
 
 See `CLAUDE.md` for a fuller architecture overview and `DEVELOPMENT.md` for the complete build
@@ -138,11 +143,12 @@ still runs in your local Ollama.
 | Step | Status |
 | --- | --- |
 | 1. MCP client: connect to servers and list their tools on Tools → MCP servers | Done |
-| 2. Knowledge base on an MCP server, and the switch to enable MCP tools | Planned |
-| 3. Tools on an MCP server, running beside the local tools behind a setting | Planned |
+| 2. Knowledge base on an MCP server (`mcp-servers/rag/`, set `MCP_RAG_SERVER`) | Done |
+| 3. Tools on an MCP server, running beside the local tools behind a setting, and the switch to enable MCP tools | Planned |
 | 4. Remove local tool execution once a full mission run gives the same results | Planned |
 
-Setup for what exists now is under [Configuration](#configuration) (`MCP_SERVERS`, `MCP_TOKEN_<ID>`).
+Setup for what exists now is under [Configuration](#configuration) (`MCP_SERVERS`, `MCP_TOKEN_<ID>`,
+`MCP_RAG_SERVER`), and the RAG server's own setup is in `mcp-servers/rag/README.md`.
 The full design is in `DEVELOPMENT.md`, under "Planned: MCP servers as the tool and RAG providers", and
 the remaining steps are in `TODO.md`.
 
@@ -202,8 +208,10 @@ All backend configuration is via `backend/.env` (see `backend/.env.example`):
 | `OLLAMA_REQUEST_TIMEOUT_MS` | `60000` | Bounds Ollama's quick, non-generation calls (`/api/tags`, `/api/embed`) |
 | `OLLAMA_CHAT_IDLE_TIMEOUT_MS` | `300000` | Bounds a streamed `/api/chat` generation by inactivity, not total duration — resets on every token received |
 | `MAX_CONCURRENT_EXECUTIONS` | `5` | Global cap on real OS processes spawned at once across every caller (manual requests, Orchestrator tasks, Scan Profiles) |
-| `MCP_SERVERS` | _(unset)_ | MCP servers to connect to, as comma-separated `id=url` entries (https, or http for localhost only). Their tools are listed on Tools → MCP servers; agents can't call them yet |
+| `MCP_SERVERS` | _(unset)_ | MCP servers to connect to, as comma-separated `id=url` entries (https, or http for localhost only). Their tools are listed on Tools → MCP servers; agents can't call them directly yet |
 | `MCP_TOKEN_<ID>` | _(unset)_ | Bearer token for each server in `MCP_SERVERS` — the id upper-cased, hyphens as underscores (e.g. `MCP_TOKEN_TOOLS`). Never put it in the URL |
+| `OLLAMA_NUM_CTX` | `16384` | Context window (tokens) for every agent call. Ollama's default of 2048 is too small for 8Rack's prompts and cuts them silently; the backend log warns if a prompt fills the window |
+| `MCP_RAG_SERVER` | _(unset)_ | The id of the server in `MCP_SERVERS` that serves the knowledge base (e.g. `rag`). Unset keeps the built-in index |
 | `MCP_REQUEST_TIMEOUT_MS` | `10000` | Bounds each request to an MCP server |
 
 ## Testing

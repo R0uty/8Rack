@@ -25,6 +25,14 @@ backend/data/rag/*
 backend/data/tools/*
 !backend/data/tools/.gitkeep
 
+# MCP servers (Python) - virtualenvs, build/test output, and the RAG server's index, which embeds
+# chunks of whatever its workspace holds
+mcp-servers/*/.venv/
+mcp-servers/*/data/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
 # start.sh's own tracked dev-server PIDs - runtime state, not shipped
 .backend.pid
 .frontend.pid

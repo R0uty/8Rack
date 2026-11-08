@@ -56,7 +56,7 @@ export function McpServersPanel() {
 
       {servers && servers.length > 0 && (
         <div className="flex flex-col gap-3">
-          <p className="text-xs text-muted">Tools these servers offer, for review. Agents can't use them yet.</p>
+          <p className="text-xs text-muted">Tools these servers offer, for review. Agents can't call them directly yet - only the knowledge base server's search, through search_knowledge_base.</p>
           {servers.map((server) => (
             <ServerCard key={server.id} server={server} />
           ))}
@@ -75,6 +75,7 @@ function ServerCard({ server }: { server: McpServerStatus }) {
         <StatusPill tone={state.tone} pulse={server.state === "checking"}>
           {state.label}
         </StatusPill>
+        {server.knowledgeBase && <StatusPill tone="info">knowledge base</StatusPill>}
         {server.checkedAt && <span className="text-xs text-muted">checked {relativeTime(server.checkedAt)}</span>}
       </div>
       {server.url && (

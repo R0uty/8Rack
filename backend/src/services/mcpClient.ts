@@ -2,16 +2,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { env } from "../config/env.js";
+import { McpRequestError } from "./errors.js";
 import type { McpServerStatus, McpToolInfo } from "../types/mcp.js";
 
 /**
- * 8Rack as an MCP client, step 1 of "Planned: MCP servers as the tool and RAG providers" in
- * DEVELOPMENT.md: connect to the servers named in `.env` and list the tools they offer. Nothing here
- * calls a tool - that waits for the approval gate and the enable switch (TODO.md steps 2-3).
+ * 8Rack as an MCP client (see "Planned: MCP servers as the tool and RAG providers" in DEVELOPMENT.md):
+ * connect to the servers named in `.env`, list the tools they offer, and call a tool on one.
  *
- * Each check opens a connection, lists tools and closes it again, rather than holding connections open:
- * there's nothing to reuse a connection for yet, and it means a server that restarts needs no reconnect
- * logic.
+ * `callTool` has exactly one caller so far - knowledgeBase.ts, for the RAG server. Agents never reach it
+ * directly: calling MCP tools from an agent needs the approval gate and enable switch (TODO.md step 3).
+ *
+ * Every check and call opens a connection and closes it again, rather than holding connections open:
+ * calls are rare and short, and a server that restarts needs no reconnect logic.
  */
 
 export interface McpServerConfig {
@@ -107,19 +109,19 @@ function configuredServers() {
 }
 
 function misconfigured(problem: ConfigProblem): McpServerStatus {
-  return { ...problem, state: "misconfigured", tools: [], skippedTools: 0, checkedAt: null };
+  return { ...problem, knowledgeBase: problem.id === env.mcpRagServer, state: "misconfigured", tools: [], skippedTools: 0, checkedAt: null };
 }
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-function describeError(err: unknown, server: McpServerConfig): string {
+function describeError(err: unknown, server: McpServerConfig, timeoutMs: number): string {
   if (err instanceof StreamableHTTPError && (err.code === 401 || err.code === 403)) {
     return `The server rejected the token (HTTP ${err.code}). Check ${tokenVariable(server.id)}.`;
   }
   if (err instanceof McpError && err.code === ErrorCode.RequestTimeout) {
-    return `No answer within ${env.mcpRequestTimeoutMs} ms`;
+    return `No answer within ${timeoutMs} ms`;
   }
   const code = (err as { cause?: { code?: unknown } })?.cause?.code;
   if (typeof code === "string") return `Can't reach the server (${code})`;
@@ -139,15 +141,20 @@ function acceptedTools(offered: { name: string; description?: string }[]): McpTo
   return tools;
 }
 
-async function checkServer(server: McpServerConfig): Promise<McpServerStatus> {
-  const base = { id: server.id, url: server.url.href };
-  const timeout = env.mcpRequestTimeoutMs;
+function openClient(server: McpServerConfig) {
   const client = new Client({ name: "8rack", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(server.url, {
     requestInit: { headers: { Authorization: `Bearer ${server.token}` } },
     // The SDK's default, set here on purpose: a redirect to another origin must not carry the token.
     redirectPolicy: "same-origin",
   });
+  return { client, transport };
+}
+
+async function checkServer(server: McpServerConfig): Promise<McpServerStatus> {
+  const base = { id: server.id, url: server.url.href, knowledgeBase: server.id === env.mcpRagServer };
+  const timeout = env.mcpRequestTimeoutMs;
+  const { client, transport } = openClient(server);
 
   try {
     await client.connect(transport, { timeout });
@@ -162,7 +169,59 @@ async function checkServer(server: McpServerConfig): Promise<McpServerStatus> {
     const tools = acceptedTools(offered);
     return { ...base, state: "online", tools, skippedTools: offered.length - tools.length, checkedAt: Date.now() };
   } catch (err) {
-    return { ...base, state: "error", error: describeError(err, server), tools: [], skippedTools: 0, checkedAt: Date.now() };
+    return { ...base, state: "error", error: describeError(err, server, timeout), tools: [], skippedTools: 0, checkedAt: Date.now() };
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+function errorText(content: unknown): string {
+  const text = Array.isArray(content)
+    ? content
+        .filter((c): c is { type: "text"; text: string } => c?.type === "text" && typeof c.text === "string")
+        .map((c) => c.text)
+        .join(" ")
+    : "";
+  return truncate(text.trim() || "The tool reported an error", MAX_ERROR_CHARS);
+}
+
+/**
+ * Calls one tool on a configured server and returns its structured result. Every failure - not
+ * configured, unreachable, timed out, rejected the token, or an error the tool itself reported - is an
+ * McpRequestError naming the server.
+ */
+export async function callTool(
+  serverId: string,
+  name: string,
+  args: Record<string, unknown>,
+  timeout = env.mcpRequestTimeoutMs,
+): Promise<Record<string, unknown>> {
+  const { servers, problems } = configuredServers();
+  const server = servers.find((s) => s.id === serverId);
+  if (!server) {
+    const problem = problems.find((p) => p.id === serverId);
+    throw new McpRequestError(
+      problem ? `MCP server "${serverId}" is misconfigured: ${problem.error}` : `MCP server "${serverId}" isn't in MCP_SERVERS`,
+    );
+  }
+
+  const { client, transport } = openClient(server);
+  try {
+    await client.connect(transport, { timeout });
+    const result = (await client.callTool({ name, arguments: args }, undefined, { timeout })) as {
+      isError?: boolean;
+      content?: unknown;
+      structuredContent?: unknown;
+    };
+    if (result.isError) throw new McpRequestError(`MCP server "${serverId}": ${errorText(result.content)}`);
+    const structured = result.structuredContent;
+    if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
+      throw new McpRequestError(`MCP server "${serverId}" returned no structured result from ${name}`);
+    }
+    return structured as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof McpRequestError) throw err;
+    throw new McpRequestError(`MCP server "${serverId}": ${describeError(err, server, timeout)}`);
   } finally {
     await client.close().catch(() => {});
   }
@@ -181,7 +240,17 @@ export function listServers(): McpServerStatus[] {
   if (lastStatuses) return lastStatuses;
   const { servers, problems } = configuredServers();
   return sortById([
-    ...servers.map((s): McpServerStatus => ({ id: s.id, url: s.url.href, state: "checking", tools: [], skippedTools: 0, checkedAt: null })),
+    ...servers.map(
+      (s): McpServerStatus => ({
+        id: s.id,
+        url: s.url.href,
+        knowledgeBase: s.id === env.mcpRagServer,
+        state: "checking",
+        tools: [],
+        skippedTools: 0,
+        checkedAt: null,
+      }),
+    ),
     ...problems.map(misconfigured),
   ]);
 }
