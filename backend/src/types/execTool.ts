@@ -73,6 +73,16 @@ export interface ToolRequestBody {
   agentId?: string;
 }
 
+/** Marks an execution that runs on an MCP tool server (services/mcpClient.ts) instead of a local
+ * process. The approval gate, scope check, history and findings ingestion are identical; only the
+ * actual run differs - it's a call to the server, not a spawn. See toolManager.ts#runMcpRecord. */
+export interface McpExecution {
+  serverId: string;
+  /** The tool's name on the server (e.g. "nmap") - distinct from the catalog id ("tools.nmap"). Also
+   * the key findings ingestion parses the output under, so an MCP nmap feeds the nmap parser. */
+  toolName: string;
+}
+
 export interface ExecutionResult {
   stdout: string;
   stderr: string;
@@ -114,6 +124,8 @@ export interface ExecutionRecord {
    * services/scopeMatcher.ts#checkScope's "out_of_scope" verdict), so this only ever appears
    * alongside "pending_confirmation" or later. */
   scopeWarning?: string;
+  /** Present when this execution runs on an MCP tool server rather than a local process. */
+  mcp?: McpExecution;
   result?: ExecutionResult;
   error?: string;
 }

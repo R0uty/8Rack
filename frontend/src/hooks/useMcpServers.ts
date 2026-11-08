@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchMcpServers, refreshMcpServers } from "../services/mcpApi";
+import { fetchMcpServers, refreshMcpServers, setMcpToolEnabled } from "../services/mcpApi";
 import type { McpServerStatus } from "../types/mcp";
 
 export function useMcpServers() {
@@ -20,6 +20,12 @@ export function useMcpServers() {
     } finally {
       setChecking(false);
     }
+  }, []);
+
+  /** Enables/disables a discovered tool and applies the server list the backend returns. Throws on
+   * failure so the caller can surface it; the UI state is only replaced on success. */
+  const toggleTool = useCallback(async (id: string, enabled: boolean) => {
+    setServers(await setMcpToolEnabled(id, enabled));
   }, []);
 
   useEffect(() => {
@@ -43,5 +49,5 @@ export function useMcpServers() {
     };
   }, [check]);
 
-  return { servers, loading, checking, error, check };
+  return { servers, loading, checking, error, check, toggleTool };
 }

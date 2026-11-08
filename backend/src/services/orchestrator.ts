@@ -4,6 +4,7 @@ import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
 import { cancelExecution, getExecution, listExecToolsWithStatus, rejectExecution, requestExecution } from "./toolManager.js";
 import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragIndex.js";
+import { listMcpTools } from "./mcpClient.js";
 import {
   createAgentFinding,
   getFinding,
@@ -232,6 +233,19 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
     .filter((t) => allowed === undefined || allowed.includes(t.id))
     .map((t) => `- ${t.id}: ${t.description}${t.usageHint ? ` ${t.usageHint}` : ""}`);
 
+  // Enabled MCP tools (services/mcpClient.ts) run on a scanning host but go through the exact same
+  // request -> approval -> scope-checked execution path as a local tool (toolManager.ts), so they
+  // join the same catalog. A discovered tool stays off this list until a human enables it, and the
+  // same execTools allowlist gates them - a directed agent must name the "<server>.<tool>" id.
+  const mcpLines = listMcpTools()
+    .filter((t) => t.enabled)
+    .filter((t) => allowed === undefined || allowed.includes(t.id))
+    .map(
+      (t) =>
+        `- ${t.id}: ${t.description} Runs on a scanning host and needs human approval; its target must be in ` +
+        `mission scope. arguments is the argv to pass, e.g. {"tool": "${t.id}", "arguments": ["<arg1>", "<arg2>"]}.`,
+    );
+
   const ragStatus = getRagStatus();
   const knowledgeBaseLine =
     ragStatus.chunkCount > 0
@@ -324,6 +338,7 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
     "",
     "Available tools:",
     ...lines,
+    ...mcpLines,
     ...(knowledgeBaseLine ? [knowledgeBaseLine] : []),
     ...(findingsLine ? [findingsLine] : []),
     ...(cveLine ? [cveLine] : []),

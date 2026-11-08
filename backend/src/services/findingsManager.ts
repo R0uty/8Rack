@@ -279,7 +279,10 @@ async function upsertFinding(
  */
 export async function ingestExecution(record: ExecutionRecord): Promise<Finding[]> {
   if (!record.result?.success) return [];
-  const parsed = parseExecutionOutput(record.toolId, record.arguments, record.result.stdout);
+  // An MCP execution's toolId is the "<server>.<tool>" catalog id, but its output is the underlying
+  // tool's (e.g. nmap), so it parses under the plain tool name - an MCP nmap feeds the nmap parser.
+  const parserId = record.mcp?.toolName ?? record.toolId;
+  const parsed = parseExecutionOutput(parserId, record.arguments, record.result.stdout);
   if (parsed.length === 0) return [];
 
   const touched: Finding[] = [];

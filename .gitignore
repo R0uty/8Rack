@@ -25,6 +25,16 @@ backend/data/rag/*
 backend/data/tools/*
 !backend/data/tools/.gitkeep
 
+# MCP tool enable/disable overrides - runtime state, not shipped config
+backend/data/mcp/*
+!backend/data/mcp/.gitkeep
+
+# Python MCP servers' own virtualenvs and runtime data
+mcp-servers/*/.venv/
+mcp-servers/*/data/
+mcp-servers/**/__pycache__/
+mcp-servers/**/*.egg-info/
+
 # start.sh's own tracked dev-server PIDs - runtime state, not shipped
 .backend.pid
 .frontend.pid

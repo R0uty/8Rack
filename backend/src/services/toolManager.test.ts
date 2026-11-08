@@ -18,6 +18,8 @@ import {
   setToolEnabled,
 } from "./toolManager.js";
 import { getMission, onMissionDeleted } from "./missionManager.js";
+import { callMcpTool, getMcpTool } from "./mcpClient.js";
+import type { McpTool } from "./mcpClient.js";
 import { listActivity } from "./activityLog.js";
 import { listMissionIds, readMissionJson } from "./missionStore.js";
 import {
@@ -41,6 +43,8 @@ vi.mock("./missionStore.js", () => ({
 
 vi.mock("./missionManager.js", () => ({ getMission: vi.fn(async () => undefined), onMissionDeleted: vi.fn() }));
 const mockGetMission = vi.mocked(getMission);
+const mockGetMcpTool = vi.mocked(getMcpTool);
+const mockCallMcpTool = vi.mocked(callMcpTool);
 const mockOnMissionDeleted = vi.mocked(onMissionDeleted);
 /** Captured once, synchronously, right here at module load rather than read lazily inside
  * purgeMission - a future `beforeEach(() => vi.clearAllMocks())` (see orchestrator.test.ts, which
@@ -55,6 +59,8 @@ const registeredPurgeHandlers = mockOnMissionDeleted.mock.calls.map(([handler]) 
 function purgeMission(missionId: string) {
   for (const handler of registeredPurgeHandlers) handler(missionId);
 }
+
+vi.mock("./mcpClient.js", () => ({ getMcpTool: vi.fn(() => undefined), callMcpTool: vi.fn() }));
 
 const fsState = { files: new Map<string, string>() };
 vi.mock("node:fs/promises", () => ({
@@ -727,5 +733,99 @@ describe("loadExecutionsFromDisk recovery", () => {
     expect(getExecution("hyd-running")?.status).toBe("failed");
     expect(getExecution("hyd-stdin")?.status).toBe("failed");
     expect(getExecution("hyd-pending")?.status).toBe("pending_confirmation");
+  });
+});
+
+describe("MCP tool executions", () => {
+  const mcpTool = (overrides: Partial<McpTool> = {}): McpTool => ({
+    id: "tools.nmap",
+    serverId: "tools",
+    toolName: "nmap",
+    description: "Network scanner on the scanning host.",
+    enabled: true,
+    ...overrides,
+  });
+
+  const callOk = { success: true, stdout: "22/tcp open ssh", stderr: "", exitCode: 0, timedOut: false, truncated: false };
+
+  afterEach(() => {
+    mockGetMcpTool.mockReturnValue(undefined);
+    mockCallMcpTool.mockReset();
+  });
+
+  it("parks an enabled MCP tool as pending confirmation with an mcp marker - nothing runs yet", async () => {
+    mockGetMcpTool.mockReturnValue(mcpTool());
+    mockGetMission.mockResolvedValueOnce({ id: "proj-mcp", name: "M", notes: "", createdAt: 0 });
+
+    const record = await requestExecution({ tool: "tools.nmap", arguments: ["127.0.0.2"], missionId: "proj-mcp" });
+
+    expect(record.status).toBe("pending_confirmation");
+    expect(record.mcp).toEqual({ serverId: "tools", toolName: "nmap" });
+    expect(record.toolId).toBe("tools.nmap");
+    expect(record.resolvedCommand).toBe("[mcp:tools] nmap 127.0.0.2");
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("refuses a disabled MCP tool", async () => {
+    mockGetMcpTool.mockReturnValue(mcpTool({ enabled: false }));
+    await expect(
+      requestExecution({ tool: "tools.nmap", arguments: ["127.0.0.2"], missionId: "proj-mcp" }),
+    ).rejects.toThrow(ExecToolDisabledError);
+  });
+
+  it("runs the tool on the server at confirm time and records the raw result", async () => {
+    mockGetMcpTool.mockReturnValue(mcpTool());
+    mockGetMission.mockResolvedValue({ id: "proj-mcp", name: "M", notes: "", createdAt: 0 });
+    mockCallMcpTool.mockResolvedValue(callOk);
+
+    const pending = await requestExecution({ tool: "tools.nmap", arguments: ["127.0.0.2"], missionId: "proj-mcp" });
+    const done = await confirmExecution(pending.id);
+
+    expect(mockCallMcpTool).toHaveBeenCalledWith("tools", "nmap", ["127.0.0.2"], expect.any(AbortSignal));
+    expect(done.status).toBe("completed");
+    expect(done.result?.stdout).toBe("22/tcp open ssh");
+    expect(done.result?.success).toBe(true);
+  });
+
+  it("settles as failed when the server call throws", async () => {
+    mockGetMcpTool.mockReturnValue(mcpTool());
+    mockGetMission.mockResolvedValue({ id: "proj-mcp", name: "M", notes: "", createdAt: 0 });
+    mockCallMcpTool.mockRejectedValue(new Error("Can't reach the scanning host (ECONNREFUSED)"));
+
+    const pending = await requestExecution({ tool: "tools.nmap", arguments: ["127.0.0.2"], missionId: "proj-mcp" });
+    const done = await confirmExecution(pending.id);
+
+    expect(done.status).toBe("failed");
+    expect(done.result?.stderr).toContain("ECONNREFUSED");
+  });
+
+  it("enforces mission scope on an MCP tool - an out-of-scope target blocks the request", async () => {
+    mockGetMcpTool.mockReturnValue(mcpTool());
+    mockGetMission.mockResolvedValueOnce({ id: "proj-mcp", name: "M", notes: "", createdAt: 0, scope: ["example.com"] });
+
+    await expect(
+      requestExecution({ tool: "tools.nmap", arguments: ["https://evil.com"], missionId: "proj-mcp" }),
+    ).rejects.toThrow(OutOfScopeError);
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("blocks an MCP tool with no identifiable target under a strict scope allowlist (never local-only)", async () => {
+    mockGetMcpTool.mockReturnValue(mcpTool());
+    mockGetMission.mockResolvedValueOnce({ id: "proj-mcp", name: "M", notes: "", createdAt: 0, scope: ["example.com"] });
+
+    await expect(
+      requestExecution({ tool: "tools.nmap", arguments: ["--version"], missionId: "proj-mcp" }),
+    ).rejects.toThrow(OutOfScopeError);
+  });
+
+  it("re-checks scope at confirm time - a now-out-of-scope target throws instead of calling the server", async () => {
+    mockGetMcpTool.mockReturnValue(mcpTool());
+    // In scope at request time, then the mission's scope changes before confirm.
+    mockGetMission.mockResolvedValueOnce({ id: "proj-mcp", name: "M", notes: "", createdAt: 0, scope: ["127.0.0.2"] });
+    const pending = await requestExecution({ tool: "tools.nmap", arguments: ["127.0.0.2"], missionId: "proj-mcp" });
+
+    mockGetMission.mockResolvedValueOnce({ id: "proj-mcp", name: "M", notes: "", createdAt: 0, scope: ["example.com"] });
+    await expect(confirmExecution(pending.id)).rejects.toThrow(OutOfScopeError);
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
   });
 });
