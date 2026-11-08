@@ -1385,9 +1385,17 @@ Steps:
       search, reindex and status; `MCP_RAG_SERVER` points 8Rack at it, through
       `services/knowledgeBase.ts`. Agents keep `search_knowledge_base`, so the enable switch and the
       catalog moved to step 3.
-- [ ] **Try the RAG server with real embeddings.** `ollama pull nomic-embed-text`, run the server
-      against the real `WORKSPACE_ROOT`, reindex, and have an agent use `search_knowledge_base` in a
-      mission. Live verification so far used a stand-in for Ollama's `/api/embed`.
+- [x] **Try the RAG server with real embeddings.** Done 2026-11-08 - see "Real embeddings and an agent"
+      in DEVELOPMENT.md. Indexing and search work; the agent's search reached the server and got the
+      right file, but the agent then refused to answer (next item).
+- [x] **Agent refuses after a knowledge-base search.** Fixed 2026-11-08 - every agent call ran in
+      Ollama's default 2048-token window, which cut the system prompt. `OLLAMA_NUM_CTX` (default 16384)
+      is now sent on every call. See "Fixed: every agent call ran in a 2048-token context window".
+- [ ] **Rerun a full mission with the larger context window.** Earlier live runs were all under the
+      2048-token window; agents may now behave noticeably differently (better tool use, fewer refusals).
+- [ ] **Trim the knowledge-base tool result.** `runKnowledgeBaseSearch` sends the results twice
+      (`stdout` and `parsedOutput`) inside JSON, about 17k characters for 5 results - roughly double the
+      tokens needed. Not the cause of the refusal, but it eats context.
 - [ ] **Remove the local index** (`ragIndex.ts`, `backend/data/rag/`, the `ollama.ts` embedding call)
       once the server has been used for real, so there's one index implementation, not two.
 - [ ] **3. Tool server beside the local executor.** A Python project in `mcp-servers/tools/`, running on

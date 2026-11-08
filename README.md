@@ -210,6 +210,7 @@ All backend configuration is via `backend/.env` (see `backend/.env.example`):
 | `MAX_CONCURRENT_EXECUTIONS` | `5` | Global cap on real OS processes spawned at once across every caller (manual requests, Orchestrator tasks, Scan Profiles) |
 | `MCP_SERVERS` | _(unset)_ | MCP servers to connect to, as comma-separated `id=url` entries (https, or http for localhost only). Their tools are listed on Tools → MCP servers; agents can't call them directly yet |
 | `MCP_TOKEN_<ID>` | _(unset)_ | Bearer token for each server in `MCP_SERVERS` — the id upper-cased, hyphens as underscores (e.g. `MCP_TOKEN_TOOLS`). Never put it in the URL |
+| `OLLAMA_NUM_CTX` | `16384` | Context window (tokens) for every agent call. Ollama's default of 2048 is too small for 8Rack's prompts and cuts them silently; the backend log warns if a prompt fills the window |
 | `MCP_RAG_SERVER` | _(unset)_ | The id of the server in `MCP_SERVERS` that serves the knowledge base (e.g. `rag`). Unset keeps the built-in index |
 | `MCP_REQUEST_TIMEOUT_MS` | `10000` | Bounds each request to an MCP server |
 

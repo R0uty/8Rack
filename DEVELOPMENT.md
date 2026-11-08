@@ -3864,4 +3864,44 @@ and a wrong token came back as clear errors. In the UI both tabs showed the serv
 stopped, Reindex showed `Can't reach the server (ECONNREFUSED)` and `/api/rag/status` returned 502. Not
 verified: real embeddings from `nomic-embed-text`, and an agent calling `search_knowledge_base` against
 the server during a mission (the Orchestrator path is covered by its existing tests with the module
-mocked).
+mocked). Both were then checked - see below.
+
+### Real embeddings and an agent (2026-11-08)
+
+With `nomic-embed-text` pulled, the server indexed a scratch copy of `backend/src` (not the real
+`WORKSPACE_ROOT`, which holds files that shouldn't be embedded for a test): 111 files, 472 chunks, about
+16 seconds. Searches put the right file first - "how is the mission id checked before building a file
+path" → `missionStore.ts` (in the top 3), "where are DNS rebinding attacks blocked" → `hostCheck.ts`,
+"parse nmap XML output into findings" → `nmapParser.ts`.
+
+In a throwaway mission with no targets ("KB test (local)"), the Code Assistant (`qwen2.5-coder:7b`) was
+asked two code questions. Both times it called `search_knowledge_base`, the call went through 8Rack to the
+MCP server, and the result held the right file first (`missionStore.ts`, `nmapParser.ts`). **Both times
+its next reply was "I'm sorry, but I can't assist with that request."** The MCP path worked end to end,
+but the agent didn't use what it found. The cause was the next section.
+
+## Fixed: every agent call ran in a 2048-token context window (2026-11-08)
+
+8Rack never set `num_ctx`, and this Ollama has no `OLLAMA_CONTEXT_LENGTH`, so every agent call got
+Ollama's default of 2048 tokens. Ollama doesn't reject a longer prompt - it drops the beginning and
+answers anyway. The Orchestrator's system prompt (agent prompt + tools preamble) is about 2000 tokens on
+its own, so in practice **every Orchestrator call, in every mission, lost its system prompt and often the
+task itself** as soon as there was any conversation. Found while chasing the refusal above: a logging
+proxy in front of Ollama captured the request after the knowledge-base search - 6964 tokens, of which
+Ollama read 2050 (`prompt_eval_count`). Replaying it with `num_ctx: 16384` gave the right answer;
+removing the duplicated results from the tool message did not.
+
+- **`OLLAMA_NUM_CTX`** (default 16384, `.env.example`) is sent as `num_ctx` on every agent call, in
+  `chatService.ts#streamAgentChat`. A request's own `options.num_ctx` still wins. 16384 fits the
+  Orchestrator's prompts with room for tool output; it's half of qwen2.5-coder's 32768 limit, and more
+  costs more memory.
+- **A warning** is logged when Ollama reports reading at least 95% of `num_ctx` in prompt tokens - the
+  only sign it gives that it cut a prompt.
+
+Tests: 4 in `chatService.test.ts` (sent by default, a request can override it, the warning fires at the
+limit and stays quiet below it). Verified live: both knowledge-base questions from above, rerun with the
+fix, got correct answers (`parsers/nmapParser.ts` exporting `parse`; `services/missionStore.ts`), every
+captured request carried `num_ctx: 16384`, and no warning was logged.
+
+Not re-checked: earlier live mission runs (the end-to-end mission, report generation) were all done
+under the 2048-token window, so agent behaviour described for them may improve now.

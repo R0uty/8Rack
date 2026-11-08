@@ -67,7 +67,7 @@ per feature with the full design rationale and what was verified - this section 
 backend/src/
 ├── config/env.ts      PORT, HOST (default 127.0.0.1 - no auth on this app, see below),
 │                       OLLAMA_BASE_URL, CORS_ORIGIN, WORKSPACE_ROOT, orchestrator loop-prevention
-│                       caps, EMBEDDING_MODEL, NVD_API_KEY, MCP_SERVERS, MCP_RAG_SERVER (all from
+│                       caps, EMBEDDING_MODEL, OLLAMA_NUM_CTX, NVD_API_KEY, MCP_SERVERS, MCP_RAG_SERVER (all from
 │                       .env; each MCP server's token comes from its own MCP_TOKEN_<ID>)
 ├── routes/             one file per concern: models, chat, agents, tools, orchestrator, missions,
 │                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports, mcp
