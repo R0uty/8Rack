@@ -107,7 +107,7 @@ Key files under `backend/src/services/`:
 | `activityLog.ts` | The Mission Activity Timeline - an explicit, named-event append-only log (`logActivity`), not derived from executions/tasks |
 | `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `ragIndex.ts` | The knowledge-base indexer/search over `WORKSPACE_ROOT` |
-| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS` and lists their tools (Tools → MCP servers). Nothing calls an MCP tool yet; see "Planned: MCP servers as the tool and RAG providers" in `DEVELOPMENT.md` |
+| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS`, lists their tools, keeps a registry of callable tools with a persisted enable switch (discovered tools start disabled; `backend/data/mcp/tool-overrides.json`), and runs a tool via `callMcpTool`. A tool is called only through `toolManager.ts#runMcpRecord` behind the normal approval + scope gate - see "MCP tool server (step 3)" in `DEVELOPMENT.md` and `mcp-servers/tools/` for the server itself |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
 | `reportManager.ts` / `reportEvidence.ts` | Report generation - one Report Writer agent call over a set of selected findings, tracked through a `status` field (`draft/ai_generated/human_review/ready/submitted`). The agent writes only the summary, impact and remediation; evidence and reproduction are built from recorded executions, and anything else on a finding is labelled unverified |
 
@@ -197,6 +197,11 @@ each other:
    `validate_finding` - each requires no human confirmation for exactly that reason). This is the
    path every Work Order and every orchestrator task actually reaches. A reply with several calls runs
    them in order (`OrchestratorTask.queuedToolCalls`), each real tool behind its own approval.
+   **Enabled MCP tools use this same path**: `buildToolsPreamble` lists them by their `<server>.<tool>`
+   id, and `requestExecution`/`confirmExecution` run them via `toolManager.ts#runMcpRecord` (a call to
+   the tool server) instead of spawning a process - same approval, scope, history and parser. MCP tools
+   are *not* the native path above; `extensions/toolRegistry.ts`/`types/tool.ts` remain unused and are
+   slated for deletion (TODO.md).
 
 `chatService.ts#streamAgentChat` only activates native `tools` when `toolsPreamble` is absent
 (the Orchestrator's own tell that a request came from it) - see the comment there for why activating

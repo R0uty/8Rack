@@ -97,6 +97,11 @@ export const env = {
    * entries. Each server's token is read from its own MCP_TOKEN_<ID> variable, never from here. */
   mcpServers: process.env.MCP_SERVERS ?? "",
   /** Bounds each request to an MCP server - a server that accepts the connection and then goes silent
-   * would otherwise hang a check indefinitely. */
+   * would otherwise hang a check indefinitely. Used for discovery and the initial connect of a tool
+   * call. */
   mcpRequestTimeoutMs: numberFromEnv("MCP_REQUEST_TIMEOUT_MS", 10_000),
+  /** Bounds a single MCP *tool call* (a scan, which can legitimately run for minutes) - far longer
+   * than mcpRequestTimeoutMs, which is for quick discovery calls. The tool server enforces its own
+   * per-command timeout too; this is 8Rack's own safety net on a server that never answers. */
+  mcpToolTimeoutMs: numberFromEnv("MCP_TOOL_TIMEOUT_MS", 15 * 60 * 1000),
 };

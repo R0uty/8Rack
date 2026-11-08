@@ -76,7 +76,9 @@ separate scanning host. 8Rack keeps every approval, scope check and record. See
 - **Knowledge base (RAG)** — index your own workspace codebase locally via an Ollama embedding
   model; agents can search it as a read-only tool. Moving to an MCP server next.
 - **MCP servers** — connect 8Rack to MCP servers over HTTPS with a token per server; the Tools page
-  lists each server's state and the tools it offers. Agents can't call MCP tools yet.
+  lists each server's state and the tools it offers. Discovered tools start disabled - enable one and
+  agents can call it through the normal approval and scope checks. A tool server is in
+  [`mcp-servers/tools/`](mcp-servers/tools/).
 - **A focused UI** — one mission picked in the sidebar, a Factory Dashboard (pipeline, approval queue,
   live stats) as the default view, and a dark/light theme. Seven top-level views: Factory, Work Orders,
   Assets, Findings, Reports, Agents, Tools.
@@ -139,12 +141,18 @@ still runs in your local Ollama.
 | --- | --- |
 | 1. MCP client: connect to servers and list their tools on Tools → MCP servers | Done |
 | 2. Knowledge base on an MCP server, and the switch to enable MCP tools | Planned |
-| 3. Tools on an MCP server, running beside the local tools behind a setting | Planned |
+| 3. Tools on an MCP server, running beside the local tools | Done |
 | 4. Remove local tool execution once a full mission run gives the same results | Planned |
 
+**The tool server is in [`mcp-servers/tools/`](mcp-servers/tools/)** (see its README) - a Python MCP
+server that runs a fixed catalog of recon tools (nmap, httpx, nuclei, subfinder, dig, whois, ffuf,
+katana) on a scanning host and returns raw output for 8Rack's parsers. Discovered tools start disabled;
+enable the ones you want on Tools → MCP servers, and every call still goes through the normal approval
+and scope checks. A scanning host must serve HTTPS; for a local test the server runs on loopback.
+
 Setup for what exists now is under [Configuration](#configuration) (`MCP_SERVERS`, `MCP_TOKEN_<ID>`).
-The full design is in `DEVELOPMENT.md`, under "Planned: MCP servers as the tool and RAG providers", and
-the remaining steps are in `TODO.md`.
+The full design is in `DEVELOPMENT.md`, under "Planned: MCP servers as the tool and RAG providers" and
+"MCP tool server (step 3)", and the remaining steps are in `TODO.md`.
 
 ## Requirements
 
@@ -202,9 +210,10 @@ All backend configuration is via `backend/.env` (see `backend/.env.example`):
 | `OLLAMA_REQUEST_TIMEOUT_MS` | `60000` | Bounds Ollama's quick, non-generation calls (`/api/tags`, `/api/embed`) |
 | `OLLAMA_CHAT_IDLE_TIMEOUT_MS` | `300000` | Bounds a streamed `/api/chat` generation by inactivity, not total duration — resets on every token received |
 | `MAX_CONCURRENT_EXECUTIONS` | `5` | Global cap on real OS processes spawned at once across every caller (manual requests, Orchestrator tasks, Scan Profiles) |
-| `MCP_SERVERS` | _(unset)_ | MCP servers to connect to, as comma-separated `id=url` entries (https, or http for localhost only). Their tools are listed on Tools → MCP servers; agents can't call them yet |
+| `MCP_SERVERS` | _(unset)_ | MCP servers to connect to, as comma-separated `id=url` entries (https, or http for localhost only). Their tools are listed on Tools → MCP servers; enable one there to let agents call it |
 | `MCP_TOKEN_<ID>` | _(unset)_ | Bearer token for each server in `MCP_SERVERS` — the id upper-cased, hyphens as underscores (e.g. `MCP_TOKEN_TOOLS`). Never put it in the URL |
-| `MCP_REQUEST_TIMEOUT_MS` | `10000` | Bounds each request to an MCP server |
+| `MCP_REQUEST_TIMEOUT_MS` | `10000` | Bounds each discovery request to an MCP server |
+| `MCP_TOOL_TIMEOUT_MS` | `900000` | Bounds one MCP tool call (a scan can run for minutes); the tool server has its own per-command timeout too |
 
 ## Testing
 

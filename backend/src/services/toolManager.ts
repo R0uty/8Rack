@@ -12,6 +12,8 @@ import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStor
 import { ingestExecution } from "./findingsManager.js";
 import { getMission, onMissionDeleted } from "./missionManager.js";
 import { checkScope } from "./scopeMatcher.js";
+import { callMcpTool, getMcpTool } from "./mcpClient.js";
+import type { McpTool } from "./mcpClient.js";
 import { logActivity } from "./activityLog.js";
 import {
   ExecToolDisabledError,
@@ -450,10 +452,77 @@ async function runRecord(
   return record;
 }
 
+/**
+ * Runs an already-approved MCP tool execution: calls the tool server (services/mcpClient.ts) instead
+ * of spawning a local process, then settles the record exactly like runRecord - findings ingestion,
+ * history and all. No local process means no local path/executable concern (the server owns its own
+ * filesystem), but it still counts against the concurrency cap, registers an AbortController so a
+ * cancel/disconnect reaches the in-flight call, and feeds ingestExecution the raw output the parsers
+ * need. See "What stays in 8Rack" in DEVELOPMENT.md.
+ */
+async function runMcpRecord(record: ExecutionRecord): Promise<ExecutionRecord> {
+  if (!record.mcp) throw new InvalidToolArgumentsError(`Execution "${record.id}" is not an MCP execution`);
+  if (runningControllers.size >= env.maxConcurrentExecutions) {
+    throw new TooManyConcurrentExecutionsError(env.maxConcurrentExecutions);
+  }
+
+  record.status = "running";
+  record.startedAt = Date.now();
+  void persistExecutions(record.missionId).catch((err) => console.error("[tools] persist failed:", err));
+
+  const controller = new AbortController();
+  runningControllers.set(record.id, controller);
+  const started = Date.now();
+  let result: ExecutionResult;
+  try {
+    const call = await callMcpTool(record.mcp.serverId, record.mcp.toolName, record.arguments, controller.signal);
+    result = {
+      stdout: call.stdout,
+      stderr: call.stderr,
+      exitCode: call.exitCode,
+      executionTimeMs: Date.now() - started,
+      success: call.success,
+      timedOut: call.timedOut,
+      cancelled: false,
+      truncated: call.truncated,
+    };
+  } catch (err) {
+    const cancelled = controller.signal.aborted;
+    result = failedResult(
+      cancelled ? "The execution was cancelled." : err instanceof Error ? err.message : "The MCP tool call failed.",
+    );
+    result.cancelled = cancelled;
+  } finally {
+    runningControllers.delete(record.id);
+  }
+
+  // Parsed under the MCP tool's own name (e.g. "nmap"), not the "<server>.nmap" catalog id - see
+  // findingsManager.ts#ingestExecution and parsers/index.ts.
+  result.parsedOutput = applyParser("text", result.stdout);
+  record.finishedAt = Date.now();
+  record.result = result;
+  record.status = result.cancelled ? "cancelled" : result.success ? "completed" : "failed";
+
+  console.log(
+    `[tools] ${record.status} (mcp): ${loggable(record.resolvedCommand)} (exit ${result.exitCode}, ${result.executionTimeMs}ms)`,
+  );
+
+  try {
+    await ingestExecution(record);
+  } catch (err) {
+    console.error(`[tools] findings ingestion failed for execution "${record.id}":`, err);
+  }
+
+  await persistExecutions(record.missionId);
+  return record;
+}
+
 /** Tools that only touch the local workspace and can never reach a target over the network - mission
  * scope has nothing to say about them. Without this, any mission with a scope allowlist (and the
  * Director refuses to start without one) rejected every read_file/write_file/grep with "no
- * identifiable target", and a filename like `notes.example.org.txt` read as an out-of-scope host. */
+ * identifiable target", and a filename like `notes.example.org.txt` read as an out-of-scope host.
+ * MCP tools are deliberately never listed here: a tool on a scanning host reaches targets over the
+ * network by definition, so it always goes through the full scope check (see checkExecutionScope). */
 const LOCAL_ONLY_TOOL_IDS = new Set(["read_file", "write_file", "list_directory", "search_files", "grep"]);
 
 /**
@@ -503,6 +572,44 @@ async function checkExecutionScope(missionId: string, toolId: string, args: stri
 }
 
 /**
+ * Validates and parks an MCP tool request as `pending_confirmation` - the same approval gate a local
+ * tool goes through, so the model-asks/human-approves/then-it-runs flow is identical. No local path
+ * containment or executable resolution (the scanning host owns its own filesystem and binaries), but
+ * the scope check still runs, keyed on the arguments. MCP tools always require confirmation: the
+ * approval gate is 8Rack's, and the server can't tell an approved call from an unapproved one.
+ */
+async function requestMcpExecution(body: ToolRequestBody, mcpTool: McpTool): Promise<ExecutionRecord> {
+  if (!mcpTool.enabled) throw new ExecToolDisabledError(mcpTool.id);
+  if (!Array.isArray(body.arguments) || body.arguments.some((a) => typeof a !== "string")) {
+    throw new InvalidToolArgumentsError("arguments must be an array of strings");
+  }
+
+  const resolvedCommand = [`[mcp:${mcpTool.serverId}]`, mcpTool.toolName, ...body.arguments].join(" ");
+  assertNotPrivileged(resolvedCommand);
+  const scopeWarning = await checkExecutionScope(body.missionId, mcpTool.id, body.arguments);
+
+  const record: ExecutionRecord = {
+    id: randomUUID(),
+    missionId: body.missionId,
+    toolId: mcpTool.id,
+    agentId: body.agentId,
+    arguments: body.arguments,
+    resolvedCommand,
+    cwd: `scanning host (${mcpTool.serverId})`,
+    status: "pending_confirmation",
+    createdAt: Date.now(),
+    scopeWarning,
+    mcp: { serverId: mcpTool.serverId, toolName: mcpTool.toolName },
+  };
+  executions.set(record.id, record);
+  trimHistory(record.missionId);
+  await persistExecutions(record.missionId);
+
+  console.log(`[tools] requested (mcp): ${loggable(record.resolvedCommand)} (execution ${record.id})`);
+  return record;
+}
+
+/**
  * Validates and registers a tool request. If the tool doesn't require confirmation it runs
  * immediately; otherwise it's parked as `pending_confirmation` until confirmExecution() is
  * called. Every built-in tool currently requires confirmation, so the immediate-run branch is
@@ -510,6 +617,12 @@ async function checkExecutionScope(missionId: string, toolId: string, args: stri
  * confirmation gets loosened later.
  */
 export async function requestExecution(body: ToolRequestBody): Promise<ExecutionRecord> {
+  // An MCP tool id ("<server>.<tool>") runs on a tool server, not as a local process - same approval
+  // gate, scope check and history, different execution. Checked first so it never falls through to
+  // the local-tool "not found" path below.
+  const mcpTool = getMcpTool(body.tool);
+  if (mcpTool) return requestMcpExecution(body, mcpTool);
+
   const tool = tools.get(body.tool);
   if (!tool) throw new ExecToolNotFoundError(body.tool);
   if (!tool.enabled) throw new ExecToolDisabledError(tool.id);
@@ -575,6 +688,23 @@ export async function confirmExecution(
   if (record.status !== "pending_confirmation" || confirmingExecutions.has(id)) {
     throw new InvalidToolArgumentsError(`Execution "${id}" is not pending confirmation (status: ${record.status})`);
   }
+
+  // An MCP execution runs on the tool server, not a local process. Same confirm-time scope re-check
+  // and double-confirm guard as a local tool, then runMcpRecord calls the server. Live stdout
+  // streaming (onOutput) isn't available over MCP, so only the final result lands.
+  if (record.mcp) {
+    confirmingExecutions.add(id);
+    try {
+      record.scopeWarning = await checkExecutionScope(record.missionId, record.toolId, record.arguments);
+      if (record.status !== "pending_confirmation" || !executions.has(id)) {
+        throw new InvalidToolArgumentsError(`Execution "${id}" is not pending confirmation (status: ${record.status})`);
+      }
+      return await runMcpRecord(record);
+    } finally {
+      confirmingExecutions.delete(id);
+    }
+  }
+
   const tool = tools.get(record.toolId);
   if (!tool) throw new ExecToolNotFoundError(record.toolId);
 

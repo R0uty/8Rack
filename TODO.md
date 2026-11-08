@@ -1374,20 +1374,26 @@ Steps:
       adding MCP tools to the Orchestrator's catalog, and the enable switch, both go with the first
       server agents actually call (step 2). `extensions/toolRegistry.ts` / `types/tool.ts` are not the
       adapter: their `execute()` runs a tool directly, with no approval step.
-- [ ] **Delete `extensions/toolRegistry.ts` and `types/tool.ts`** once step 3 lands, along with the
-      native tool-calling branch in `chatService.ts` that reads them, unless native tool-calling is
-      picked up by then.
+- [ ] **Delete `extensions/toolRegistry.ts` and `types/tool.ts`** (step 3 has now landed), along with
+      the native tool-calling branch in `chatService.ts` that reads them, unless native tool-calling is
+      picked up by then. Ready to do now - the plain-text Orchestrator convention is the only path
+      agents use, MCP tools included.
 - [ ] **2. RAG server.** Move `search_knowledge_base`, reindex and status behind an MCP server. Keep
       the Knowledge Base panel working against it. This is the first MCP tool agents call, so it also
       brings the enable switch (discovered tools start disabled) and adds enabled MCP tools to the
       Orchestrator's catalog.
-- [ ] **3. Tool server beside the local executor.** Runs on the scanning host over HTTPS, with a bearer
-      token from `.env` (server URL and token are new settings; the token never goes in the repo or the
-      UI). Wrap the existing ExecTools. The server returns raw
-      stdout, stderr and exit code so the parsers keep working, owns path containment for its own
-      filesystem, and handles cancellation. 8Rack keeps the approval gate, scope checks (request and
-      confirm time), enabled/disabled overrides, `ingestExecution` and history. A setting picks local or
-      MCP execution.
+- [x] **3. Tool server beside the local executor.** Done 2026-11-08 - see "MCP tool server (step 3)"
+      in DEVELOPMENT.md. `mcp-servers/tools/` is a Python MCP server running a fixed catalog of eight
+      recon tools over streamable HTTP (HTTPS for a real host), behind the bearer token from
+      `MCP_TOKEN_<ID>`; it returns raw stdout/stderr/exit code, owns its own path containment, and kills
+      the process group on timeout/disconnect. 8Rack discovers tools disabled, a human enables them
+      (`PATCH /api/mcp/tools/:id`, persisted), enabled tools join the Orchestrator catalog, and a call
+      runs through the unchanged request → approval → scope-checked → `ingestExecution` path
+      (`toolManager.ts#runMcpRecord`). Scope is enforced at request and confirm time - MCP ids are never
+      local-only, so an out-of-scope or untargetable call blocks. Still open from this item's wish list:
+      a per-mission/global **setting to pick local vs MCP** for the same tool (today an MCP tool is a
+      separate `<server>.<tool>` catalog entry alongside the local one, which is enough to compare them),
+      and live output streaming (coarser over MCP).
 - [ ] **Scan source IP.** Tools now run from the scanning host's address, not this machine's. Record
       that address on each mission (some programs require registered source IPs) and show it before a
       run is approved.

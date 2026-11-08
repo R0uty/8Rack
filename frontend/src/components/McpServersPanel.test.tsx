@@ -3,14 +3,19 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { McpServersPanel } from "./McpServersPanel";
 import { useMcpServers } from "../hooks/useMcpServers";
-import type { McpServerStatus } from "../types/mcp";
+import type { McpServerStatus, McpToolInfo } from "../types/mcp";
 
 vi.mock("../hooks/useMcpServers", () => ({ useMcpServers: vi.fn() }));
 
 function setup(servers: McpServerStatus[] | null, overrides: Partial<ReturnType<typeof useMcpServers>> = {}) {
   const check = vi.fn();
-  vi.mocked(useMcpServers).mockReturnValue({ servers, loading: false, checking: false, error: null, check, ...overrides });
-  return { check };
+  const toggleTool = vi.fn();
+  vi.mocked(useMcpServers).mockReturnValue({ servers, loading: false, checking: false, error: null, check, toggleTool, ...overrides });
+  return { check, toggleTool };
+}
+
+function tool(overrides: Partial<McpToolInfo> = {}): McpToolInfo {
+  return { id: "tools.nmap", name: "nmap", description: "Port scanner", enabled: false, ...overrides };
 }
 
 function server(overrides: Partial<McpServerStatus> = {}): McpServerStatus {
@@ -26,15 +31,38 @@ describe("McpServersPanel", () => {
     expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
   });
 
-  it("lists an online server's tools and says agents can't use them yet", () => {
-    setup([server({ tools: [{ name: "nmap", description: "Port scanner" }, { name: "httpx", description: "" }], skippedTools: 1 })]);
+  it("lists an online server's tools, disabled, and explains approval and scope still apply", () => {
+    setup([
+      server({
+        tools: [tool(), tool({ id: "tools.httpx", name: "httpx", description: "" })],
+        skippedTools: 1,
+      }),
+    ]);
     render(<McpServersPanel />);
 
     expect(screen.getByText("online")).toBeInTheDocument();
     expect(screen.getByText("nmap")).toBeInTheDocument();
     expect(screen.getByText(/Port scanner/)).toBeInTheDocument();
     expect(screen.getByText(/2 tools · 1 not listed/)).toBeInTheDocument();
-    expect(screen.getByText(/Agents can't use them yet/)).toBeInTheDocument();
+    expect(screen.getByText(/still needs human approval and stays within mission scope/)).toBeInTheDocument();
+    expect(screen.getAllByText("disabled")).toHaveLength(2);
+  });
+
+  it("enables a tool via its toggle", async () => {
+    const { toggleTool } = setup([server({ tools: [tool()] })]);
+    render(<McpServersPanel />);
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Enable nmap" }));
+
+    expect(toggleTool).toHaveBeenCalledWith("tools.nmap", true);
+  });
+
+  it("shows an enabled tool with a disable control", () => {
+    setup([server({ tools: [tool({ enabled: true })] })]);
+    render(<McpServersPanel />);
+
+    expect(screen.getByText("enabled")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disable nmap" })).toBeInTheDocument();
   });
 
   it("shows why a server failed or is misconfigured", () => {

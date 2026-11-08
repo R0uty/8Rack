@@ -1,8 +1,9 @@
-import { RefreshCw } from "lucide-react";
+import { useState } from "react";
+import { Power, RefreshCw } from "lucide-react";
 import { useMcpServers } from "../hooks/useMcpServers";
-import { Button, GlassPanel, SectionHeading, Skeleton, StatusPill, type Tone } from "./ui";
+import { Button, GlassPanel, IconButton, SectionHeading, Skeleton, StatusPill, type Tone } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
-import type { McpServerState, McpServerStatus } from "../types/mcp";
+import type { McpServerState, McpServerStatus, McpToolInfo } from "../types/mcp";
 
 const STATE: Record<McpServerState, { tone: Tone; label: string }> = {
   checking: { tone: "info", label: "checking" },
@@ -13,11 +14,12 @@ const STATE: Record<McpServerState, { tone: Tone; label: string }> = {
 
 /**
  * The MCP servers named in the backend's .env and the tools each one offers (see
- * backend/src/services/mcpClient.ts). Read-only for now: agents can't call these tools until the
- * approval gate and enable switch are wired in - TODO.md "MCP tool and RAG providers", steps 2-3.
+ * backend/src/services/mcpClient.ts). A discovered tool starts disabled; enabling it here lets agents
+ * call it through the normal approval + scope flow - the same gate every local tool goes through.
  */
 export function McpServersPanel() {
-  const { servers, loading, checking, error, check } = useMcpServers();
+  const { servers, loading, checking, error, check, toggleTool } = useMcpServers();
+  const [toggleError, setToggleError] = useState<string | null>(null);
 
   return (
     <section>
@@ -41,6 +43,7 @@ export function McpServersPanel() {
       </SectionHeading>
 
       {error && <p className="mb-2 text-xs text-critical">{error}</p>}
+      {toggleError && <p className="mb-2 text-xs text-critical">{toggleError}</p>}
       {loading && !servers && <Skeleton className="h-16 w-full" />}
 
       {servers && servers.length === 0 && (
@@ -56,9 +59,22 @@ export function McpServersPanel() {
 
       {servers && servers.length > 0 && (
         <div className="flex flex-col gap-3">
-          <p className="text-xs text-muted">Tools these servers offer, for review. Agents can't use them yet.</p>
+          <p className="text-xs text-muted">
+            Enable a tool to let agents call it. Every call still needs human approval and stays within mission scope.
+          </p>
           {servers.map((server) => (
-            <ServerCard key={server.id} server={server} />
+            <ServerCard
+              key={server.id}
+              server={server}
+              onToggle={async (id, enabled) => {
+                setToggleError(null);
+                try {
+                  await toggleTool(id, enabled);
+                } catch (err) {
+                  setToggleError(err instanceof Error ? err.message : "Failed to toggle the tool");
+                }
+              }}
+            />
           ))}
         </div>
       )}
@@ -66,7 +82,7 @@ export function McpServersPanel() {
   );
 }
 
-function ServerCard({ server }: { server: McpServerStatus }) {
+function ServerCard({ server, onToggle }: { server: McpServerStatus; onToggle: (id: string, enabled: boolean) => Promise<void> }) {
   const state = STATE[server.state];
   return (
     <GlassPanel padding="md">
@@ -94,15 +110,48 @@ function ServerCard({ server }: { server: McpServerStatus }) {
           {server.tools.length > 0 && (
             <ul className="mt-2 flex flex-col gap-1.5">
               {server.tools.map((tool) => (
-                <li key={tool.name} className="min-w-0 text-xs">
-                  <span className="font-mono text-text">{tool.name}</span>
-                  {tool.description && <span className="text-muted"> — {tool.description}</span>}
-                </li>
+                <ToolRow key={tool.id} tool={tool} onToggle={onToggle} />
               ))}
             </ul>
           )}
         </div>
       )}
     </GlassPanel>
+  );
+}
+
+function ToolRow({ tool, onToggle }: { tool: McpToolInfo; onToggle: (id: string, enabled: boolean) => Promise<void> }) {
+  const [pending, setPending] = useState(false);
+  return (
+    <li className={`flex min-w-0 items-start gap-2 text-xs ${tool.enabled ? "" : "opacity-60"}`}>
+      <IconButton
+        icon={Power}
+        label={tool.enabled ? `Disable ${tool.name}` : `Enable ${tool.name}`}
+        size="sm"
+        active={tool.enabled}
+        disabled={pending}
+        onClick={async () => {
+          setPending(true);
+          try {
+            await onToggle(tool.id, !tool.enabled);
+          } finally {
+            setPending(false);
+          }
+        }}
+      />
+      <div className="min-w-0 flex-1">
+        <span className="font-mono text-text">{tool.name}</span>
+        {tool.enabled ? (
+          <StatusPill tone="primary" dot={false} className="ml-1.5 px-1.5 py-0.5">
+            enabled
+          </StatusPill>
+        ) : (
+          <StatusPill tone="neutral" dot={false} className="ml-1.5 px-1.5 py-0.5">
+            disabled
+          </StatusPill>
+        )}
+        {tool.description && <span className="text-muted"> — {tool.description}</span>}
+      </div>
+    </li>
   );
 }

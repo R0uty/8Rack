@@ -3733,3 +3733,86 @@ one online with 2 tools (a third, with an unsafe name, skipped) and one misconfi
 was stopped, "Check again" showed `Can't reach the server (ECONNREFUSED)`. The tab fits at phone width with
 no console errors. Not verified: a real remote host over https - no scanning host exists yet.
 
+## MCP tool server (step 3, 2026-11-08)
+
+Step 3 of "Planned: MCP servers as the tool and RAG providers" above - **the first time agents call a
+server's tool by name**. A new Python MCP server (`mcp-servers/tools/`) runs recon tools on a scanning
+host, and 8Rack calls them through the exact same request → human approval → scope-checked execution
+path every local tool already uses. The enable switch and the Orchestrator-catalog registration, held
+back from steps 1-2 because nothing called a tool yet, land here.
+
+### The tool server (`mcp-servers/tools/`)
+
+Built to the RAG server's conventions (own venv, `.env.example`, README, pytest, stateless
+streamable-HTTP MCPServer, the same constant-time bearer-token middleware). What differs follows from
+it running on a separate scanning host rather than loopback-only:
+
+- **A fixed catalog, not "run any command".** `catalog.py` lists eight recon tools (nmap, httpx,
+  nuclei, subfinder, dig, whois, ffuf, katana). Each becomes one MCP tool whose single `args`
+  parameter is the argv appended after a fixed `executable` + `default_args` prefix - the same
+  `defaultArguments` vs caller-supplied split 8Rack's own ExecTools use. The catalog's binaries don't
+  need to be installed for the server to start; a missing one surfaces as a failed run with a clear
+  message when that tool is actually called.
+- **`runner.py` runs it safely:** argv only (never a shell string), a per-tool timeout, output capped
+  per stream, path-shaped arguments confined to the workspace (the server owns path containment for
+  *its own* filesystem, since 8Rack's workspace check is about a different machine), and the whole
+  process group killed on timeout or when 8Rack disconnects.
+- **HTTPS for a real host.** `config.py` binds loopback by default; a non-loopback bind must serve
+  HTTPS, either directly (TLS cert/key) or behind a TLS-terminating proxy (`TOOLS_MCP_BEHIND_TLS_PROXY`,
+  with `TOOLS_MCP_ALLOWED_HOST` for the proxy's public name so the SDK's DNS-rebinding guard accepts
+  it). This matches 8Rack refusing plain http to anything but localhost.
+- Tests: 30 pytest cases (config incl. the HTTPS rule, the runner incl. timeout/path-escape/missing
+  binary, and the server's tools + bearer middleware), run with `.venv/bin/python -m pytest -q`.
+
+### What 8Rack keeps (the whole approval model is unchanged)
+
+An MCP execution is an ordinary `ExecutionRecord` with an `mcp: {serverId, toolName}` marker, so it
+rides the existing machinery rather than a parallel one:
+
+- **`requestExecution`/`confirmExecution`** (`toolManager.ts`) branch on that marker. The request is
+  parked at `pending_confirmation` exactly like a local tool - MCP tools always require confirmation,
+  because the approval gate is 8Rack's and the server can't tell an approved call from an unapproved
+  one. On confirm, `runMcpRecord` calls the server (`mcpClient.ts#callMcpTool`) instead of spawning a
+  process, then settles the record identically: raw stdout/stderr/exit code, findings ingestion,
+  history, the concurrency cap, and an `AbortController` so a cancel/disconnect reaches the in-flight
+  call. No local path/executable check (the server owns its filesystem); no live stdout streaming over
+  MCP yet (only the final result lands).
+- **Scope is enforced, never bypassed.** `checkExecutionScope` runs at request *and* confirm time,
+  keyed on the arguments, so it works whoever executes them. MCP tool ids are deliberately never in
+  `LOCAL_ONLY_TOOL_IDS`: a tool on a scanning host reaches targets over the network by definition, so
+  it always goes through the full check - an out-of-scope target blocks outright, and "no identifiable
+  target under a strict scope allowlist" blocks too.
+- **Findings parsers keep working.** `ingestExecution` parses an MCP execution under its underlying
+  tool name (`record.mcp.toolName`, e.g. `nmap`), not the `<server>.nmap` catalog id, so an MCP nmap
+  feeds the nmap parser automatically.
+
+### The enable switch and the catalog
+
+- **Discovered tools start disabled.** `mcpClient.ts` now keeps a registry of callable tools (rebuilt
+  from online servers on every refresh) and a persisted enabled-flag map
+  (`backend/data/mcp/tool-overrides.json`, gitignored). A human enables a tool via
+  `PATCH /api/mcp/tools/:id` from Tools → MCP servers (the panel gained a per-tool power toggle, an
+  `enabled` pill, and copy saying approval + scope still apply). The qualified id is `<serverId>.<tool>`
+  so two servers offering `nmap` never collide.
+- **Enabled tools join the Orchestrator catalog.** `buildToolsPreamble` lists each enabled MCP tool by
+  its qualified id, filtered by the agent's `execTools` allowlist exactly as local tools are. The
+  request-time allowlist enforcement in `advance()` already gated any non-pseudo tool id, so it covers
+  MCP tools with no change; a disabled or unknown id fails the request and pauses the task for guidance.
+- New settings: `MCP_TOOL_TIMEOUT_MS` (default 15 min) bounds one tool call, far longer than
+  `MCP_REQUEST_TIMEOUT_MS` (discovery). The server's token is still only ever in `MCP_TOKEN_<ID>`.
+
+### Verified
+
+All three suites green: backend (`tsc --noEmit`, 624 Vitest, build), frontend (`tsc -b`, oxlint, 195
+Vitest, build), python (30 pytest). Plus a live cross-language round-trip the mocked unit tests can't
+cover: the real tool server started on loopback, and the backend's own `mcpClient` discovered all eight
+tools (disabled), enabled one (persisted), and called `dig` on the server - the real binary ran and its
+raw stderr/exit code came back through the full MCP path. Not verified: a real remote host over HTTPS
+(no scanning host exists yet), and live output streaming (coarser over MCP by design).
+
+### Next (unchanged from the plan)
+
+`extensions/toolRegistry.ts` and `types/tool.ts` (plus the native tool-calling branch in
+`chatService.ts` that reads them) can now be deleted - see TODO.md. Then step 4: run a mission both
+ways and remove the local executor once findings/assets/reports match.
+

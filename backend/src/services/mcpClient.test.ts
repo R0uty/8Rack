@@ -1,13 +1,41 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { env } from "../config/env.js";
-import { listServers, parseServerConfig, refreshServers, tokenVariable } from "./mcpClient.js";
+import {
+  callMcpTool,
+  getMcpTool,
+  listMcpTools,
+  listServers,
+  parseServerConfig,
+  refreshServers,
+  setMcpToolEnabled,
+  tokenVariable,
+} from "./mcpClient.js";
+import { ExecToolNotFoundError } from "./errors.js";
+
+// Keep the persisted enable-switch overrides in memory, so toggling a tool in a test never writes a
+// real data/mcp/tool-overrides.json - mirrors toolManager.test.ts's fs mock.
+const fsState = { files: new Map<string, string>() };
+vi.mock("node:fs/promises", () => ({
+  mkdir: vi.fn(async () => undefined),
+  readFile: vi.fn(async (path: string) => {
+    const content = fsState.files.get(path);
+    if (content === undefined) throw new Error(`ENOENT: ${path}`);
+    return content;
+  }),
+  writeFile: vi.fn(async (path: string, content: string) => {
+    fsState.files.set(path, content);
+  }),
+}));
 
 const TOKEN = "test-token-not-a-real-secret";
+
+/** How the test server answers a tool call. Default: a CommandResult-shaped success echoing the args. */
+type CallResult = { structuredContent?: unknown; content?: { type: "text"; text: string }[]; isError?: boolean };
 
 interface TestServer {
   url: URL;
@@ -24,7 +52,7 @@ afterEach(async () => {
  * scanning host would. `hang` accepts requests and never answers. */
 async function startServer(
   tools: { name: string; description?: string }[],
-  options: { hang?: boolean } = {},
+  options: { hang?: boolean; onCall?: (name: string, args: unknown) => CallResult } = {},
 ): Promise<TestServer> {
   const httpServer = http.createServer(async (req, res) => {
     if (options.hang) return;
@@ -36,6 +64,17 @@ async function startServer(
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: tools.map((t) => ({ ...t, inputSchema: { type: "object" as const } })),
     }));
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const name = request.params.name;
+      const args = (request.params.arguments ?? {}).args;
+      const result = options.onCall
+        ? options.onCall(name, args)
+        : {
+            structuredContent: { tool: name, stdout: `ran ${name} ${JSON.stringify(args)}`, stderr: "", exitCode: 0, success: true, timedOut: false, truncated: false },
+            content: [{ type: "text" as const, text: `ran ${name}` }],
+          };
+      return result;
+    });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();
@@ -123,8 +162,8 @@ describe("refreshServers", () => {
 
     expect(status).toMatchObject({ id: "tools", state: "online", skippedTools: 0 });
     expect(status.tools).toEqual([
-      { name: "nmap", description: "Port scanner" },
-      { name: "httpx", description: "" },
+      { id: "tools.nmap", name: "nmap", description: "Port scanner", enabled: false },
+      { id: "tools.httpx", name: "httpx", description: "", enabled: false },
     ]);
     expect(status.checkedAt).toEqual(expect.any(Number));
     expect(listServers()).toEqual([status]);
@@ -197,5 +236,106 @@ describe("refreshServers", () => {
 
     expect(second).toBe(first);
     await first;
+  });
+});
+
+describe("the enable switch and calling tools", () => {
+  const original = { servers: env.mcpServers, token: process.env.MCP_TOKEN_TOOLS };
+
+  afterEach(async () => {
+    env.mcpServers = original.servers;
+    if (original.token === undefined) delete process.env.MCP_TOKEN_TOOLS;
+    else process.env.MCP_TOKEN_TOOLS = original.token;
+    fsState.files.clear();
+  });
+
+  /** Points env at the test server (so callMcpTool, which reads config fresh, finds it) and discovers
+   * its tools into the registry. */
+  async function discover(server: TestServer, token = TOKEN) {
+    env.mcpServers = `tools=${server.url.href}`;
+    process.env.MCP_TOKEN_TOOLS = token;
+    await refreshServers();
+  }
+
+  it("discovers tools disabled, and a human enables one - persisted and reflected in the status", async () => {
+    const server = await startServer([{ name: "nmap" }]);
+    await discover(server);
+
+    expect(listMcpTools().map((t) => [t.id, t.enabled])).toEqual([["tools.nmap", false]]);
+    expect(getMcpTool("tools.nmap")?.enabled).toBe(false);
+
+    await setMcpToolEnabled("tools.nmap", true);
+
+    expect(getMcpTool("tools.nmap")?.enabled).toBe(true);
+    expect(listServers()[0].tools.find((t) => t.id === "tools.nmap")?.enabled).toBe(true);
+    // Persisted so the choice survives a restart.
+    expect([...fsState.files.values()].join("")).toContain('"tools.nmap": true');
+  });
+
+  it("keeps a tool's enabled flag across a re-check", async () => {
+    const server = await startServer([{ name: "nmap" }]);
+    await discover(server);
+    await setMcpToolEnabled("tools.nmap", true);
+
+    await refreshServers();
+
+    expect(getMcpTool("tools.nmap")?.enabled).toBe(true);
+  });
+
+  it("refuses to toggle a tool no online server offers", async () => {
+    await expect(setMcpToolEnabled("tools.nope", true)).rejects.toThrow(ExecToolNotFoundError);
+  });
+
+  it("calls a tool, sending the token and args, and returns the raw result", async () => {
+    let seen: unknown;
+    const server = await startServer([{ name: "nmap" }], {
+      onCall: (_name, args) => {
+        seen = args;
+        return {
+          structuredContent: { stdout: "22/tcp open ssh", stderr: "", exitCode: 0, success: true, timedOut: false, truncated: false },
+        };
+      },
+    });
+    await discover(server);
+
+    const result = await callMcpTool("tools", "nmap", ["-sV", "127.0.0.2"]);
+
+    expect(seen).toEqual(["-sV", "127.0.0.2"]);
+    expect(result).toMatchObject({ success: true, stdout: "22/tcp open ssh", exitCode: 0 });
+  });
+
+  it("surfaces a tool error as an unsuccessful result, not a throw", async () => {
+    const server = await startServer([{ name: "nmap" }], {
+      onCall: () => ({ content: [{ type: "text", text: "that target isn't reachable" }], isError: true }),
+    });
+    await discover(server);
+
+    const result = await callMcpTool("tools", "nmap", ["127.0.0.2"]);
+
+    expect(result.success).toBe(false);
+    expect(result.stderr).toContain("isn't reachable");
+  });
+
+  it("falls back to text content when the server returns no structured result", async () => {
+    const server = await startServer([{ name: "nmap" }], {
+      onCall: () => ({ content: [{ type: "text", text: "plain output" }] }),
+    });
+    await discover(server);
+
+    const result = await callMcpTool("tools", "nmap", []);
+
+    expect(result).toMatchObject({ success: true, stdout: "plain output" });
+  });
+
+  it("reports a rejected token by the variable to fix, without the token itself", async () => {
+    const server = await startServer([{ name: "nmap" }]);
+    await discover(server);
+    process.env.MCP_TOKEN_TOOLS = "a-wrong-token-value";
+
+    await expect(callMcpTool("tools", "nmap", [])).rejects.toThrow(/rejected the token.*MCP_TOKEN_TOOLS/s);
+  });
+
+  it("fails clearly when the server is no longer configured", async () => {
+    await expect(callMcpTool("ghost", "nmap", [])).rejects.toThrow(/no longer configured/);
   });
 });

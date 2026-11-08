@@ -25,6 +25,7 @@ import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragI
 import { createFinding, getMissionFindings } from "./findingsManager.js";
 import { listAssets } from "./assetManager.js";
 import { queryNvd } from "./cveLookup.js";
+import { listMcpTools } from "./mcpClient.js";
 import { getMission, onMissionDeleted } from "./missionManager.js";
 import type { AgentWithStatus } from "../types/agent.js";
 import type { ChatResponseChunk } from "../types/ollama.js";
@@ -48,6 +49,7 @@ vi.mock("./missionStore.js", () => ({
 vi.mock("./missionManager.js", () => ({ getMission: vi.fn(async () => undefined), onMissionDeleted: vi.fn() }));
 vi.mock("./ragIndex.js", () => ({ getStatus: vi.fn(), search: vi.fn() }));
 vi.mock("./cveLookup.js", () => ({ queryNvd: vi.fn() }));
+vi.mock("./mcpClient.js", () => ({ listMcpTools: vi.fn(() => []) }));
 
 const mockOnMissionDeleted = vi.mocked(onMissionDeleted);
 /** Captured once, synchronously, right here at module load - every module in this test's import
@@ -75,6 +77,7 @@ const mockGetRagStatus = vi.mocked(getRagStatus);
 const mockSearchKnowledgeBase = vi.mocked(searchKnowledgeBase);
 const mockGetMission = vi.mocked(getMission);
 const mockQueryNvd = vi.mocked(queryNvd);
+const mockListMcpTools = vi.mocked(listMcpTools);
 
 const fixtureAgent: AgentWithStatus = {
   id: "test-agent",
@@ -341,6 +344,45 @@ describe("createTask", () => {
     const [[request]] = mockStreamAgentChat.mock.calls;
     expect(request.toolsPreamble).toContain("dig");
     expect(request.toolsPreamble).toContain("nmap");
+  });
+
+  const mcpTool = (id: string, enabled: boolean) => {
+    const [serverId, toolName] = id.split(".");
+    return { id, serverId, toolName, description: `${toolName} on the scanning host.`, enabled };
+  };
+
+  it("lists enabled MCP tools by their <server>.<tool> id, and leaves disabled ones out", async () => {
+    mockListMcpTools.mockReturnValueOnce([mcpTool("tools.nmap", true), mcpTool("tools.nuclei", false)]);
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+
+    await createTask("test-agent", "objective", "proj-1");
+
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble).toContain("- tools.nmap: nmap on the scanning host.");
+    expect(request.toolsPreamble).toContain("needs human approval");
+    expect(request.toolsPreamble).not.toContain("tools.nuclei");
+  });
+
+  it("gates MCP tools by the agent's execTools allowlist too", async () => {
+    mockListMcpTools.mockReturnValueOnce([mcpTool("tools.nmap", true), mcpTool("tools.httpx", true)]);
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, execTools: ["tools.httpx"] });
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+
+    await createTask("test-agent", "objective", "proj-1");
+
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble).toContain("tools.httpx");
+    expect(request.toolsPreamble).not.toContain("tools.nmap");
+  });
+
+  it("refuses an MCP tool the agent's allowlist doesn't name, without requesting an execution", async () => {
+    mockGetAgent.mockResolvedValue({ ...fixtureAgent, execTools: ["dig"] });
+    mockStreamAgentChat.mockImplementation(repliesGenerator(['{"tool": "tools.nmap", "arguments": ["127.0.0.2"]}']));
+
+    const task = await createTask("test-agent", "objective", "proj-1");
+
+    expect(task.status).toBe("waiting_guidance");
+    expect(mockRequestExecution).not.toHaveBeenCalled();
   });
 
   it("doesn't offer the agent a tool that isn't installed", async () => {
