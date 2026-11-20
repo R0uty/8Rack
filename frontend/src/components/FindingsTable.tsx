@@ -1,6 +1,9 @@
-import { StatusPill, type Tone } from "./ui";
+import { useState } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
+import { FOCUS_RING, StatusPill, type Tone } from "./ui";
 import { STATUS_TONE, STATUS_VERB } from "../lib/findingStatus";
 import { relativeTime } from "../lib/relativeTime";
+import { sortFindings, type SortKey } from "../lib/findingSort";
 import { cn } from "../lib/cn";
 import type { Finding, FindingSeverity } from "../types/finding";
 
@@ -30,12 +33,33 @@ function typeLabel(type: string): string {
   return type.replace(/_/g, " ");
 }
 
-const HEADERS = ["Severity", "Status", "Type", "Title", "Target", "Tool", "Confidence", "Created", "Updated"];
+const HEADERS: { label: string; key: SortKey }[] = [
+  { label: "Severity", key: "severity" },
+  { label: "Status", key: "status" },
+  { label: "Type", key: "type" },
+  { label: "Title", key: "title" },
+  { label: "Target", key: "target" },
+  { label: "Tool", key: "tool" },
+  { label: "Confidence", key: "confidence" },
+  { label: "Created", key: "createdAt" },
+  { label: "Updated", key: "updatedAt" },
+];
 
-export function FindingsTable({ findings, onSelectFinding, selectedIds, onToggleSelect, onToggleSelectAll }: FindingsTableProps) {
-  if (findings.length === 0) {
+export function FindingsTable({ findings: unsorted, onSelectFinding, selectedIds, onToggleSelect, onToggleSelectAll }: FindingsTableProps) {
+  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
+
+  if (unsorted.length === 0) {
     return <p className="text-xs text-muted">No findings match the current filters.</p>;
   }
+
+  const findings = sortFindings(unsorted, sort?.key ?? null, sort?.dir ?? "asc");
+  // First click sorts the way people usually want that column (worst/newest first), the next flips it.
+  const toggleSort = (key: SortKey) => {
+    const descFirst = key === "severity" || key === "confidence" || key === "createdAt" || key === "updatedAt";
+    setSort((prev) =>
+      prev?.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: descFirst ? "desc" : "asc" },
+    );
+  };
 
   const visibleIds = findings.map((f) => f.id);
   const allVisibleSelected = visibleIds.every((id) => selectedIds.has(id));
@@ -54,11 +78,22 @@ export function FindingsTable({ findings, onSelectFinding, selectedIds, onToggle
                 className="cursor-pointer accent-primary"
               />
             </th>
-            {HEADERS.map((h) => (
-              <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
-                {h}
-              </th>
-            ))}
+            {HEADERS.map(({ label, key }) => {
+              const active = sort?.key === key;
+              const Icon = !active ? ArrowUpDown : sort.dir === "asc" ? ArrowUp : ArrowDown;
+              return (
+                <th
+                  key={key}
+                  aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+                  className="whitespace-nowrap px-3 py-2 font-medium"
+                >
+                  <button type="button" onClick={() => toggleSort(key)} className={cn("inline-flex items-center gap-1 uppercase hover:text-text", FOCUS_RING, active && "text-text")}>
+                    {label}
+                    <Icon size={10} aria-hidden />
+                  </button>
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody className="divide-y divide-border">

@@ -4,7 +4,7 @@ import type { Agent, AgentWithStatus } from "../types/agent";
 import type { ExecToolCategory, ExecToolWithStatus } from "../types/execTool";
 import type { OllamaModel } from "../types/ollama";
 import { AgentToolAccess } from "./AgentToolAccess";
-import { Button, Collapsible, Sheet } from "./ui";
+import { Button, Collapsible, Sheet, Notice } from "./ui";
 import { cn } from "../lib/cn";
 
 interface AgentEditorProps {
@@ -357,7 +357,7 @@ export function AgentEditor({ open, agent, models, execTools, onSave, onDelete, 
         </div>
       </div>
 
-      {error && <p className="mb-3 text-xs text-critical">{error}</p>}
+      {error && <Notice className="mb-3">{error}</Notice>}
 
       <div className="flex items-center justify-between gap-2">
         <Button

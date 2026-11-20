@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, Search } from "lucide-react";
 import { ExecutionConsole } from "./ExecutionConsole";
-import { GlassPanel, StatusPill, type Tone } from "./ui";
+import { GlassPanel, StatusPill, type Tone, Notice } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
 import { cn } from "../lib/cn";
 import type { ExecutionRecord, ExecutionStatus } from "../types/execTool";
@@ -105,7 +105,7 @@ export function ExecutionHistoryPanel({ executions, loading, error, agents }: Ex
 
   return (
     <section>
-      {error && <p className="mb-2 text-xs text-critical">{error}</p>}
+      {error && <Notice className="mb-2">{error}</Notice>}
 
       <div className="mb-2 flex items-center gap-2">
         <div className="relative flex-1">

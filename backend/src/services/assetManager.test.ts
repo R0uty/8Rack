@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
+  deleteAsset,
   getAsset,
   getAssetByValue,
   listAssets,
@@ -218,5 +219,23 @@ describe("loadAssetsFromDisk", () => {
     await loadAssetsFromDisk();
 
     expect(listAssets(missionId).some((a) => a.id === onDisk.id)).toBe(true);
+  });
+});
+
+describe("deleteAsset", () => {
+  it("removes the asset, unlinks its children and logs the removal", async () => {
+    const missionId = randomUUID();
+    const host = await upsertAsset(missionId, { type: "domain", value: "del.example.com" });
+    const port = await upsertAsset(missionId, { type: "port", value: "443/tcp", parentId: host.id });
+
+    await deleteAsset(host.id);
+
+    expect(getAsset(host.id)).toBeUndefined();
+    expect(getAsset(port.id)?.parentId).toBeUndefined();
+    expect(listActivity(missionId).some((e) => e.type === "asset_removed")).toBe(true);
+  });
+
+  it("throws for an unknown asset", async () => {
+    await expect(deleteAsset("missing")).rejects.toThrow(AssetNotFoundError);
   });
 });

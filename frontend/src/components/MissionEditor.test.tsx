@@ -33,7 +33,7 @@ describe("MissionEditor", () => {
     expect(screen.getByLabelText("Scope")).toHaveValue("example.com\n*.example.com");
     expect(screen.getByLabelText("Out of scope")).toHaveValue("staging.example.com");
     expect(screen.getByLabelText("Rules of engagement")).toHaveValue("No DoS");
-    expect(screen.getByLabelText("Status")).toHaveValue("recon");
+    expect(screen.getByText("recon")).toBeInTheDocument();
   });
 
   it("splits scope/outOfScope textareas into arrays, one entry per non-empty line", async () => {
@@ -57,7 +57,7 @@ describe("MissionEditor", () => {
 
     expect(onSave).toHaveBeenCalledWith(
       "p1",
-      expect.objectContaining({ scope: [], outOfScope: [], rules: "", description: "", status: undefined }),
+      expect.objectContaining({ scope: [], outOfScope: [], rules: "", description: "" }),
     );
   });
 
@@ -65,7 +65,7 @@ describe("MissionEditor", () => {
     const { onSave } = setup({ mission: null });
     const user = userEvent.setup();
     expect(screen.getByRole("button", { name: "Create mission" })).toBeDisabled();
-    expect(screen.queryByLabelText("Status")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Name"), "New one");
     await user.type(screen.getByLabelText("Scope"), "example.com");
@@ -104,6 +104,36 @@ describe("MissionEditor", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("offers only the moves the Director doesn't make, and applies them at once", async () => {
+    const { onSave, onClose } = setup({ mission: mission({ status: "investigating" }) });
+    const user = userEvent.setup();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Pause" }));
+    expect(onSave).toHaveBeenCalledWith("p1", { status: "paused" });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Resume" }));
+    expect(onSave).toHaveBeenLastCalledWith("p1", { status: "ready" });
+  });
+
+  it("offers Reopen on a completed mission", () => {
+    setup({ mission: mission({ status: "completed" }) });
+    expect(screen.getByRole("button", { name: "Reopen" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+  });
+
+  it("shows how each scope line is read while typing", async () => {
+    setup();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Scope"), "10.0.0.0/24\nexample.com/admin");
+    const check = screen.getByRole("list", { name: "How Scope is read" });
+    expect(check).toHaveTextContent("256 addresses");
+    expect(check).toHaveTextContent("match nothing");
   });
 
   it("shows an error and stays open when saving fails", async () => {

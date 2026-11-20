@@ -2,10 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FactoryDashboard } from "./FactoryDashboard";
+import { describePreview } from "../lib/attention";
 import { useAssets } from "../hooks/useAssets";
 import { useWorkOrders } from "../hooks/useWorkOrders";
 import { useFindings } from "../hooks/useFindings";
-import { usePendingExecutions } from "../hooks/usePendingExecutions";
+import { useAttention, useFactoryPreview } from "../hooks/useAttention";
+import { AppNavContext } from "../lib/appNav";
 import { useActivity } from "../hooks/useActivity";
 import { useReports } from "../hooks/useReports";
 import { advanceFactory, stopFactory } from "../services/factoryApi";
@@ -15,24 +17,26 @@ import type { Mission } from "../types/mission";
 vi.mock("../hooks/useAssets", () => ({ useAssets: vi.fn() }));
 vi.mock("../hooks/useWorkOrders", () => ({ useWorkOrders: vi.fn() }));
 vi.mock("../hooks/useFindings", () => ({ useFindings: vi.fn() }));
-vi.mock("../hooks/usePendingExecutions", () => ({ usePendingExecutions: vi.fn() }));
+vi.mock("../hooks/useAttention", () => ({ useAttention: vi.fn(), useFactoryPreview: vi.fn() }));
 vi.mock("../hooks/useActivity", () => ({ useActivity: vi.fn() }));
 vi.mock("../hooks/useReports", () => ({ useReports: vi.fn() }));
 vi.mock("../services/factoryApi", () => ({ advanceFactory: vi.fn(), stopFactory: vi.fn() }));
 vi.mock("./FactoryPipeline", () => ({ FactoryPipeline: () => <div data-testid="pipeline" /> }));
-vi.mock("./ApprovalQueue", () => ({
-  ApprovalQueue: ({ onSettled }: { onSettled: () => void }) => (
-    <button type="button" data-testid="approval-queue" onClick={onSettled}>
+vi.mock("./NeedsYouQueue", () => ({
+  NeedsYouQueue: ({ onChanged }: { onChanged: () => void }) => (
+    <button type="button" data-testid="approval-queue" onClick={onChanged}>
       settle approval
     </button>
   ),
 }));
+vi.mock("./SetupChecklist", () => ({ SetupChecklist: () => null }));
 vi.mock("./ActivityFeed", () => ({ ActivityFeed: () => <div data-testid="activity-feed" /> }));
 
 const mockUseAssets = vi.mocked(useAssets);
 const mockUseWorkOrders = vi.mocked(useWorkOrders);
 const mockUseFindings = vi.mocked(useFindings);
-const mockUsePendingExecutions = vi.mocked(usePendingExecutions);
+const mockUseAttention = vi.mocked(useAttention);
+const mockUseFactoryPreview = vi.mocked(useFactoryPreview);
 const mockUseActivity = vi.mocked(useActivity);
 const mockUseReports = vi.mocked(useReports);
 const mockAdvanceFactory = vi.mocked(advanceFactory);
@@ -61,11 +65,12 @@ function setupHooks() {
     update: vi.fn(),
     remove: vi.fn(),
   });
-  mockUsePendingExecutions.mockReturnValue({
-    executions: [{ id: "e1", status: "pending_confirmation" }] as never,
+  mockUseAttention.mockReturnValue({
+    attention: { approvals: [{ execution: { id: "e1" } }] as never, running: [], guidance: [], failed: [] },
     error: null,
     refresh: vi.fn(),
   });
+  mockUseFactoryPreview.mockReturnValue({ preview: null, error: null, refresh: vi.fn() });
   mockUseActivity.mockReturnValue({ events: [], loading: false, error: null, refresh: vi.fn() });
   mockUseReports.mockReturnValue({
     reports: [],
@@ -91,7 +96,7 @@ describe("FactoryDashboard", () => {
   it("prompts to create a mission before showing any stats", () => {
     setupHooks();
     render(<FactoryDashboard agents={[]} mission={null} />);
-    expect(screen.getByText(/Create a mission/)).toBeInTheDocument();
+    expect(screen.getByText(/No mission selected/)).toBeInTheDocument();
   });
 
   it("shows stat tiles derived from assets/work orders/findings/executions once a mission is selected", async () => {
@@ -200,46 +205,33 @@ describe("FactoryDashboard", () => {
     expect(screen.getByText(/Paused after 25 work orders/)).toBeInTheDocument();
   });
 
-  it("flags failed work orders and links to them", async () => {
+  it("says what Advance would do next", () => {
     setupHooks();
-    mockUseWorkOrders.mockReturnValue({
-      workOrders: [{ id: "w1", status: "failed" }] as never,
-      loading: false,
+    mockUseFactoryPreview.mockReturnValue({
+      preview: { next: { agentId: "recon-agent", target: "example.com", objective: "Recon", existing: false }, waitingOnApproval: 0, waitingOnGuidance: 0, unsettledFindings: 0, confirmedFindings: 0 },
       error: null,
       refresh: vi.fn(),
-      create: vi.fn(),
-      start: vi.fn(),
-      cancel: vi.fn(),
-      guide: vi.fn(),
-      refreshOne: vi.fn(),
     });
-    const onOpenView = vi.fn();
-    render(<FactoryDashboard agents={[]} mission={mission} onOpenView={onOpenView} />);
-
-    expect(screen.getByText(/1 work order failed/)).toBeInTheDocument();
-    await userEvent.setup().click(screen.getByRole("button", { name: "View" }));
-    expect(onOpenView).toHaveBeenCalledWith("workorders");
+    render(<FactoryDashboard agents={[{ id: "recon-agent", name: "Recon Agent" } as never]} mission={mission} />);
+    expect(screen.getByText("Next: Recon Agent on example.com (new work order).")).toBeInTheDocument();
   });
 
-  it("stops counting a failed work order once it has been retried", () => {
+  it("puts the number of items waiting on you in the tab title", () => {
     setupHooks();
-    mockUseWorkOrders.mockReturnValue({
-      workOrders: [
-        { id: "w2", status: "completed", retryOf: "w1" },
-        { id: "w1", status: "failed" },
-      ] as never,
-      loading: false,
-      error: null,
-      refresh: vi.fn(),
-      create: vi.fn(),
-      start: vi.fn(),
-      cancel: vi.fn(),
-      guide: vi.fn(),
-      refreshOne: vi.fn(),
-    });
     render(<FactoryDashboard agents={[]} mission={mission} />);
+    expect(document.title).toBe("(1) 8Rack");
+  });
 
-    expect(screen.queryByText(/work order.* failed/)).not.toBeInTheDocument();
+  it("opens the mission editor from the no-scope warning", async () => {
+    setupHooks();
+    const editMission = vi.fn();
+    render(
+      <AppNavContext.Provider value={{ editMission }}>
+        <FactoryDashboard agents={[]} mission={{ ...mission, scope: [] }} />
+      </AppNavContext.Provider>,
+    );
+    await userEvent.setup().click(screen.getByRole("button", { name: /No scope set/ }));
+    expect(editMission).toHaveBeenCalledWith(expect.objectContaining({ id: "m1" }));
   });
 
   it("surfaces a failed report generation", async () => {
@@ -258,5 +250,15 @@ describe("FactoryDashboard", () => {
     render(<FactoryDashboard agents={[]} mission={mission} />);
 
     expect(screen.getByText("The model returned an empty report")).toBeInTheDocument();
+  });
+});
+
+describe("describePreview", () => {
+  const base = { waitingOnApproval: 0, waitingOnGuidance: 0, unsettledFindings: 0, confirmedFindings: 0 };
+  it("says why nothing would run", () => {
+    expect(describePreview({ ...base, unsettledFindings: 3 }, [])).toBe("Nothing to run - 3 findings need review.");
+    expect(describePreview({ ...base, waitingOnApproval: 1 }, [])).toBe("Nothing new to run - 1 work order is waiting on you.");
+    expect(describePreview({ ...base, blockedReason: "This mission is paused" }, [])).toBe("This mission is paused");
+    expect(describePreview(base, [])).toBe("Nothing to run right now.");
   });
 });

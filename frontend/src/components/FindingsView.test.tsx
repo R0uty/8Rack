@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FindingsView } from "./FindingsView";
 import { useFindings } from "../hooks/useFindings";
@@ -24,12 +24,13 @@ vi.mock("../hooks/useReports", () => ({
 // FindingsTable/FindingDetails have their own test files - stubbed down to just enough surface to
 // drive FindingsView's own state.
 vi.mock("./FindingsTable", () => ({
-  FindingsTable: ({ findings, onSelectFinding }: { findings: Finding[]; onSelectFinding: (f: Finding) => void }) => (
+  FindingsTable: ({ findings, onSelectFinding, onToggleSelect }: { findings: Finding[]; onSelectFinding: (f: Finding) => void; onToggleSelect: (id: string) => void }) => (
     <div>
       {findings.map((f) => (
-        <button key={f.id} onClick={() => onSelectFinding(f)}>
-          {f.title}
-        </button>
+        <div key={f.id}>
+          <button onClick={() => onSelectFinding(f)}>{f.title}</button>
+          <input type="checkbox" aria-label={`Select ${f.title}`} onChange={() => onToggleSelect(f.id)} />
+        </div>
       ))}
     </div>
   ),
@@ -75,7 +76,12 @@ function fixtureFinding(overrides: Partial<Finding>): Finding {
 const findingA = fixtureFinding({ id: "finding-a", missionId: "proj-a", title: "Finding A" });
 const findingB = fixtureFinding({ id: "finding-b", missionId: "proj-b", title: "Finding B" });
 
+const mockCreate = vi.fn();
+const mockUpdate = vi.fn(async (_id: string, patch: Partial<Finding>) => ({ ...findingA, ...patch }));
+
 function setupFindings() {
+  mockCreate.mockReset();
+  mockUpdate.mockClear();
   mockUseFindings.mockImplementation((missionId) => ({
     findings:
       missionId === "proj-a"
@@ -86,8 +92,8 @@ function setupFindings() {
     loading: false,
     error: null,
     refresh: vi.fn(),
-    create: vi.fn(),
-    update: vi.fn(async (_id, patch) => ({ ...findingA, ...patch })),
+    create: mockCreate,
+    update: mockUpdate,
     remove: vi.fn(),
   }));
 }
@@ -129,5 +135,33 @@ describe("FindingsView", () => {
 
     expect(screen.getByText(/No findings yet/)).toBeInTheDocument();
     expect(screen.queryByLabelText("Status")).not.toBeInTheDocument();
+  });
+
+  it("changes the status of every selected finding at once", async () => {
+    setupFindings();
+    render(<FindingsView mission={missionA} />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByLabelText("Select Finding A"));
+    await user.click(screen.getByLabelText("Select Finding C"));
+    await user.selectOptions(screen.getByLabelText("New status for selected findings"), "false_positive");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledWith("finding-c", { status: "false_positive" }));
+    expect(mockUpdate).toHaveBeenCalledWith("finding-a", { status: "false_positive" });
+  });
+
+  it("adds a finding by hand, using the target as its value when nothing more specific is given", async () => {
+    setupFindings();
+    render(<FindingsView mission={missionA} />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Add finding" }));
+    await user.type(screen.getByLabelText("Title"), "Open redirect");
+    await user.type(screen.getByLabelText("Target"), "example.com");
+    await user.click(screen.getAllByRole("button", { name: "Add finding" }).at(-1)!);
+
+    await waitFor(() => expect(mockCreate).toHaveBeenCalled());
+    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ title: "Open redirect", target: "example.com", value: "example.com", tool: "manual" }));
   });
 });

@@ -1,3 +1,4 @@
+import type { FactoryPreview, MissionAttention } from "../types/attention";
 import type { MissionRunState, MissionStreamEvent } from "../types/missionRun";
 import { ApiError, apiFetch, readNdjsonStream, throwForErrorResponse } from "./httpClient";
 
@@ -39,4 +40,20 @@ export async function streamMissionEvents(
       // One bad line shouldn't drop the stream.
     }
   });
+}
+
+export async function fetchAttention(missionId: string): Promise<MissionAttention> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/attention`);
+  if (!res.ok) await throwForErrorResponse(res);
+  const data = (await res.json().catch(() => null)) as { attention?: MissionAttention } | null;
+  if (!data?.attention) throw new ApiError("Received an invalid response from the server", 502);
+  return data.attention;
+}
+
+export async function fetchFactoryPreview(missionId: string): Promise<FactoryPreview> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/factory/preview`);
+  if (!res.ok) await throwForErrorResponse(res);
+  const data = (await res.json().catch(() => null)) as { preview?: FactoryPreview } | null;
+  if (!data?.preview) throw new ApiError("Received an invalid response from the server", 502);
+  return data.preview;
 }

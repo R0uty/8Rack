@@ -1,7 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { CheckCircle2, Eye, Pause, Play, RotateCcw } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import type { MissionStatus, Mission } from "../types/mission";
-import { Button, Sheet } from "./ui";
+import { Button, Sheet, Notice, StatusPill } from "./ui";
 import { cn } from "../lib/cn";
+import { classifyScopeText } from "../lib/scopeLines";
 
 interface MissionEditorProps {
   open: boolean;
@@ -16,7 +19,6 @@ interface FormState {
   name: string;
   notes: string;
   description: string;
-  status: MissionStatus | "";
   scope: string;
   outOfScope: string;
   rules: string;
@@ -26,24 +28,55 @@ const EMPTY_FORM: FormState = {
   name: "",
   notes: "",
   description: "",
-  status: "",
   scope: "",
   outOfScope: "",
   rules: "",
 };
 
-const STATUS_OPTIONS: MissionStatus[] = [
-  "draft",
-  "ready",
-  "recon",
-  "investigating",
-  "validating",
-  "reporting",
-  "review",
-  "completed",
-  "paused",
-  "cancelled",
-];
+interface StatusAction {
+  label: string;
+  to: MissionStatus;
+  icon: LucideIcon;
+}
+
+const PAUSE: StatusAction = { label: "Pause", to: "paused", icon: Pause };
+const RESUME: StatusAction = { label: "Resume", to: "ready", icon: Play };
+const REVIEW: StatusAction = { label: "Send to review", to: "review", icon: Eye };
+const COMPLETE: StatusAction = { label: "Complete", to: "completed", icon: CheckCircle2 };
+const REOPEN: StatusAction = { label: "Reopen", to: "ready", icon: RotateCcw };
+
+/** The stages from draft to reporting belong to the Factory Director (it moves a mission forward as
+ * work lands), so a human only gets the moves the Director never makes. Resume and Reopen go back to
+ * "ready" and the Director catches the stage up on its next advance. */
+function statusActions(status: MissionStatus | undefined): StatusAction[] {
+  switch (status) {
+    case "paused":
+      return [RESUME, COMPLETE];
+    case "review":
+      return [COMPLETE, REOPEN];
+    case "completed":
+    case "cancelled":
+      return [REOPEN];
+    default:
+      return [PAUSE, REVIEW, COMPLETE];
+  }
+}
+
+function ScopeCheck({ text, label }: { text: string; label: string }) {
+  const lines = useMemo(() => classifyScopeText(text), [text]);
+  if (lines.length === 0) return null;
+  return (
+    <ul aria-label={`How ${label} is read`} className="-mt-2 mb-4 flex flex-col gap-0.5 text-[11px]">
+      {lines.map((l, i) => (
+        <li key={`${i}-${l.line}`} className="flex flex-wrap gap-x-1.5">
+          <span className="font-mono text-text">{l.line}</span>
+          <span className={l.kind === "unrecognized" ? "text-critical" : "text-muted"}>→ {l.meaning}</span>
+          {l.warning && <span className={l.kind === "unrecognized" ? "text-critical" : "text-warning"}>{l.warning}</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function linesToList(value: string): string[] {
   return value
@@ -57,7 +90,6 @@ function formFromMission(mission: Mission): FormState {
     name: mission.name,
     notes: mission.notes,
     description: mission.description ?? "",
-    status: mission.status ?? "",
     scope: (mission.scope ?? []).join("\n"),
     outOfScope: (mission.outOfScope ?? []).join("\n"),
     rules: mission.rules ?? "",
@@ -89,13 +121,19 @@ export function MissionEditor({ open, mission, onSave, onDelete, onClose }: Miss
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [status, setStatus] = useState<MissionStatus | undefined>(undefined);
 
+  // Reset on open or on a different mission - not on every new `mission` object, since a status
+  // move saves and hands back an updated one, and that must not wipe edits typed so far.
+  const missionId = mission?.id;
   useEffect(() => {
     if (!open) return;
     setForm(mission ? formFromMission(mission) : EMPTY_FORM);
+    setStatus(mission?.status);
     setError(null);
     setConfirmingDelete(false);
-  }, [open, mission]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, missionId]);
 
   const handleSave = async () => {
     if (!form.name.trim() || busy) return;
@@ -106,7 +144,6 @@ export function MissionEditor({ open, mission, onSave, onDelete, onClose }: Miss
         name: form.name.trim(),
         notes: form.notes,
         description: form.description.trim(),
-        status: form.status || undefined,
         scope: linesToList(form.scope),
         outOfScope: linesToList(form.outOfScope),
         rules: form.rules.trim(),
@@ -114,6 +151,21 @@ export function MissionEditor({ open, mission, onSave, onDelete, onClose }: Miss
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save mission");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Status moves apply at once - they are decisions about the mission, not edits to the form.
+  const handleStatus = async (to: MissionStatus) => {
+    if (!mission || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onSave(mission.id, { status: to });
+      setStatus(to);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to change the status");
     } finally {
       setBusy(false);
     }
@@ -167,26 +219,24 @@ export function MissionEditor({ open, mission, onSave, onDelete, onClose }: Miss
       </Field>
 
       {mission && (
-        <Field label="Status">
-          <select
-            value={form.status}
-            disabled={busy}
-            onChange={(e) => setForm((f) => ({ ...f, status: e.target.value as MissionStatus | "" }))}
-            className={TEXT_INPUT_CLASS}
-          >
-            <option value="">Unset</option>
-            {STATUS_OPTIONS.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
+        <div className="mb-4">
+          <span className="mb-1.5 block text-xs font-medium text-muted">Status</span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <StatusPill tone="neutral">
+              {status ?? "not started"}
+            </StatusPill>
+            {statusActions(status).map((a) => (
+              <Button key={a.label} variant="secondary" size="sm" icon={a.icon} disabled={busy} onClick={() => handleStatus(a.to)}>
+                {a.label}
+              </Button>
             ))}
-          </select>
-        </Field>
+          </div>
+        </div>
       )}
 
       <Field
         label="Scope"
-        hint='One target per line - domains, "*.sub.example.com" wildcards, bare IPs, CIDR ranges, or URLs. Tool executions against a target outside this list are automatically blocked.'
+        hint='One target per line - domains, "*.sub.example.com" wildcards, bare IPs, CIDR ranges, or URLs. Tool executions against a target outside this list are automatically blocked. Ports and paths are not enforced yet.'
       >
         <textarea
           placeholder={"example.com\n*.example.com\n10.0.0.0/24"}
@@ -197,6 +247,7 @@ export function MissionEditor({ open, mission, onSave, onDelete, onClose }: Miss
           className={cn(TEXT_INPUT_CLASS, "resize-none font-mono")}
         />
       </Field>
+      <ScopeCheck text={form.scope} label="Scope" />
 
       <Field label="Out of scope" hint="Same format as Scope - checked first, always wins over a broader Scope match.">
         <textarea
@@ -208,6 +259,7 @@ export function MissionEditor({ open, mission, onSave, onDelete, onClose }: Miss
           className={cn(TEXT_INPUT_CLASS, "resize-none font-mono")}
         />
       </Field>
+      <ScopeCheck text={form.outOfScope} label="Out of scope" />
 
       <Field label="Rules of engagement">
         <textarea
@@ -220,7 +272,7 @@ export function MissionEditor({ open, mission, onSave, onDelete, onClose }: Miss
         />
       </Field>
 
-      {error && <p className="mb-3 text-xs text-critical">{error}</p>}
+      {error && <Notice className="mb-3">{error}</Notice>}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Button variant="primary" size="sm" onClick={handleSave} disabled={busy || !form.name.trim()}>

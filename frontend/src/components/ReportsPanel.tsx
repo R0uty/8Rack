@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Download, FileText, Trash2 } from "lucide-react";
 import { Markdown } from "./Markdown";
-import { Button, GlassPanel, IconButton, SELECT_CLASS, Sheet, Skeleton } from "./ui";
+import { Button, EmptyState, GlassPanel, IconButton, SELECT_CLASS, Sheet, Skeleton, Notice } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
+import { useAppNav } from "../lib/appNav";
 import type { Report, ReportStatus } from "../types/report";
 
 interface ReportsPanelProps {
@@ -35,16 +36,17 @@ function exportMarkdown(report: Report): void {
  * `useTools()` call, rather than each fetching its own copy.
  */
 export function ReportsPanel({ reports, loading, error, onDelete, onChangeStatus }: ReportsPanelProps) {
+  const { openView } = useAppNav();
   const [openReport, setOpenReport] = useState<Report | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   if (loading && reports.length === 0) return <Skeleton className="h-24 w-full" />;
-  if (error) return <p className="text-xs text-critical">{error}</p>;
+  if (error) return <Notice>{error}</Notice>;
   if (reports.length === 0) {
     return (
-      <p className="text-xs text-muted">
-        No reports yet - select findings on the Findings page to generate one.
-      </p>
+      <EmptyState icon={FileText} title="No reports yet" action={{ label: "Open Findings", onClick: openView && (() => openView("findings")) }}>
+        A report is written from confirmed findings. Select them on the Findings page and choose Generate report.
+      </EmptyState>
     );
   }
 

@@ -2,6 +2,8 @@ import { Router } from "express";
 import { createMission, deleteMission, getMission, listMissions, updateMission } from "../services/missionManager.js";
 import { getRunState, startRun, stopRun } from "../services/missionRunner.js";
 import { subscribeMission } from "../services/missionEvents.js";
+import { previewAdvance } from "../services/factoryDirector.js";
+import { getMissionAttention } from "../services/missionAttention.js";
 import { listActivity, logActivity } from "../services/activityLog.js";
 import { MissionNotFoundError } from "../services/errors.js";
 import type { MissionStatus } from "../types/mission.js";
@@ -208,6 +210,25 @@ missionsRouter.post("/:id/factory/stop", async (req, res, next) => {
 
 missionsRouter.get("/:id/factory/run", (req, res) => {
   res.json({ run: getRunState(req.params.id) });
+});
+
+/** What the next Advance would do, without doing it - see factoryDirector.ts#previewAdvance. */
+missionsRouter.get("/:id/factory/preview", async (req, res, next) => {
+  try {
+    res.json({ preview: await previewAdvance(req.params.id) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Everything waiting on a human, with context for each item - see services/missionAttention.ts. */
+missionsRouter.get("/:id/attention", async (req, res, next) => {
+  try {
+    await requireExistingMission(req.params.id);
+    res.json({ attention: getMissionAttention(req.params.id) });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /** How often an idle event stream gets a blank line, so a dead connection is noticed and closed. */

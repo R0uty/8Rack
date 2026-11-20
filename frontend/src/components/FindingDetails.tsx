@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, ShieldAlert, Sparkles } from "lucide-react";
-import { Button, Sheet, StatusDot, StatusPill, type Tone } from "./ui";
+import { Button, Sheet, StatusDot, StatusPill, type Tone, Notice } from "./ui";
 import { streamChat } from "../services/chatApi";
 import { lookupCves } from "../services/findingsApi";
 import { FINDING_STATUSES, STATUS_TONE, STATUS_VERB } from "../lib/findingStatus";
@@ -232,7 +232,7 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
                 </Button>
               ))}
             </div>
-            {statusError && <p className="mt-1.5 text-xs text-critical">{statusError}</p>}
+            {statusError && <Notice className="mt-1.5">{statusError}</Notice>}
           </div>
 
           <div className="mb-4">
@@ -271,7 +271,7 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
               <Button variant="secondary" size="sm" onClick={handleSaveDetails} disabled={detailsBusy || !detailsDirty}>
                 {detailsBusy ? "Saving…" : "Save details"}
               </Button>
-              {detailsError && <p className="text-xs text-critical">{detailsError}</p>}
+              {detailsError && <Notice>{detailsError}</Notice>}
             </div>
           </div>
 
@@ -281,7 +281,7 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
                 {checkingCves ? "Checking…" : "Check for CVEs"}
               </Button>
               <p className="mt-1.5 text-[11px] text-muted">Queries the public NVD database at nvd.nist.gov.</p>
-              {cveError && <p className="mt-1.5 text-xs text-critical">{cveError}</p>}
+              {cveError && <Notice className="mt-1.5">{cveError}</Notice>}
               {cveFoundCount !== null && !cveError && (
                 <p className="mt-1.5 text-xs text-muted">
                   {cveFoundCount === 0 ? "No CVEs found." : `Found ${cveFoundCount} CVE${cveFoundCount === 1 ? "" : "s"} - see Related Findings below.`}
@@ -390,7 +390,7 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
             <Button variant="secondary" size="sm" icon={Sparkles} onClick={handleExplain} disabled={explaining}>
               {explaining ? "Explaining…" : "Explain with AI"}
             </Button>
-            {explainError && <p className="mt-2 text-xs text-critical">{explainError}</p>}
+            {explainError && <Notice className="mt-2">{explainError}</Notice>}
             {explanation && (
               <div className="mt-2 rounded-lg border border-border bg-surface-2 p-2.5 text-sm text-text">{explanation}</div>
             )}

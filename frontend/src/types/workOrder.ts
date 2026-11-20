@@ -20,6 +20,8 @@ export interface WorkOrder {
   retryOf?: string;
   /** Completed without the agent calling any tool - nothing was run or recorded. */
   noOutcome?: boolean;
+  /** Tool calls its task has made so far, as of the last sync. */
+  toolCallCount?: number;
 }
 
 export type WorkOrderCreateInput = Pick<WorkOrder, "agentId" | "objective"> &

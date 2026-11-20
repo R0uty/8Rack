@@ -117,6 +117,7 @@ function isTerminal(status: WorkOrder["status"]): boolean {
 function syncFromTask(wo: WorkOrder, task: OrchestratorTask): WorkOrder {
   wo.status = statusFromTask(task.status);
   wo.orchestratorTaskId = task.id;
+  wo.toolCallCount = task.toolCallCount;
   if (isTerminal(wo.status)) {
     wo.completedAt ??= Date.now();
     wo.result = task.finalResponse ?? task.error;

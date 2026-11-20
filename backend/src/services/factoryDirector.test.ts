@@ -5,7 +5,7 @@ import { listAssets, upsertAsset } from "./assetManager.js";
 import { getMissionFindings } from "./findingsManager.js";
 import { createWorkOrder, dependenciesSatisfied, listWorkOrders, resumeWorkOrderIfReady, startWorkOrder, workOrderNeedsGuidance } from "./workOrderManager.js";
 import { MissionNotFoundError } from "./errors.js";
-import { advanceMission } from "./factoryDirector.js";
+import { advanceMission, previewAdvance } from "./factoryDirector.js";
 import type { Mission } from "../types/mission.js";
 import type { Asset } from "../types/asset.js";
 import type { Finding } from "../types/finding.js";
@@ -562,3 +562,48 @@ describe("advanceMission - an order waiting on a human note", () => {
   });
 });
 
+
+describe("previewAdvance", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockDependenciesSatisfied.mockReturnValue(true);
+  });
+
+  it("names the Recon order Advance would create, without creating it", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission());
+    mockListAssets.mockReturnValue([]);
+    mockGetMissionFindings.mockReturnValue([]);
+    mockListWorkOrders.mockReturnValue([]);
+
+    const preview = await previewAdvance("mission-1");
+
+    expect(preview.next).toMatchObject({ agentId: "recon-agent", target: "example.com", existing: false });
+    expect(mockCreateWorkOrder).not.toHaveBeenCalled();
+  });
+
+  it("prefers an existing pending order of higher priority", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission());
+    mockListAssets.mockReturnValue([fixtureAsset({ type: "port", value: "80/tcp" })]);
+    mockGetMissionFindings.mockReturnValue([]);
+    mockListWorkOrders.mockReturnValue([
+      { id: "wo-1", missionId: "mission-1", agentId: "recon-agent", objective: "Recon", target: "example.com", status: "pending", priority: 10, dependencies: [], createdAt: 1, relatedAssets: [], relatedFindings: [] },
+    ]);
+
+    expect((await previewAdvance("mission-1")).next).toMatchObject({ agentId: "recon-agent", existing: true });
+  });
+
+  it("explains why nothing would run, with the counts a human needs", async () => {
+    mockGetMission.mockResolvedValue(fixtureMission({ status: "paused" }));
+    mockListAssets.mockReturnValue([]);
+    mockGetMissionFindings.mockReturnValue([fixtureFinding({ status: "confirmed" })]);
+    mockListWorkOrders.mockReturnValue([]);
+
+    const preview = await previewAdvance("mission-1");
+    expect(preview.next).toBeUndefined();
+    expect(preview.blockedReason).toMatch(/paused/);
+    expect(preview.confirmedFindings).toBe(1);
+
+    mockGetMission.mockResolvedValue(fixtureMission({ scope: [] }));
+    expect((await previewAdvance("mission-1")).blockedReason).toMatch(/no scope/);
+  });
+});

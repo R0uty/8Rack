@@ -122,6 +122,20 @@ export async function updateAsset(id: string, patch: AssetPatchInput): Promise<A
   return asset;
 }
 
+/** Removes an asset a human added by mistake, or one that isn't real. Its children keep existing
+ * but lose the link to it. */
+export async function deleteAsset(id: string): Promise<Asset> {
+  const asset = assets.get(id);
+  if (!asset) throw new AssetNotFoundError(id);
+  assets.delete(id);
+  for (const other of assets.values()) {
+    if (other.parentId === id) delete other.parentId;
+  }
+  await persistAssets(asset.missionId);
+  await logActivity(asset.missionId, "asset_removed", `${asset.type} removed: ${asset.value}`, { assetId: id, type: asset.type });
+  return asset;
+}
+
 export function getAsset(id: string): Asset | undefined {
   return assets.get(id);
 }

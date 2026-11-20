@@ -26,7 +26,7 @@ describe("ReportsView", () => {
     });
 
     render(<ReportsView mission={null} />);
-    expect(screen.getByText(/Create a mission/)).toBeInTheDocument();
+    expect(screen.getByText(/No mission selected/)).toBeInTheDocument();
     expect(screen.queryByTestId("reports-panel")).not.toBeInTheDocument();
   });
 

@@ -116,3 +116,34 @@ describe("FindingsTable", () => {
     expect(screen.getByRole("checkbox", { name: "Deselect all visible findings" })).toBeChecked();
   });
 });
+
+describe("FindingsTable sorting", () => {
+  const rows = () => screen.getAllByRole("row").slice(1).map((r) => r.textContent ?? "");
+  const order = () => rows().map((r) => ["Critical", "Medium", "Low"].find((n) => r.includes(`${n} one`)));
+
+  it("sorts by severity worst-first on the first click, then flips, and says so to assistive tech", async () => {
+    renderTable({
+      findings: [
+        fixtureFinding({ id: "a", title: "Low one", severity: "low" }),
+        fixtureFinding({ id: "b", title: "Critical one", severity: "critical" }),
+        fixtureFinding({ id: "c", title: "Medium one", severity: "medium" }),
+      ],
+    });
+    const user = userEvent.setup();
+    const header = screen.getByRole("button", { name: /Severity/ });
+
+    await user.click(header);
+    expect(order()).toEqual(["Critical", "Medium", "Low"]);
+    expect(header.closest("th")).toHaveAttribute("aria-sort", "descending");
+
+    await user.click(header);
+    expect(order()).toEqual(["Low", "Medium", "Critical"]);
+    expect(header.closest("th")).toHaveAttribute("aria-sort", "ascending");
+  });
+
+  it("sorts text columns A-Z first", async () => {
+    renderTable({ findings: [fixtureFinding({ id: "a", title: "Zeta" }), fixtureFinding({ id: "b", title: "Alpha" })] });
+    await userEvent.setup().click(screen.getByRole("button", { name: /Title/ }));
+    expect(rows()[0]).toContain("Alpha");
+  });
+});
