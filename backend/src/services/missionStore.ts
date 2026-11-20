@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { InvalidMissionIdError } from "./errors.js";
@@ -23,14 +23,21 @@ export function missionDir(id: string): string {
   return path.join(MISSIONS_DIR, id);
 }
 
-/** Directory names under MISSIONS_DIR, i.e. every mission id that has ever been created. */
+/** Directory names under MISSIONS_DIR that hold a mission, i.e. every mission that still exists. */
 export async function listMissionIds(): Promise<string[]> {
   try {
     const entries = await readdir(MISSIONS_DIR, { withFileTypes: true });
     // Anything else in here (a stray directory, a backup copy) isn't a mission - left in, missionDir
     // would reject it and that one directory would fail every listMissions() and all of startup
     // hydration.
-    return entries.filter((e) => e.isDirectory() && MISSION_ID_PATTERN.test(e.name)).map((e) => e.name);
+    const candidates = entries.filter((e) => e.isDirectory() && MISSION_ID_PATTERN.test(e.name)).map((e) => e.name);
+    // A UUID-named directory with no mission.json is history left behind by something that wrote to a
+    // mission that never existed (before requireMission) - loading it would hydrate records, even
+    // pending approvals, for a mission no view can select.
+    const hasMeta = await Promise.all(
+      candidates.map((id) => access(path.join(MISSIONS_DIR, id, "mission.json")).then(() => true, () => false)),
+    );
+    return candidates.filter((_, i) => hasMeta[i]);
   } catch {
     return [];
   }

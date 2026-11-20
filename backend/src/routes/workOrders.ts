@@ -17,6 +17,7 @@ interface CreateWorkOrderBody {
   dependencies?: unknown;
   relatedAssets?: unknown;
   relatedFindings?: unknown;
+  retryOf?: unknown;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -31,6 +32,13 @@ export const missionWorkOrdersRouter = Router({ mergeParams: true });
 function missionIdOf(req: { params: Record<string, string> }): string {
   return req.params.missionId;
 }
+
+// Every :workOrderId route is checked against the mission in its own path - otherwise any order could
+// be started or cancelled through any mission's URL.
+missionWorkOrdersRouter.param("workOrderId", (req, _res, next, id: string) => {
+  const workOrder = getWorkOrder(id);
+  next(workOrder && workOrder.missionId === req.params.missionId ? undefined : new WorkOrderNotFoundError(id));
+});
 
 missionWorkOrdersRouter.get("/", (req, res) => {
   res.json({ workOrders: listWorkOrders(missionIdOf(req)) });
@@ -66,8 +74,16 @@ missionWorkOrdersRouter.post("/", async (req, res, next) => {
     res.status(400).json({ error: "relatedFindings must be an array of strings", code: "INVALID_REQUEST" });
     return;
   }
+  if (body.retryOf !== undefined) {
+    const original = typeof body.retryOf === "string" ? getWorkOrder(body.retryOf) : undefined;
+    if (!original || original.missionId !== missionIdOf(req)) {
+      res.status(400).json({ error: "retryOf must be the id of a work order in this mission", code: "INVALID_REQUEST" });
+      return;
+    }
+  }
   try {
     const workOrder = await createWorkOrder(missionIdOf(req), {
+      retryOf: body.retryOf as string | undefined,
       agentId: body.agentId,
       objective: body.objective,
       target: body.target as string | undefined,
@@ -82,13 +98,8 @@ missionWorkOrdersRouter.post("/", async (req, res, next) => {
   }
 });
 
-missionWorkOrdersRouter.get("/:workOrderId", (req, res, next) => {
-  const workOrder = getWorkOrder(req.params.workOrderId);
-  if (!workOrder || workOrder.missionId !== missionIdOf(req)) {
-    next(new WorkOrderNotFoundError(req.params.workOrderId));
-    return;
-  }
-  res.json({ workOrder });
+missionWorkOrdersRouter.get("/:workOrderId", (req, res) => {
+  res.json({ workOrder: getWorkOrder(req.params.workOrderId) });
 });
 
 missionWorkOrdersRouter.post("/:workOrderId/start", async (req, res, next) => {

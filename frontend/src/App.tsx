@@ -11,6 +11,7 @@ import { WorkOrdersView } from "./components/WorkOrdersView";
 import { ReportsView } from "./components/ReportsView";
 import { AgentsView } from "./components/AgentsView";
 import { ToolsView } from "./components/ToolsView";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useModels } from "./hooks/useModels";
 import { useAgents } from "./hooks/useAgents";
 import { useMissions } from "./hooks/useMissions";
@@ -73,8 +74,13 @@ function App() {
     selectMission((await createMission(name, notes, fields)).id);
   };
 
+  // Each view gets its own boundary, so one view's render error leaves the others (and the sidebar) working.
   const view = (name: AppView, content: ReactNode) =>
-    visitedViews.has(name) && <div className={cn("h-full", activeView !== name && "hidden")}>{content}</div>;
+    visitedViews.has(name) && (
+      <div className={cn("h-full", activeView !== name && "hidden")}>
+        <ErrorBoundary resetKey={mission?.id}>{content}</ErrorBoundary>
+      </div>
+    );
 
   return (
     <>

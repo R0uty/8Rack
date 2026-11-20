@@ -93,6 +93,9 @@ export interface Finding {
   /** The agent id that most recently validated this finding (see orchestrator.ts's validate_finding
    * pseudo-tool) - undefined until a validator has actually reviewed it. */
   validatedBy?: string;
+  /** The completed tool runs in the task that gave the agent's verdict. Empty means the agent decided
+   * without running anything; undefined means no agent verdict (or one recorded before this existed). */
+  validationExecutionIds?: string[];
   firstSeenAt: number;
   lastSeenAt: number;
   createdAt: number;

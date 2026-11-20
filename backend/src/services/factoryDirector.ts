@@ -6,6 +6,7 @@ import { getMissionFindings } from "./findingsManager.js";
 import { createWorkOrder, dependenciesSatisfied, listWorkOrders, resumeWorkOrderIfReady, startWorkOrder, workOrderNeedsGuidance } from "./workOrderManager.js";
 import { logActivity } from "./activityLog.js";
 import { MissionNotFoundError } from "./errors.js";
+import { VALIDATOR_AGENT_ID } from "./orchestrator.js";
 import type { ChunkListener } from "./orchestrator.js";
 import type { Mission, MissionStatus } from "../types/mission.js";
 import type { Asset } from "../types/asset.js";
@@ -28,7 +29,6 @@ import type { WorkOrder } from "../types/workOrder.js";
 
 const RECON_AGENT_ID = "recon-agent";
 const WEB_ANALYZER_AGENT_ID = "web-analyzer";
-const VALIDATOR_AGENT_ID = "vulnerability-validator";
 
 /** Asset types worth an Enumeration work order - a port/service/api/technology is already the
  * *result* of enumerating a host, not something to enumerate further. */
@@ -153,7 +153,7 @@ async function seedWorkOrders(
       agentId: VALIDATOR_AGENT_ID,
       objective:
         `Validate finding "${finding.title}" (id: ${finding.id}, target: ${finding.target}) for this ` +
-        "mission. Use query_findings to review its full evidence, assess reproducibility, whether the " +
+        `mission. Call query_findings with ["${finding.id}"] for its full evidence, then reproduce it with a real tool. Assess reproducibility, whether the ` +
         "target is actually in scope, whether the evidence is sufficient, whether the impact is " +
         "realistic, and whether this is likely a duplicate - then call validate_finding with your verdict.",
       target: finding.target,

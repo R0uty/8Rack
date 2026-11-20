@@ -352,6 +352,14 @@ describe("writeMissionJson durability", () => {
     fakeFs.files.set(`${MISSIONS_DIR}/.Trash-1000/mission.json`, "{}");
     expect(await listMissionIds()).not.toContain(".Trash-1000");
   });
+
+  it("skips a mission-shaped directory that has history but no mission.json", async () => {
+    await writeMissionJson(VALID_PROJ_ID, "executions.json", [{ id: "orphan" }]);
+    expect(await listMissionIds()).not.toContain(VALID_PROJ_ID);
+
+    fakeFs.files.set(`${MISSIONS_DIR}/${VALID_PROJ_ID}/mission.json`, "{}");
+    expect(await listMissionIds()).toContain(VALID_PROJ_ID);
+  });
 });
 
 describe("readMissionMeta (via getMission) logs a warning for invalid mission.json", () => {

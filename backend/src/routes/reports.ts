@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { RequestCancelledError } from "../services/errors.js";
+import { ReportNotFoundError, RequestCancelledError } from "../services/errors.js";
 import { createReport, deleteReport, getReport, listReports, updateReportStatus } from "../services/reportManager.js";
 import { abortOnClientDisconnect } from "./streamUtils.js";
 import type { ReportStatus } from "../types/report.js";
@@ -15,6 +15,12 @@ export const missionReportsRouter = Router({ mergeParams: true });
 function missionIdOf(req: { params: Record<string, string> }): string {
   return req.params.missionId;
 }
+
+// A report id is only valid under its own mission's path - see routes/workOrders.ts for the same check.
+missionReportsRouter.param("id", (req, _res, next, id: string) => {
+  const report = getReport(id);
+  next(report && report.missionId === req.params.missionId ? undefined : new ReportNotFoundError(id));
+});
 
 interface CreateReportBody {
   title?: unknown;
@@ -42,12 +48,7 @@ missionReportsRouter.get("/", (req, res) => {
 });
 
 missionReportsRouter.get("/:id", (req, res) => {
-  const report = getReport(req.params.id);
-  if (!report) {
-    res.status(404).json({ error: `Report "${req.params.id}" was not found`, code: "REPORT_NOT_FOUND" });
-    return;
-  }
-  res.json({ report });
+  res.json({ report: getReport(req.params.id) });
 });
 
 /**

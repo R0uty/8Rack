@@ -216,6 +216,25 @@ describe("requestExecution validation", () => {
     expect(record.status).toBe("pending_confirmation");
   });
 
+  it("doesn't refuse a URL whose path happens to contain an escalation verb", async () => {
+    for (const url of ["https://example.com/su/", "https://example.com/admin/sudo", "http://su.example.com/"]) {
+      const record = await requestExecution({ tool: "test-tool", arguments: ["-s", url], missionId: "p" });
+      expect(record.status).toBe("pending_confirmation");
+    }
+  });
+
+  it("still rejects an escalation verb given by path or inside a subshell", async () => {
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["-c", "bin/sudo whoami"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["-c", "echo $(sudo id)"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+    await expect(
+      requestExecution({ tool: "test-tool", arguments: ["-c", "true&&su -"], missionId: "p" }),
+    ).rejects.toThrow(PrivilegedCommandError);
+  });
+
   it("rejects setsid, since its child would escape process-group cancellation (A4)", async () => {
     await expect(
       requestExecution({ tool: "test-tool", arguments: ["setsid", "sudo", "whoami"], missionId: "p" }),

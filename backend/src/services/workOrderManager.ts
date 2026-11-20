@@ -72,6 +72,7 @@ export async function createWorkOrder(missionId: string, input: WorkOrderCreateI
     createdAt: Date.now(),
     relatedAssets: input.relatedAssets ?? [],
     relatedFindings: input.relatedFindings ?? [],
+    ...(input.retryOf ? { retryOf: input.retryOf } : {}),
   };
   workOrders.set(wo.id, wo);
   await persistWorkOrders(missionId);
@@ -120,6 +121,8 @@ function syncFromTask(wo: WorkOrder, task: OrchestratorTask): WorkOrder {
     wo.completedAt ??= Date.now();
     wo.result = task.finalResponse ?? task.error;
   }
+  if (wo.status === "completed" && task.toolCallCount === 0) wo.noOutcome = true;
+  else delete wo.noOutcome;
   return wo;
 }
 
@@ -278,8 +281,9 @@ export function cancelWorkOrder(id: string): WorkOrder {
   wo.status = "cancelled";
   wo.completedAt = Date.now();
   // Fire-and-forget: same synchronous-route tradeoff as orchestrator.ts#cancelTask/
-  // multiAgentOrchestrator.ts#cancelPlan.
+  // multiAgentOrchestrator.ts#cancelPlan. logActivity never throws.
   void persistWorkOrders(wo.missionId).catch((err) => console.error("[workOrderManager] persist failed:", err));
+  void logActivity(wo.missionId, "work_order_cancelled", `Work order cancelled: ${wo.objective}`, { workOrderId: wo.id });
   return wo;
 }
 

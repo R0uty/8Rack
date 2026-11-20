@@ -180,6 +180,21 @@ export function FindingDetails({ finding, findings, onClose, onUpdate, onSelectR
             <StatusPill tone={STATUS_TONE[finding.status]}>{STATUS_VERB[finding.status]}</StatusPill>
           </div>
 
+          {finding.validatedBy && finding.validationExecutionIds && (
+            <p
+              className={cn(
+                "mb-4 rounded-lg border px-2.5 py-2 text-xs",
+                finding.validationExecutionIds.length === 0
+                  ? "border-warning/30 bg-warning-dim text-warning"
+                  : "border-border text-muted",
+              )}
+            >
+              {finding.validationExecutionIds.length === 0
+                ? `Unverified: ${finding.validatedBy} gave this verdict without running any tool. Check the evidence before relying on it.`
+                : `Verdict by ${finding.validatedBy}, after ${finding.validationExecutionIds.length} tool run${finding.validationExecutionIds.length === 1 ? "" : "s"}.`}
+            </p>
+          )}
+
           {finding.description && <p className="mb-4 text-sm text-text">{finding.description}</p>}
 
           <div className="mb-4 grid grid-cols-2 gap-3">

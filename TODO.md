@@ -1310,6 +1310,9 @@ fixed and why. Deliberately left open:
 - [ ] **The validator rubber-stamps.** In live runs on `qwen2.5-coder:7b` it wrote "Reproduced using
       nmap" without running anything, and confirmed a misidentified `ppp?` service. `confirmed` currently
       means an agent said so - consider requiring a tool execution in that task before accepting it.
+      **Partly addressed 2026-11-20 (PLAN.md 1.8):** a verdict is still accepted, but the finding now
+      records which completed runs it rests on, and the UI labels one with none as unverified. Not
+      re-checked live whether the validator now runs something first.
 - [ ] **Scope has no port or path granularity, and `rules` is only advisory.** Given scope `127.0.0.1`
       and rules naming one port, the recon agent scanned the host's top 1000 ports. Scope enforcement
       passed it, correctly by its own definition.
@@ -1321,8 +1324,8 @@ fixed and why. Deliberately left open:
       `upsertAsset` now merges them. A service still can (`8080` next to `8080/tcp:http`).
 - [ ] Time cap is checked between generations, not during one (the per-chunk idle timeout covers a
       hung model; a slow-but-streaming reply can overrun by one generation).
-- [ ] Scan and report `GET`/`PATCH` routes look ids up across missions without checking the id in the
-      path belongs to that mission.
+- [x] Scan and report `GET`/`PATCH` routes look ids up across missions without checking the id in the
+      path belongs to that mission. Fixed 2026-11-20 for scans, reports and work orders (PLAN.md 1.3).
 - [ ] `InvalidToolArgumentsError` messages include absolute paths (local-only app, low impact).
 - [ ] An IPv4-mapped IPv6 target isn't matched against an IPv4 `outOfScope` entry.
 - [ ] Prompt injection is reduced, not solved: report prompts now mark finding data as untrusted, and
@@ -1345,12 +1348,13 @@ Left open by the live run - see DEVELOPMENT.md's "End-to-end mission run":
       output. It now sits next to the label that says so, but nothing checks the prose itself.
 - [ ] **Report remediation loses code blocks.** Sanitizing removes all of them, so a genuine config
       snippet goes too. Accepted for now - a lost snippet costs less than a fake scan result.
-- [ ] **Validators and other agents confirm too easily.** Same root as "The validator rubber-stamps"
+- [ ] **Validators and other agents confirm too easily.** (`validate_finding` is now offered to and
+      accepted from the validator only, 2026-11-20 - the "confirm too easily" part is the item above.) Same root as "The validator rubber-stamps"
       above: "Outdated Python" was confirmed as high, and `backup` was marked duplicate. Non-validator
       agents can also call `validate_finding` - the Web Analyzer confirmed a port finding and raised it
       to medium. Offer that tool to the validator only.
-- [ ] A failed order still counts toward the dashboard's "work orders failed" banner after a successful
-      Retry.
+- [x] A failed order still counts toward the dashboard's "work orders failed" banner after a successful
+      Retry. Fixed 2026-11-20: a retry records `retryOf`, and a retried order isn't counted (PLAN.md 1.10).
 - [ ] Agents ask for scans already done, and a rejected tool is often just requested again.
 
 ## MCP tool and RAG providers (planned 2026-11-08)
@@ -1393,7 +1397,7 @@ Steps:
       is now sent on every call. See "Fixed: every agent call ran in a 2048-token context window".
 - [ ] **Rerun a full mission with the larger context window.** Earlier live runs were all under the
       2048-token window; agents may now behave noticeably differently (better tool use, fewer refusals).
-- [ ] **Trim the knowledge-base tool result.** `runKnowledgeBaseSearch` sends the results twice
+- [x] **Trim the knowledge-base tool result.** Done 2026-11-20 for every pseudo-tool (PLAN.md 1.7). `runKnowledgeBaseSearch` sends the results twice
       (`stdout` and `parsedOutput`) inside JSON, about 17k characters for 5 results - roughly double the
       tokens needed. Not the cause of the refusal, but it eats context.
 - [ ] **Remove the local index** (`ragIndex.ts`, `backend/data/rag/`, the `ollama.ts` embedding call)
@@ -1424,3 +1428,15 @@ Steps:
 - [ ] **Later, separately:** consider Ollama's native tool-calling for MCP tools instead of the
       plain-text convention.
 
+
+## Review and fix plan (2026-11-09)
+
+Whole-project review covering fixes, UI, usability and backend: see `PLAN.md`. Phase 1 (small fixes)
+is done as of 2026-11-20, except 1.4/1.5, which moved into Phase 2 - see DEVELOPMENT.md's "Phase 1
+fixes (2026-11-20)". Next is Phase 2: a factory run owned by the server instead of one browser tab's
+request, which the UI work depends on.
+
+- [ ] Delete `backend/data/missions/00000000-0000-0000-0000-000000000000/` by hand. It's skipped at
+      load now, but still on disk (local data, left for you).
+- [ ] Not seen live: the validator under the new `validate_finding` rules and the "no tool used" label
+      on a real order. Both are covered by tests only; check them on the next full mission run.

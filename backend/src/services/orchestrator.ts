@@ -92,6 +92,16 @@ const UPSERT_ASSET_TOOL = "upsert_asset";
 const VALIDATE_FINDING_TOOL = "validate_finding";
 const RECORDING_TOOLS = new Set([CREATE_FINDING_TOOL, UPSERT_ASSET_TOOL, VALIDATE_FINDING_TOOL]);
 
+/** The only agent offered validate_finding. Any agent could call it before, and the Web Analyzer
+ * confirmed and re-rated findings on its own while enumerating. */
+export const VALIDATOR_AGENT_ID = "vulnerability-validator";
+
+/** A pseudo-tool's successful result. Its text goes to the model once - an earlier version also sent
+ * the same records as `parsedOutput`, doubling the tokens for no new information. */
+function pseudoToolResult(tool: string, stdout: string): string {
+  return JSON.stringify({ tool, status: "completed", success: true, exitCode: 0, stdout: truncateForTranscript(stdout), stderr: "" });
+}
+
 /** Called with each piece of the agent's reply text as it streams in, for a live "thinking" UX. */
 export type ChunkListener = (content: string) => void;
 
@@ -223,7 +233,7 @@ function buildMissionContextLines(mission: Mission | undefined): string[] {
   return lines;
 }
 
-async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId: string): Promise<string> {
+async function buildToolsPreamble(agentId: string, agent: AgentWithStatus | undefined, missionId: string): Promise<string> {
   const allowed = agent?.execTools;
   // Only what can really run: a local model offered a tool that isn't installed will pick it, and the
   // failed request pauses the whole task for a human.
@@ -246,11 +256,11 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
     getMissionFindings(missionId).length > 0
       ? `- ${QUERY_FINDINGS_TOOL}: Query structured findings already discovered for this mission ` +
         "(ports, technologies, domains, vulnerabilities, etc.) instead of re-scanning or parsing raw " +
-        'tool output yourself. Arguments: [] for every finding, or a single-element array with a type ' +
+        'tool output yourself. Arguments: [] for every finding, a single-element array with a type ' +
         'to filter, e.g. {"tool": "' +
         QUERY_FINDINGS_TOOL +
-        '", "arguments": ["port"]}. Read-only and does not require approval - prefer this over rerunning ' +
-        "a scan you've already run."
+        '", "arguments": ["port"]}, or a finding id for its full description and evidence. Read-only and ' +
+        "does not require approval - prefer this over rerunning a scan you've already run."
       : undefined;
 
   const cveLine =
@@ -299,8 +309,9 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
     '\\"notes\\":\\"Reproduced against /search?q=<script>...; reflected unescaped in response body.\\"}"]}. ' +
     'Required: findingId, verdict (one of "confirmed", "false_positive", "duplicate"), notes (your ' +
     "reasoning - always required, even for a false_positive/duplicate verdict). Optional: severity " +
-    `(one of ${VALID_SEVERITIES.join(", ")}) if your review changes it. Does not require approval - it ` +
-    "records data, it doesn't execute anything.";
+    `(one of ${VALID_SEVERITIES.join(", ")}) if your review changes it. Reproduce the finding with a real ` +
+    "tool before confirming it - a verdict given without running anything in this task is shown to the " +
+    "human as unverified. Does not require approval - it records data, it doesn't execute anything.";
 
   let mission: Mission | undefined;
   try {
@@ -329,7 +340,7 @@ async function buildToolsPreamble(agent: AgentWithStatus | undefined, missionId:
     ...(cveLine ? [cveLine] : []),
     createFindingLine,
     upsertAssetLine,
-    validateFindingLine,
+    ...(agentId === VALIDATOR_AGENT_ID ? [validateFindingLine] : []),
   ].join("\n");
 }
 
@@ -428,7 +439,7 @@ async function collectAgentReply(
   signal?: AbortSignal,
 ): Promise<string> {
   let content = "";
-  const toolsPreamble = await buildToolsPreamble(agent, missionId);
+  const toolsPreamble = await buildToolsPreamble(agentId, agent, missionId);
   for await (const chunk of streamAgentChat({ agentId, messages, model, toolsPreamble }, signal)) {
     const piece = chunk.message?.content ?? "";
     if (piece) onChunk?.(piece);
@@ -476,15 +487,7 @@ async function runKnowledgeBaseSearch(args: string[]): Promise<string> {
 
   try {
     const results = await searchKnowledgeBase(query);
-    return JSON.stringify({
-      tool: SEARCH_KNOWLEDGE_BASE_TOOL,
-      status: "completed",
-      success: true,
-      exitCode: 0,
-      stdout: formatKnowledgeBaseResults(results),
-      stderr: "",
-      parsedOutput: results,
-    });
+    return pseudoToolResult(SEARCH_KNOWLEDGE_BASE_TOOL, formatKnowledgeBaseResults(results));
   } catch (err) {
     return JSON.stringify({
       tool: SEARCH_KNOWLEDGE_BASE_TOOL,
@@ -538,8 +541,28 @@ function parseJsonObjectArg(toolId: string, raw: string | undefined): { obj: Rec
 function formatFindingsResults(results: Finding[]): string {
   if (results.length === 0) return "(no findings recorded yet)";
   return results
-    .map((f) => `[${f.severity}] ${f.type} — ${f.title} (target: ${f.target}, confidence: ${f.confidence})`)
+    .map((f) => `${f.id} [${f.severity}] ${f.type} — ${f.title} (target: ${f.target}, value: ${f.value}, status: ${f.status})`)
     .join("\n");
+}
+
+const MAX_EVIDENCE_CHARS = 600;
+
+/** One finding in full - what a validator needs to judge it, which the one-line list leaves out. */
+function formatFindingDetail(f: Finding): string {
+  const clip = (text: string) => (text.length > MAX_EVIDENCE_CHARS ? `${text.slice(0, MAX_EVIDENCE_CHARS)}…` : text);
+  const lines = [
+    `${f.title} (id: ${f.id})`,
+    `type: ${f.type}, severity: ${f.severity}, status: ${f.status}, confidence: ${f.confidence}, source: ${f.source} (${f.tool})`,
+    `target: ${f.target}`,
+    `value: ${f.value}`,
+    ...(f.parameter ? [`parameter: ${f.parameter}`] : []),
+    `description: ${f.description}`,
+    ...(f.impact ? [`impact: ${f.impact}`] : []),
+    ...(f.reproductionSteps ? [`reproduction steps: ${f.reproductionSteps}`] : []),
+    `evidence (${f.evidence.length}):`,
+    ...f.evidence.map((e) => `- ${e.type}${e.executionId ? ` from execution ${e.executionId}` : ""}${e.agentId ? ` by ${e.agentId}` : ""}: ${clip(e.content)}`),
+  ];
+  return lines.join("\n");
 }
 
 /**
@@ -548,29 +571,21 @@ function formatFindingsResults(results: Finding[]): string {
  * generic tool-result UI renders it with zero frontend changes.
  */
 function runFindingsQuery(missionId: string, args: string[]): string {
-  const typeFilter = args[0];
-  if (typeFilter && !VALID_FINDING_TYPES.includes(typeFilter as FindingType)) {
+  const filter = args[0]?.trim();
+  const byId = filter ? getMissionFindings(missionId).find((f) => f.id === filter) : undefined;
+  if (byId) return pseudoToolResult(QUERY_FINDINGS_TOOL, formatFindingDetail(byId));
+
+  if (filter && !VALID_FINDING_TYPES.includes(filter as FindingType)) {
     return JSON.stringify({
       tool: QUERY_FINDINGS_TOOL,
       status: "failed",
       success: false,
-      message: `"${typeFilter}" isn't a known finding type. Valid types: ${VALID_FINDING_TYPES.join(", ")}.`,
+      message: `"${filter}" isn't a finding id in this mission or a known finding type. Valid types: ${VALID_FINDING_TYPES.join(", ")}.`,
     });
   }
 
-  const results = typeFilter
-    ? getMissionFindings(missionId).filter((f) => f.type === typeFilter)
-    : getMissionFindings(missionId);
-
-  return JSON.stringify({
-    tool: QUERY_FINDINGS_TOOL,
-    status: "completed",
-    success: true,
-    exitCode: 0,
-    stdout: formatFindingsResults(results),
-    stderr: "",
-    parsedOutput: results,
-  });
+  const results = filter ? getMissionFindings(missionId).filter((f) => f.type === filter) : getMissionFindings(missionId);
+  return pseudoToolResult(QUERY_FINDINGS_TOOL, formatFindingsResults(results));
 }
 
 /** Parses/validates the create_finding pseudo-tool's single JSON-string argument into a
@@ -642,15 +657,7 @@ async function runCreateFinding(missionId: string, agentId: string, args: string
 
   try {
     const finding = await createAgentFinding(missionId, agentId, parsed.input);
-    return JSON.stringify({
-      tool: CREATE_FINDING_TOOL,
-      status: "completed",
-      success: true,
-      exitCode: 0,
-      stdout: `Finding recorded: [${finding.severity}] ${finding.title} (id: ${finding.id})`,
-      stderr: "",
-      parsedOutput: finding,
-    });
+    return pseudoToolResult(CREATE_FINDING_TOOL, `Finding recorded: [${finding.severity}] ${finding.title} (id: ${finding.id})`);
   } catch (err) {
     return JSON.stringify({
       tool: CREATE_FINDING_TOOL,
@@ -709,15 +716,7 @@ async function runUpsertAsset(missionId: string, agentId: string, args: string[]
 
   try {
     const asset = await upsertAsset(missionId, { ...parsed.input, discoveredBy: agentId, source: "agent" });
-    return JSON.stringify({
-      tool: UPSERT_ASSET_TOOL,
-      status: "completed",
-      success: true,
-      exitCode: 0,
-      stdout: `Asset recorded: [${asset.type}] ${asset.value} (id: ${asset.id})`,
-      stderr: "",
-      parsedOutput: asset,
-    });
+    return pseudoToolResult(UPSERT_ASSET_TOOL, `Asset recorded: [${asset.type}] ${asset.value} (id: ${asset.id})`);
   } catch (err) {
     return JSON.stringify({
       tool: UPSERT_ASSET_TOOL,
@@ -772,7 +771,16 @@ function parseValidateFindingArgs(args: string[]): { input: ValidateFindingInput
  * of from another mission), and records the verdict via findingsManager.ts#validateFinding, same
  * tool-result envelope shape as every other pseudo-tool.
  */
-async function runValidateFinding(missionId: string, agentId: string, args: string[]): Promise<string> {
+async function runValidateFinding(task: OrchestratorTask, args: string[]): Promise<string> {
+  const { missionId, agentId } = task;
+  if (agentId !== VALIDATOR_AGENT_ID) {
+    return JSON.stringify({
+      tool: VALIDATE_FINDING_TOOL,
+      status: "failed",
+      success: false,
+      message: `${VALIDATE_FINDING_TOOL} is only available to the validator - record what you found with ${CREATE_FINDING_TOOL} instead.`,
+    });
+  }
   const parsed = parseValidateFindingArgs(args);
   if ("error" in parsed) {
     return JSON.stringify({ tool: VALIDATE_FINDING_TOOL, status: "failed", success: false, message: parsed.error });
@@ -800,22 +808,18 @@ async function runValidateFinding(missionId: string, agentId: string, args: stri
   }
 
   try {
+    // The real runs this task actually completed - what the verdict can rest on. None means the
+    // agent judged from what was already recorded, which the UI shows as unverified.
+    const ranExecutionIds = task.toolExecutionIds.filter((id) => getExecution(id)?.status === "completed");
     const finding = await validateFinding(
       parsed.input.findingId,
       agentId,
       parsed.input.verdict,
       parsed.input.notes,
       parsed.input.severity,
+      ranExecutionIds,
     );
-    return JSON.stringify({
-      tool: VALIDATE_FINDING_TOOL,
-      status: "completed",
-      success: true,
-      exitCode: 0,
-      stdout: `Finding ${finding.id} marked "${finding.status}" by ${agentId}`,
-      stderr: "",
-      parsedOutput: finding,
-    });
+    return pseudoToolResult(VALIDATE_FINDING_TOOL, `Finding ${finding.id} marked "${finding.status}" by ${agentId}`);
   } catch (err) {
     return JSON.stringify({
       tool: VALIDATE_FINDING_TOOL,
@@ -860,15 +864,7 @@ async function runLookupCves(missionId: string, args: string[]): Promise<string>
 
   try {
     const results = await lookupCvesByKeyword(missionId, keyword, target);
-    return JSON.stringify({
-      tool: LOOKUP_CVES_TOOL,
-      status: "completed",
-      success: true,
-      exitCode: 0,
-      stdout: formatCveResults(results),
-      stderr: "",
-      parsedOutput: results,
-    });
+    return pseudoToolResult(LOOKUP_CVES_TOOL, formatCveResults(results));
   } catch (err) {
     return JSON.stringify({
       tool: LOOKUP_CVES_TOOL,
@@ -1109,7 +1105,7 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
   if (toolRequest.tool === VALIDATE_FINDING_TOOL) {
     task.messages.push({
       role: "tool",
-      content: await runValidateFinding(task.missionId, task.agentId, toolRequest.arguments),
+      content: await runValidateFinding(task, toolRequest.arguments),
     });
     return advance(task, onChunk, signal);
   }

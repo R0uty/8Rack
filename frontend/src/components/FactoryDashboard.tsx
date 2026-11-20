@@ -9,7 +9,7 @@ import type { AppView } from "./layout";
 import { useAssets } from "../hooks/useAssets";
 import { useWorkOrders } from "../hooks/useWorkOrders";
 import { useFindings } from "../hooks/useFindings";
-import { useTools } from "../hooks/useTools";
+import { usePendingExecutions } from "../hooks/usePendingExecutions";
 import { useActivity } from "../hooks/useActivity";
 import { useReports } from "../hooks/useReports";
 import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
@@ -51,7 +51,7 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
   const { assets, refresh: refreshAssets } = useAssets(missionId);
   const { workOrders, refresh: refreshWorkOrders } = useWorkOrders(missionId);
   const { findings, refresh: refreshFindings } = useFindings(missionId);
-  const { executions, refresh: refreshTools } = useTools(missionId);
+  const { executions: pendingExecutions, error: pendingError, refresh: refreshPending } = usePendingExecutions(missionId);
   const { events, loading: activityLoading, error: activityError, refresh: refreshActivity } = useActivity(missionId);
   const { reports, generating, error: reportsError, refresh: refreshReports, generate: generateReport } = useReports(missionId);
 
@@ -81,7 +81,7 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
     refreshAssets();
     refreshWorkOrders();
     refreshFindings();
-    refreshTools();
+    refreshPending();
     refreshActivity();
     refreshReports();
   };
@@ -120,7 +120,9 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
   if (!mission) return <NoMission />;
 
   const activeWorkOrders = workOrders.filter((w) => w.status === "running" || w.status === "waiting_approval" || w.status === "queued").length;
-  const failedWorkOrders = workOrders.filter((w) => w.status === "failed").length;
+  // A failed order someone has since retried no longer needs attention - its retry carries on.
+  const retriedIds = new Set(workOrders.map((w) => w.retryOf).filter(Boolean));
+  const failedWorkOrders = workOrders.filter((w) => w.status === "failed" && !retriedIds.has(w.id)).length;
   const potentialFindings = findings.filter((f) => f.status === "potential" || f.status === "investigating").length;
   const reportableIds = findings.filter((f) => f.status === "confirmed").map((f) => f.id);
 
@@ -165,6 +167,7 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
       )}
       {advanceError && <p className="text-xs text-critical">{advanceError}</p>}
       {reportsError && <p className="text-xs text-critical">{reportsError}</p>}
+      {pendingError && <p className="text-xs text-critical">Couldn't load pending approvals: {pendingError}</p>}
       {failedWorkOrders > 0 && !blockedReason && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-critical/30 px-2.5 py-2 text-xs text-critical">
           {failedWorkOrders} work order{failedWorkOrders === 1 ? "" : "s"} failed.
@@ -184,7 +187,7 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
         </GlassPanel>
       )}
 
-      <ApprovalQueue missionName={mission.name} executions={executions} agents={agents} onSettled={handleApprovalSettled} />
+      <ApprovalQueue missionName={mission.name} executions={pendingExecutions} agents={agents} onSettled={handleApprovalSettled} />
 
       <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
         <StatTile label="Active work orders" value={activeWorkOrders} onClick={() => onOpenView?.("workorders")} />

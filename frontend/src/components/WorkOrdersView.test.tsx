@@ -152,6 +152,34 @@ describe("WorkOrdersView", () => {
     expect(start).toHaveBeenCalledWith("wo-2");
   });
 
+  it("shows why an order failed on the card itself, and links a retry to it", async () => {
+    const create = vi.fn().mockResolvedValue(fixtureWorkOrder({ id: "wo-2", status: "pending" }));
+    const start = vi.fn().mockResolvedValue(fixtureWorkOrder({ id: "wo-2", status: "running" }));
+    setup([fixtureWorkOrder({ id: "wo-1", status: "failed", result: 'model "qwen2.5-coder:7b" is not available locally' })], {
+      create,
+      start,
+    });
+
+    render(<WorkOrdersView mission={mission} />);
+    expect(screen.getByText(/is not available locally/)).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({ retryOf: "wo-1" })));
+  });
+
+  it("offers no second Retry for an order that was already retried", () => {
+    setup([fixtureWorkOrder({ id: "wo-2", status: "running", retryOf: "wo-1" }), fixtureWorkOrder({ id: "wo-1", status: "failed" })]);
+    render(<WorkOrdersView mission={mission} />);
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.getByText("retried")).toBeInTheDocument();
+  });
+
+  it("marks a completed order where the agent never used a tool", () => {
+    setup([fixtureWorkOrder({ status: "completed", noOutcome: true })]);
+    render(<WorkOrdersView mission={mission} />);
+    expect(screen.getByText("no tool used")).toBeInTheDocument();
+  });
+
   it("does not show Retry for a running or completed work order", async () => {
     setup([fixtureWorkOrder({ status: "completed" })]);
     render(<WorkOrdersView mission={mission} />);

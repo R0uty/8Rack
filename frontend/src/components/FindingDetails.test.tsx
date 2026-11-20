@@ -57,6 +57,25 @@ function setup(overrides: Partial<React.ComponentProps<typeof FindingDetails>> =
 }
 
 describe("FindingDetails", () => {
+  it("flags an agent verdict given without running any tool as unverified", () => {
+    setup({
+      finding: fixtureFinding({ status: "confirmed", validatedBy: "vulnerability-validator", validationExecutionIds: [] }),
+    });
+    expect(screen.getByText(/Unverified: vulnerability-validator gave this verdict without running any tool/)).toBeInTheDocument();
+  });
+
+  it("says how many runs a verdict rests on, and says nothing for a human's decision", () => {
+    setup({
+      finding: fixtureFinding({ status: "confirmed", validatedBy: "vulnerability-validator", validationExecutionIds: ["e1", "e2"] }),
+    });
+    expect(screen.getByText(/after 2 tool runs/)).toBeInTheDocument();
+  });
+
+  it("shows no verdict note when no agent gave one", () => {
+    setup({ finding: fixtureFinding({ status: "confirmed" }) });
+    expect(screen.queryByText(/Unverified|Verdict by/)).not.toBeInTheDocument();
+  });
+
   it("renders nothing (an empty sheet) when finding is null", () => {
     setup({ finding: null });
     expect(screen.queryByText("Reflected XSS in search")).not.toBeInTheDocument();

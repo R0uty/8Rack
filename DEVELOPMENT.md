@@ -3905,3 +3905,56 @@ captured request carried `num_ctx: 16384`, and no warning was logged.
 
 Not re-checked: earlier live mission runs (the end-to-end mission, report generation) were all done
 under the 2048-token window, so agent behaviour described for them may improve now.
+
+## Phase 1 fixes (2026-11-20)
+
+Phase 1 of `PLAN.md` (the 2026-11-09 review). Items 1.4 and 1.5 (an approved run dies with the tab
+that approved it; the Approval Queue shows no live output or cancel) were left for Phase 2, which
+replaces the request-bound run they depend on.
+
+- **Mission ownership on id routes (1.3).** `routes/workOrders.ts`, `reports.ts` and `scanners.ts` each
+  check, in a `router.param` handler, that the id in the path belongs to the `:missionId` in the path,
+  and 404 otherwise. Before, any work order could be started or cancelled, and any report or scan read,
+  changed or deleted, through any mission's URL.
+- **Activity order (1.2).** `activityLog.ts#logActivity` makes `createdAt` strictly increasing, so events
+  in the same millisecond (an order's "created" and "started" usually are) list in the order they
+  happened. Already-stored events keep their old order.
+- **Cancelled orders are logged (1.12)** as `work_order_cancelled`.
+- **Directories without `mission.json` are skipped (1.13).** `missionStore.ts#listMissionIds` checks for
+  it, so a directory left by a write to a mission that never existed (the local `00000000-…` one, with a
+  pending approval in it) is no longer loaded.
+- **Pseudo-tool results sent once (1.7).** `search_knowledge_base`, `query_findings`, `lookup_cves`,
+  `create_finding`, `upsert_asset` and `validate_finding` used to send their records twice (`stdout`
+  and an untruncated `parsedOutput`). They now send `stdout` only, through `truncateForTranscript`.
+  `query_findings` lists each finding's id, value and status, and given a finding id returns that
+  finding in full, evidence included - the validator's work order now tells it to do that, since the
+  list alone lacks the evidence it was asked to judge.
+- **`validate_finding` is the validator's only (1.8).** It's listed for, and accepted from,
+  `VALIDATOR_AGENT_ID` (`vulnerability-validator`) only. A verdict stores `validationExecutionIds`: the
+  completed real runs in that task. Empty means the agent judged without running anything, and
+  FindingDetails shows that as "Unverified"; the tool description tells the validator so. A human status
+  change clears the agent's verdict. The id is a constant, not an agent setting - a custom validator
+  agent would need one.
+- **Recon prompt and "no tool used" (1.9).** The recon agent's prompt ended "ask before running
+  anything", and a question in prose ends the task as completed with nothing done. That sentence is
+  replaced. A work order completed with zero tool calls gets `noOutcome`, shown as "no tool used".
+- **Retries (1.10).** Retry sends `retryOf` (checked to be an order in the same mission). A retried
+  order shows "retried", loses its Retry button, and isn't counted in the dashboard's failed banner.
+- **Failure reason on the card (1.1).** A failed order shows `workOrder.result`. It was always
+  recorded, just never displayed - Inspect said "No final response yet (failed)".
+- **Approval Queue fetch (1.6).** `GET /api/tools/executions` takes `status`; the dashboard uses the new
+  `usePendingExecutions` hook to fetch only pending approvals, instead of `useTools` (the tool list plus
+  up to 200 records with full output). The History tab is unchanged.
+- **Error boundary (1.11).** Each view in `App.tsx` sits in its own `ErrorBoundary`, reset on mission
+  change, so one view's render error no longer blanks the app.
+- **Privileged-command check (1.14).** The regex is now a word check: the command is split on
+  whitespace and shell punctuation, URLs are skipped, and each word's last path segment is compared to
+  the verb list. `curl https://host/su/` is no longer refused; `bin/sudo`, `$(sudo id)` and `true&&su`
+  still are.
+
+Tests: backend 632 (was 623), frontend 205 (was 196); both typechecks and oxlint clean. Verified live
+against a fresh backend: cross-mission GET/start/cancel on a work order and GET on a report return 404,
+a cross-mission `retryOf` returns 400, the `status` filter works, the orphan directory isn't loaded
+(2 missions), and the Portify mission's failed order shows its reason ("model … is not available
+locally"). Not seen live: the validator rules and the "no tool used" label on a real run, and the
+unverified note on a real finding - tests only.

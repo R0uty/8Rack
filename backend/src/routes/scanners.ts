@@ -3,6 +3,7 @@ import { listScanProfiles } from "../extensions/scannerRegistry.js";
 import { abortOnClientDisconnect } from "./streamUtils.js";
 import { cancelScanRun, createScanRun, getScan, listScans, previewScan } from "../services/scanRunner.js";
 import type { ScanEvent } from "../services/scanRunner.js";
+import { ScanRunNotFoundError } from "../services/errors.js";
 
 /** Flat, unscoped route - the profile roster isn't per-mission. GET /api/scanners. */
 export const scannersRouter = Router();
@@ -19,6 +20,12 @@ export const missionScansRouter = Router({ mergeParams: true });
 function missionIdOf(req: { params: Record<string, string> }): string {
   return req.params.missionId;
 }
+
+// A scan id is only valid under its own mission's path - see routes/workOrders.ts for the same check.
+missionScansRouter.param("id", (req, _res, next, id: string) => {
+  const scan = getScan(id);
+  next(scan && scan.missionId === req.params.missionId ? undefined : new ScanRunNotFoundError(id));
+});
 
 interface ScanRequestBody {
   profileId?: unknown;
@@ -39,12 +46,7 @@ missionScansRouter.get("/", (req, res) => {
 });
 
 missionScansRouter.get("/:id", (req, res) => {
-  const scan = getScan(req.params.id);
-  if (!scan) {
-    res.status(404).json({ error: `Scan "${req.params.id}" was not found`, code: "SCAN_NOT_FOUND" });
-    return;
-  }
-  res.json({ scan });
+  res.json({ scan: getScan(req.params.id) });
 });
 
 missionScansRouter.post("/preview", (req, res, next) => {

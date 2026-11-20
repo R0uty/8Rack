@@ -9,6 +9,8 @@
 export interface FakeFs {
   files: Map<string, string>;
   mkdir(path: string, opts?: { recursive?: boolean }): Promise<string | undefined>;
+  /** Files only - every directory this double knows of is implied by a file under it. */
+  access(path: string): Promise<void>;
   readFile(path: string, encoding?: string): Promise<string>;
   writeFile(path: string, content: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
@@ -36,6 +38,10 @@ export function createFakeFs(): FakeFs {
 
     async mkdir() {
       return undefined;
+    },
+
+    async access(path: string) {
+      if (!files.has(path)) throw enoent(path);
     },
 
     async readFile(path: string) {
