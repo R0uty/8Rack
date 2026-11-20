@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnChange } from "./useMissionEvents";
 import { cancelScan, createScan, fetchScanProfiles, fetchScans, previewScan } from "../services/scannersApi";
 import type { ScanPreview, ScanProfile, ScanRun } from "../types/scanner";
 
@@ -139,6 +140,8 @@ export function useScans(missionId: string | null) {
     setPreview(null);
     setError(null);
   }, []);
+
+  useRefreshOnChange(missionId, ["scans"], refresh);
 
   return {
     profiles,

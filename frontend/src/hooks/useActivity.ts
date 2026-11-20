@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnChange } from "./useMissionEvents";
 import { fetchActivity } from "../services/activityApi";
 import type { MissionEvent } from "../types/missionEvent";
 
@@ -41,6 +42,8 @@ export function useActivity(missionId: string | null) {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useRefreshOnChange(missionId, ["activity"], refresh);
 
   return { events, loading, error, refresh };
 }

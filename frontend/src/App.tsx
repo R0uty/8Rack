@@ -16,6 +16,7 @@ import { useModels } from "./hooks/useModels";
 import { useAgents } from "./hooks/useAgents";
 import { useMissions } from "./hooks/useMissions";
 import { useSelectedMission } from "./hooks/useSelectedMission";
+import { useMissionEventStream, useRefreshOnChange } from "./hooks/useMissionEvents";
 import { useTools } from "./hooks/useTools";
 import { useTheme } from "./hooks/useTheme";
 import type { AgentWithStatus } from "./types/agent";
@@ -61,7 +62,9 @@ function App() {
   // undefined = editor closed, null = create mode, an agent/mission = edit mode.
   const [editingAgent, setEditingAgent] = useState<AgentWithStatus | null | undefined>(undefined);
   const [editingMission, setEditingMission] = useState<Mission | null | undefined>(undefined);
-  const [advancing, setAdvancing] = useState(false);
+  // One event stream for the selected mission; every mission-scoped hook refreshes from it.
+  useMissionEventStream(mission?.id ?? null);
+  useRefreshOnChange(mission?.id ?? null, ["mission"], refreshMissions);
 
   const ollamaStatus = modelsError ? "unavailable" : modelsLoading ? "unknown" : "connected";
 
@@ -96,7 +99,6 @@ function App() {
                 selected={mission}
                 loading={missionsLoading}
                 error={missionsError}
-                disabled={advancing}
                 onSelect={selectMission}
                 onNew={() => setEditingMission(null)}
                 onEdit={setEditingMission}
@@ -114,7 +116,6 @@ function App() {
                 mission={mission}
                 active={activeView === "factory"}
                 onMissionsChanged={refreshMissions}
-                onAdvancingChange={setAdvancing}
                 onOpenView={changeView}
               />,
             )}

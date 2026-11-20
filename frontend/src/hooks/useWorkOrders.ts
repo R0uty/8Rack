@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cancelWorkOrder, createWorkOrder, fetchWorkOrders, refreshWorkOrder, startWorkOrder } from "../services/workOrdersApi";
+import { useRefreshOnChange } from "./useMissionEvents";
+import { cancelWorkOrder, createWorkOrder, fetchWorkOrders, guideWorkOrder, refreshWorkOrder, startWorkOrder } from "../services/workOrdersApi";
 import type { WorkOrder, WorkOrderCreateInput } from "../types/workOrder";
 
 /** Work orders are mission-scoped, like useFindings' findings - pass null when no mission is
@@ -70,6 +71,17 @@ export function useWorkOrders(missionId: string | null) {
     [missionId, refresh],
   );
 
+  /** Sends a note to an order paused on a failed tool request; it resumes on the server. */
+  const guide = useCallback(
+    async (id: string, note?: string) => {
+      if (!missionId) throw new Error("No mission selected");
+      const workOrder = await guideWorkOrder(missionId, id, note);
+      await refresh();
+      return workOrder;
+    },
+    [missionId, refresh],
+  );
+
   /** Re-syncs one work order's status from its underlying OrchestratorTask - the list endpoint
    * returns whatever's currently cached, which can go stale (e.g. a task that later hit
    * max_time_reached) until something explicitly asks it to re-check. */
@@ -83,5 +95,7 @@ export function useWorkOrders(missionId: string | null) {
     [missionId],
   );
 
-  return { workOrders, loading, error, refresh, create, start, cancel, refreshOne };
+  useRefreshOnChange(missionId, ["work-orders"], refresh);
+
+  return { workOrders, loading, error, refresh, create, start, cancel, guide, refreshOne };
 }

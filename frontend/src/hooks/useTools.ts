@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnChange } from "./useMissionEvents";
 import { fetchExecutions, fetchTools, setToolEnabled } from "../services/toolsApi";
 import type { ExecToolWithStatus, ExecutionRecord } from "../types/execTool";
 
@@ -47,6 +48,8 @@ export function useTools(missionId: string | null) {
     const updated = await setToolEnabled(toolId, enabled);
     setTools((prev) => prev.map((t) => (t.id === toolId ? updated : t)));
   }, []);
+
+  useRefreshOnChange(missionId, ["executions"], refresh);
 
   return { tools, executions, loading, error, refresh, toggleTool };
 }

@@ -3958,3 +3958,81 @@ a cross-mission `retryOf` returns 400, the `status` filter works, the orphan dir
 (2 missions), and the Portify mission's failed order shows its reason ("model … is not available
 locally"). Not seen live: the validator rules and the "no tool used" label on a real run, and the
 unverified note on a real finding - tests only.
+
+## Phase 2: server-owned factory runs (2026-11-20)
+
+PLAN.md Phase 2. Before this, a factory run was one streaming `POST /factory/advance`: closing or
+reloading the tab aborted the generation, two tabs could advance the same mission at once, the
+dashboard froze until the request ended, a "blocked" reason vanished on reload, and approving a tool
+tied its process to that HTTP request (items 1.4 and 1.5).
+
+### Backend
+
+- **`services/missionRunner.ts`** owns one run per mission. `startRun` (advance), `startWorkOrderRun`
+  (Retry/Start), `guideWorkOrderRun` (a note for an order paused on a failed tool request) all start a
+  run in the background and return its state; a second start while one is running throws
+  `RunInProgressError` (409, `RUN_IN_PROGRESS`). `stopRun` aborts the generation; the order it was on goes
+  back to pending (the existing `RequestCancelledError` path in `startWorkOrder`). A running tool isn't
+  touched by Stop - it has its own Cancel.
+- **Auto-resume.** `resumeAfterExecution(executionId)` runs after a tool run settles (confirm route,
+  once the process ends) or is rejected. If a work order of that mission is waiting on that execution,
+  it starts a run, or - if one is already going - sets `resumeRequested`, so the current run calls
+  `advanceMission` once more before it stops (it may already be past the Director's waiting-order loop).
+  The frontend no longer calls advance after an approval.
+- **Run state** (`types/missionRun.ts`): `idle | running | waiting_approval | waiting_guidance | blocked`,
+  with `workOrderId` and `reason`, derived from the Director's result (plus any order still parked on
+  approval). Kept in memory only; after a backend restart it's `idle`.
+- **`services/missionEvents.ts`**, a dependency-free pub/sub (so `missionStore` can import it).
+  `writeMissionJson` and `missionManager.writeMissionMeta` publish `changed` with the file name minus
+  `.json` (`work-orders`, `executions`, `findings`, `assets`, `activity`, `orchestrator-tasks`,
+  `reports`, `scans`, `mission`), gathered over 150 ms per resource so a run recording hundreds of
+  findings sends one event.
+- **`factoryDirector.advanceMission`** gained an `onWorkOrder` callback, called before each order is
+  started or resumed, so chunks carry the `workOrderId` that produced them.
+- **Routes.** `POST /api/missions/:id/factory/advance` returns `{run}` at once; new
+  `POST /:id/factory/stop`, `GET /:id/factory/run`, and `GET /:id/events` (NDJSON: the current
+  `run_state` first, then `run_state`/`chunk`/`changed`/`execution_output`; a blank line every 25 s).
+  `POST /api/tools/executions/:id/confirm` now answers `{execution}` once the process has started
+  (`confirmExecution`'s new `onStarted` callback, fired past every check that can refuse it) and no
+  longer cancels on disconnect; output goes out as `execution_output` events. Work order `/start`
+  returns `{run, workOrder}`; new `POST .../workorders/:id/guidance {note}`. `GET /api/tools/executions`
+  `status` takes a comma list. `DELETE /api/missions/:id` stops the run first.
+
+### Frontend
+
+- `services/missionEvents.ts` (client store: last run state, the current order's output tail, live
+  tool output per execution, each capped at 20 000 chars) and `hooks/useMissionEvents.ts`:
+  `useMissionEventStream` (App.tsx, one per selected mission, reconnects after 2 s and then sends a
+  `changed: *` so every hook re-reads), `useRefreshOnChange` (added to useWorkOrders, useAssets,
+  useFindings, useActivity, useReports, useScans, useTools, usePendingExecutions, and App for the
+  mission list), and `useMissionLive`.
+- **Dashboard.** Advance starts the server run; while it runs, the button is Stop and the panel shows
+  which order is running ("agent - objective") and its output. The blocked reason comes from the run
+  state, so it survives a reload and shows in every tab. `onAdvancingChange` and the mission switcher
+  lock are gone (`disabled` kept optional on MissionSwitcher).
+- **Approval Queue** fetches `pending_confirmation,running`; an approved run stays as a "Running" card
+  with live output and Cancel.
+- **Work Orders.** Guidance goes through the new work-order route (`orchestratorApi.ts` is back to
+  `fetchTask` only); Inspect re-reads the task when the order's status changes.
+- FindingsView no longer hides its table while a refresh is loading (it flickered on every event).
+
+### Tests and verification
+
+Backend 649 (was 632): `missionRunner.test.ts` (14: start/409/idle, chunk tagging, waiting states,
+blocked reason, stop, failure, resume-after-execution in both cases, work-order start/guidance and
+their refusals) and `missionEvents.test.ts` (3). Frontend 212 (was 205): `useMissionEvents.test.ts`
+(4), the queue's running card, the dashboard's Stop/output/reason; tests built on the old streaming
+calls were rewritten. Typechecks and oxlint clean.
+
+Verified live with a throwaway mission (scope `127.0.0.1`, deleted afterwards): advance returned at
+once and a second advance got 409; the event stream carried the run states, `changed` events and
+chunks tagged with the work order. Approving `nmap` in the browser showed it as Running with live
+output; reloading the page mid-scan did not kill it. When nmap finished, the run resumed by itself
+(no advance pressed): the recon order completed, assets and findings appeared on the dashboard
+without a refresh, the pipeline moved to Investigate, and the validator ran (it recorded a
+`false_positive`). Reject resumed the run; Stop ended it with "Stopped. Advance again to continue."
+and the interrupted validator order went back to pending. No backend errors logged.
+
+Known gaps: output printed before a reload isn't replayed (the store is client-side); Retry and
+guidance get a 409 while a run is going rather than queueing; run state is lost on a backend restart
+(orders and tasks aren't - the next advance picks them up).

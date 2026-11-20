@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Markdown } from "./Markdown";
 import { NoMission } from "./NoMission";
 import { Button, GlassPanel, SkeletonRows, StatusPill, type Tone } from "./ui";
 import { useWorkOrders } from "../hooks/useWorkOrders";
 import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
-import { fetchTask, provideGuidance } from "../services/orchestratorApi";
+import { fetchTask } from "../services/orchestratorApi";
 import { relativeTime } from "../lib/relativeTime";
 import type { Mission } from "../types/mission";
 import type { WorkOrder, WorkOrderCreateInput, WorkOrderStatus } from "../types/workOrder";
@@ -42,9 +42,10 @@ interface WorkOrderCardProps {
   onRefreshStatus: (id: string) => Promise<WorkOrder>;
   onRetry: (input: WorkOrderCreateInput) => Promise<void>;
   onCancel: (id: string) => Promise<WorkOrder>;
+  onGuide: (id: string, note?: string) => Promise<WorkOrder>;
 }
 
-function WorkOrderCard({ workOrder, retried = false, onRefreshStatus, onRetry, onCancel }: WorkOrderCardProps) {
+function WorkOrderCard({ workOrder, retried = false, onRefreshStatus, onRetry, onCancel, onGuide }: WorkOrderCardProps) {
   const [task, setTask] = useState<OrchestratorTask | null>(null);
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
@@ -54,7 +55,6 @@ function WorkOrderCard({ workOrder, retried = false, onRefreshStatus, onRetry, o
   const [cancelling, setCancelling] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [taskError, setTaskError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!open || !workOrder.orchestratorTaskId) return;
@@ -81,20 +81,19 @@ function WorkOrderCard({ workOrder, retried = false, onRefreshStatus, onRetry, o
     return () => {
       cancelled = true;
     };
+    // Re-read when the order's status changes (the run moves on in the background), not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, workOrder.orchestratorTaskId]);
+  }, [open, workOrder.orchestratorTaskId, workOrder.status]);
 
   const handleSendGuidance = async () => {
     if (!task || sendingGuidance) return;
     setSendingGuidance(true);
     setGuidanceError(null);
-    const controller = new AbortController();
-    abortRef.current = controller;
     try {
-      const updated = await provideGuidance(task.id, note.trim() || undefined, () => {}, controller.signal);
-      setTask(updated);
+      // Returns at once: the agent continues on the server as the mission's run.
+      await onGuide(workOrder.id, note.trim() || undefined);
       setNote("");
-      await onRefreshStatus(workOrder.id);
+      setTask(await fetchTask(task.id));
     } catch (err) {
       setGuidanceError(err instanceof Error ? err.message : "Failed to send guidance");
     } finally {
@@ -230,7 +229,7 @@ function WorkOrderCard({ workOrder, retried = false, onRefreshStatus, onRetry, o
  * retried, recreating it with the same agent/objective/target.
  */
 export function WorkOrdersView({ mission, active = true }: { mission: Mission | null; active?: boolean }) {
-  const { workOrders, loading, error, refresh, refreshOne, create, start, cancel } = useWorkOrders(mission?.id ?? null);
+  const { workOrders, loading, error, refresh, refreshOne, create, start, cancel, guide } = useWorkOrders(mission?.id ?? null);
   useRefreshOnActivate(active, refresh);
 
   const handleRetry = async (input: WorkOrderCreateInput) => {
@@ -265,7 +264,11 @@ export function WorkOrdersView({ mission, active = true }: { mission: Mission | 
                   key={w.id}
                   workOrder={w}
                   retried={retriedIds.has(w.id)}
-                  onRefreshStatus={refreshOne} onRetry={handleRetry} onCancel={cancel} />
+                  onRefreshStatus={refreshOne}
+                  onRetry={handleRetry}
+                  onCancel={cancel}
+                  onGuide={guide}
+                />
               ))}
             </div>
           </div>

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnChange } from "./useMissionEvents";
 import { fetchExecutions } from "../services/toolsApi";
 import type { ExecutionRecord } from "../types/execTool";
 
-/** The mission's executions waiting on a human's approval - what the Approval Queue shows. Unlike
- * useTools it fetches only those, not the tool list or every past run's output. */
+/** The mission's executions waiting on a human's approval or running now - what the Approval Queue
+ * shows. Unlike useTools it fetches only those, not the tool list or every past run's output. */
 export function usePendingExecutions(missionId: string | null) {
   const [executions, setExecutions] = useState<ExecutionRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -21,7 +22,7 @@ export function usePendingExecutions(missionId: string | null) {
     }
     setError(null);
     try {
-      const pending = await fetchExecutions(missionId, "pending_confirmation");
+      const pending = await fetchExecutions(missionId, ["pending_confirmation", "running"]);
       if (missionIdRef.current === missionId) setExecutions(pending);
     } catch (err) {
       if (missionIdRef.current === missionId) setError(err instanceof Error ? err.message : "Failed to load pending approvals");
@@ -31,6 +32,8 @@ export function usePendingExecutions(missionId: string | null) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useRefreshOnChange(missionId, ["executions"], refresh);
 
   return { executions, error, refresh };
 }

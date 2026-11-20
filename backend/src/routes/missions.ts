@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { createMission, deleteMission, getMission, listMissions, updateMission } from "../services/missionManager.js";
-import { advanceMission } from "../services/factoryDirector.js";
+import { getRunState, startRun, stopRun } from "../services/missionRunner.js";
+import { subscribeMission } from "../services/missionEvents.js";
 import { listActivity, logActivity } from "../services/activityLog.js";
-import { RequestCancelledError } from "../services/errors.js";
-import { abortOnClientDisconnect } from "./streamUtils.js";
+import { MissionNotFoundError } from "../services/errors.js";
 import type { MissionStatus } from "../types/mission.js";
+import type { MissionStreamEvent } from "../types/missionRun.js";
 
 export const missionsRouter = Router();
 
@@ -162,6 +163,7 @@ missionsRouter.patch("/:id", async (req, res, next) => {
 
 missionsRouter.delete("/:id", async (req, res, next) => {
   try {
+    stopRun(req.params.id);
     await deleteMission(req.params.id);
     res.json({ ok: true });
   } catch (err) {
@@ -175,38 +177,66 @@ missionsRouter.get("/:id/activity", (req, res) => {
   res.json({ activity: listActivity(req.params.id) });
 });
 
+async function requireExistingMission(id: string): Promise<void> {
+  if (!(await getMission(id))) throw new MissionNotFoundError(id);
+}
+
 /**
- * Advances this mission's factory pipeline by one call - streamed NDJSON like every other
- * long-running route in this codebase (see routes/plans.ts#runAndStreamPlan, the closest existing
- * precedent: a {type:"chunk"} line per token from whichever work order is currently generating,
- * then a single terminal {type:"result"} line). Call again after resolving a pending confirmation
- * (POST /api/tools/executions/:id/confirm|reject) to continue the chain - the same follow-up every
- * other task-backed flow in this app already requires.
+ * Starts this mission's factory run and returns at once with its state - the run belongs to the
+ * server (services/missionRunner.ts), so closing the tab doesn't stop it. Progress, model output and
+ * every store change arrive on GET /:id/events. 409 if a run is already going. A tool approval or
+ * rejection resumes the run by itself; there is no need to call this again after one.
  */
 missionsRouter.post("/:id/factory/advance", async (req, res, next) => {
-  const controller = abortOnClientDisconnect(res);
+  try {
+    await requireExistingMission(req.params.id);
+    res.json({ run: startRun(req.params.id) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Aborts the generation in progress. The order it was on goes back to pending. */
+missionsRouter.post("/:id/factory/stop", async (req, res, next) => {
+  try {
+    await requireExistingMission(req.params.id);
+    res.json({ run: stopRun(req.params.id) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+missionsRouter.get("/:id/factory/run", (req, res) => {
+  res.json({ run: getRunState(req.params.id) });
+});
+
+/** How often an idle event stream gets a blank line, so a dead connection is noticed and closed. */
+const EVENTS_HEARTBEAT_MS = 25_000;
+
+/**
+ * This mission's live event stream, NDJSON (see types/missionRun.ts#MissionStreamEvent). The first
+ * line is always the current run_state, so a client that connects late, or after a reload, sees
+ * where the run stands. Open for as long as the client keeps it open.
+ */
+missionsRouter.get("/:id/events", async (req, res, next) => {
+  const missionId = req.params.id;
+  try {
+    await requireExistingMission(missionId);
+  } catch (err) {
+    next(err);
+    return;
+  }
   res.setHeader("Content-Type", "application/x-ndjson");
   res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
 
-  try {
-    const result = await advanceMission(
-      req.params.id,
-      (content) => res.write(`${JSON.stringify({ type: "chunk", content })}\n`),
-      controller.signal,
-    );
-    res.write(`${JSON.stringify({ type: "result", ...result })}\n`);
-    res.end();
-  } catch (err) {
-    if (err instanceof RequestCancelledError) {
-      res.end();
-      return;
-    }
-    if (!res.headersSent) {
-      next(err);
-      return;
-    }
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.write(`${JSON.stringify({ type: "error", error: message })}\n`);
-    res.end();
-  }
+  const write = (event: MissionStreamEvent) => res.write(`${JSON.stringify(event)}\n`);
+  write({ type: "run_state", run: getRunState(missionId) });
+  const unsubscribe = subscribeMission(missionId, write);
+  const heartbeat = setInterval(() => res.write("\n"), EVENTS_HEARTBEAT_MS);
+  res.on("close", () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
 });

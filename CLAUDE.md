@@ -104,7 +104,8 @@ Key files under `backend/src/services/`:
 | `missionManager.ts` / `missionStore.ts` | The mission-scoping primitive everything else below is keyed on - see "Missions" below |
 | `assetManager.ts` | The Asset Inventory - a real, deduplicated store (`upsertAsset`) of everything discovered about a mission, with a parent/child relationship tree |
 | `workOrderManager.ts` | Security Work Orders - a trackable unit of agent work backed 1:1 by a real `OrchestratorTask` |
-| `factoryDirector.ts` | The Factory Director - reads a mission's scope/assets/findings/work orders and deterministically seeds/starts Work Orders, auto-chaining through everything that doesn't need human approval. Also resumes paused orders whose execution a human has settled. Request-driven (`POST /api/missions/:id/factory/advance`), not a background timer |
+| `factoryDirector.ts` | The Factory Director - reads a mission's scope/assets/findings/work orders and deterministically seeds/starts Work Orders, auto-chaining through everything that doesn't need human approval. Also resumes paused orders whose execution a human has settled. Not a background timer: started through `missionRunner.ts` |
+| `missionRunner.ts` / `missionEvents.ts` | A mission's factory run, owned by the server: one per mission (409 on a second), started by `POST /factory/advance` (returns at once), stopped by `/factory/stop`, resumed by itself when a tool run a waiting order depends on settles. `missionEvents.ts` is the pub/sub behind `GET /api/missions/:id/events`; `missionStore.writeMissionJson` publishes a `changed` event on every write |
 | `activityLog.ts` | The Mission Activity Timeline - an explicit, named-event append-only log (`logActivity`), not derived from executions/tasks |
 | `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `knowledgeBase.ts` | The one entry point for the knowledge base (Orchestrator's `search_knowledge_base`, `/api/rag/*`, startup) - routes to the RAG MCP server named by `MCP_RAG_SERVER`, or to `ragIndex.ts` when unset. No fallback to the local index when the server is down |
@@ -157,8 +158,8 @@ frontend/src/
 SSE's `EventSource` can't send a POST body, and NDJSON is what Ollama's own `/api/chat` speaks, so
 the backend mostly forwards lines through. The frontend reads the response body with
 `ReadableStream` + `TextDecoder`, splitting on `\n`. Every other long-running route in this app
-(orchestrator tasks, multi-agent plans, scan runs, report generation, the Factory Director's
-`/factory/advance`) follows the same NDJSON convention - see `backend/src/routes/streamUtils.ts`
+(orchestrator tasks, multi-agent plans, scan runs, report generation, and the mission event stream
+`GET /api/missions/:id/events`) follows the same NDJSON convention - see `backend/src/routes/streamUtils.ts`
 and `frontend/src/services/httpClient.ts#readNdjsonStream`, reused rather than reinvented per route.
 
 ### Cancellation
@@ -220,8 +221,10 @@ the fix and its reasoning are unchanged) - if you add a new mission-scoped store
 There is one current mission, owned by `App.tsx` (`useSelectedMission`, remembered in `localStorage`)
 and picked in the sidebar's `MissionSwitcher`; every mission-scoped view receives it as a `mission`
 prop. This reverses the earlier per-view `MissionPanel` pattern - see "UI cleanup" in
-`DEVELOPMENT.md` for why. The switcher locks while the Factory is advancing, since that view's live
-output belongs to the selected mission.
+`DEVELOPMENT.md` for why. App.tsx keeps one event stream open for the selected mission
+(`useMissionEventStream`); each mission-scoped hook re-reads when its store changes
+(`useRefreshOnChange`), and the dashboard shows the server's run state (`useMissionLive`). A run keeps
+going when you switch missions or close the tab - see "Phase 2" in `DEVELOPMENT.md`.
 
 ### Settings
 

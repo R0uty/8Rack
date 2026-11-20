@@ -59,6 +59,16 @@ committed. What changed for each item, and how it was checked, is in DEVELOPMENT
 
 ## Phase 2 - Make a run belong to the server, not to a tab
 
+**Status (2026-11-20): done, not committed.** Details in DEVELOPMENT.md's "Phase 2: server-owned
+factory runs (2026-11-20)". Differences from the plan below:
+
+- The event stream has four types, not eight: `run_state`, `chunk` (with `workOrderId`),
+  `execution_output`, and `changed` (a store was written; re-read it). Work orders, tool requests,
+  findings and assets are all covered by `changed`, so clients re-read the list rather than patching
+  it from per-record events.
+- Run states are `idle | running | waiting_approval | waiting_guidance | blocked` (reason in `reason`).
+- Tool output sent before a page reload is not replayed; the queue shows output from then on.
+
 The one structural change, and the one most of the usability problems hang on.
 
 Today `POST /factory/advance` is a single streaming request. Consequences, all **read**:

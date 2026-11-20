@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApprovalQueue } from "./ApprovalQueue";
-import { confirmExecution, rejectExecution } from "../services/toolsApi";
+import { cancelExecution, confirmExecution, rejectExecution } from "../services/toolsApi";
+import { dispatchMissionEvent, resetMissionEventsForTests } from "../services/missionEvents";
 import type { ExecutionRecord } from "../types/execTool";
 import type { AgentWithStatus } from "../types/agent";
 
-vi.mock("../services/toolsApi", () => ({ confirmExecution: vi.fn(), rejectExecution: vi.fn() }));
+vi.mock("../services/toolsApi", () => ({ confirmExecution: vi.fn(), rejectExecution: vi.fn(), cancelExecution: vi.fn() }));
 
 const mockConfirm = vi.mocked(confirmExecution);
 const mockReject = vi.mocked(rejectExecution);
@@ -44,13 +45,14 @@ const agents: AgentWithStatus[] = [
 
 describe("ApprovalQueue", () => {
   it("renders nothing when nothing is pending", () => {
-    const { container } = render(<ApprovalQueue missionName="Acme" executions={[]} agents={agents} onSettled={vi.fn()} />);
+    const { container } = render(<ApprovalQueue missionId="m1" missionName="Acme" executions={[]} agents={agents} onSettled={vi.fn()} />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("ignores executions that aren't pending_confirmation", () => {
+  it("ignores executions that are neither pending nor running", () => {
     const { container } = render(
       <ApprovalQueue
+        missionId="m1"
         missionName="Acme"
         executions={[fixtureExecution({ status: "completed" })]}
         agents={agents}
@@ -64,7 +66,7 @@ describe("ApprovalQueue", () => {
     const onSettled = vi.fn();
     mockConfirm.mockResolvedValue(fixtureExecution({ status: "completed" }));
     render(
-      <ApprovalQueue missionName="Acme" executions={[fixtureExecution()]} agents={agents} onSettled={onSettled} />,
+      <ApprovalQueue missionId="m1" missionName="Acme" executions={[fixtureExecution()]} agents={agents} onSettled={onSettled} />,
     );
 
     expect(screen.getByText("Recon Agent")).toBeInTheDocument();
@@ -73,12 +75,13 @@ describe("ApprovalQueue", () => {
 
     await userEvent.setup().click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(onSettled).toHaveBeenCalled());
-    expect(mockConfirm).toHaveBeenCalledWith("exec-1", expect.any(Function));
+    expect(mockConfirm).toHaveBeenCalledWith("exec-1");
   });
 
   it("shows the scope warning instead of the all-clear when one is present", () => {
     render(
       <ApprovalQueue
+        missionId="m1"
         missionName="Acme"
         executions={[fixtureExecution({ scopeWarning: "no identifiable target" })]}
         agents={agents}
@@ -93,11 +96,28 @@ describe("ApprovalQueue", () => {
     const onSettled = vi.fn();
     mockReject.mockResolvedValue(fixtureExecution({ status: "rejected" }));
     render(
-      <ApprovalQueue missionName="Acme" executions={[fixtureExecution()]} agents={agents} onSettled={onSettled} />,
+      <ApprovalQueue missionId="m1" missionName="Acme" executions={[fixtureExecution()]} agents={agents} onSettled={onSettled} />,
     );
 
     await userEvent.setup().click(screen.getByRole("button", { name: "Reject" }));
     await waitFor(() => expect(onSettled).toHaveBeenCalled());
     expect(mockReject).toHaveBeenCalledWith("exec-1");
+  });
+
+  it("keeps an approved run in the queue with its live output and a Cancel", async () => {
+    resetMissionEventsForTests();
+    vi.mocked(cancelExecution).mockResolvedValue(fixtureExecution({ status: "cancelled" }));
+    const onSettled = vi.fn();
+    render(
+      <ApprovalQueue missionId="m1" missionName="Acme" executions={[fixtureExecution({ status: "running" })]} agents={agents} onSettled={onSettled} />,
+    );
+    expect(screen.getByText("No output yet.")).toBeInTheDocument();
+
+    act(() => dispatchMissionEvent("m1", { type: "execution_output", executionId: "exec-1", stream: "stdout", data: "80/tcp open" }));
+    expect(screen.getByText("80/tcp open")).toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(onSettled).toHaveBeenCalled());
+    expect(cancelExecution).toHaveBeenCalledWith("exec-1");
   });
 });

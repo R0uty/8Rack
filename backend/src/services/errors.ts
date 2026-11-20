@@ -318,3 +318,10 @@ export class McpRequestError extends Error {
   }
 }
 
+
+export class RunInProgressError extends Error {
+  constructor(missionId: string) {
+    super(`A factory run is already in progress for mission "${missionId}" - stop it or wait for it to finish`);
+    this.name = "RunInProgressError";
+  }
+}

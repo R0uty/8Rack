@@ -236,8 +236,13 @@ export interface FactoryAdvanceResult {
  * "failed"/"cancelled" also stops the chain here rather than immediately retrying something else -
  * that's a signal worth a human's attention, not something to paper over by moving on.
  */
-export async function advanceMission(missionId: string, onChunk?: ChunkListener, signal?: AbortSignal): Promise<FactoryAdvanceResult> {
-  return advanceChain(missionId, onChunk, signal, 0);
+export async function advanceMission(
+  missionId: string,
+  onChunk?: ChunkListener,
+  signal?: AbortSignal,
+  onWorkOrder?: (workOrderId: string) => void,
+): Promise<FactoryAdvanceResult> {
+  return advanceChain(missionId, onChunk, signal, 0, onWorkOrder);
 }
 
 function failureReason(wo: WorkOrder): string | undefined {
@@ -250,6 +255,7 @@ async function advanceChain(
   onChunk: ChunkListener | undefined,
   signal: AbortSignal | undefined,
   ranSoFar: number,
+  onWorkOrder?: (workOrderId: string) => void,
 ): Promise<FactoryAdvanceResult> {
   const mission = await getMission(missionId);
   if (!mission) throw new MissionNotFoundError(missionId);
@@ -263,6 +269,7 @@ async function advanceChain(
   // Orders a human has just unblocked come first - their agents are waiting on a tool's result.
   for (const wo of workOrders) {
     if (wo.status !== "waiting_approval") continue;
+    onWorkOrder?.(wo.id);
     const resumed = await resumeWorkOrderIfReady(wo.id, onChunk, signal);
     if (resumed.status === "failed" || resumed.status === "cancelled") {
       return { mission, workOrder: resumed, blockedReason: failureReason(resumed) };
@@ -304,10 +311,11 @@ async function advanceChain(
     };
   }
 
+  onWorkOrder?.(next.id);
   const started = await startWorkOrder(next.id, onChunk, signal);
   if (started.status !== "completed") {
     return { mission: settledMission, workOrder: started, blockedReason: failureReason(started) };
   }
 
-  return advanceChain(missionId, onChunk, signal, ranSoFar + 1);
+  return advanceChain(missionId, onChunk, signal, ranSoFar + 1, onWorkOrder);
 }

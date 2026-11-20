@@ -5,8 +5,8 @@ import {
   getWorkOrder,
   listWorkOrders,
   refreshWorkOrder,
-  startWorkOrder,
 } from "../services/workOrderManager.js";
+import { guideWorkOrderRun, startWorkOrderRun } from "../services/missionRunner.js";
 import { WorkOrderNotFoundError } from "../services/errors.js";
 
 interface CreateWorkOrderBody {
@@ -102,9 +102,27 @@ missionWorkOrdersRouter.get("/:workOrderId", (req, res) => {
   res.json({ workOrder: getWorkOrder(req.params.workOrderId) });
 });
 
-missionWorkOrdersRouter.post("/:workOrderId/start", async (req, res, next) => {
+/** Starts a pending order as the mission's run (see services/missionRunner.ts) and returns at once;
+ * once the order settles, the Factory Director carries on from there. 409 if a run is going. */
+missionWorkOrdersRouter.post("/:workOrderId/start", (req, res, next) => {
   try {
-    res.json({ workOrder: await startWorkOrder(req.params.workOrderId) });
+    const run = startWorkOrderRun(missionIdOf(req), req.params.workOrderId);
+    res.json({ run, workOrder: getWorkOrder(req.params.workOrderId) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Sends a note to an order paused on a failed tool request and resumes it as the mission's run. */
+missionWorkOrdersRouter.post("/:workOrderId/guidance", (req, res, next) => {
+  const { note } = (req.body ?? {}) as { note?: unknown };
+  if (note !== undefined && typeof note !== "string") {
+    res.status(400).json({ error: "note must be a string", code: "INVALID_REQUEST" });
+    return;
+  }
+  try {
+    const run = guideWorkOrderRun(missionIdOf(req), req.params.workOrderId, note);
+    res.json({ run, workOrder: getWorkOrder(req.params.workOrderId) });
   } catch (err) {
     next(err);
   }

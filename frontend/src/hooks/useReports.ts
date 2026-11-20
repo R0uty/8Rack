@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnChange } from "./useMissionEvents";
 import { createReport, deleteReport, fetchReports, updateReportStatus } from "../services/reportsApi";
 import type { Report, ReportStatus } from "../types/report";
 
@@ -100,6 +101,8 @@ export function useReports(missionId: string | null) {
     },
     [missionId],
   );
+
+  useRefreshOnChange(missionId, ["reports"], refresh);
 
   return { reports, loading, generating, streamingText, error, refresh, generate, remove, setStatus };
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnChange } from "./useMissionEvents";
 import { fetchAssets } from "../services/assetsApi";
 import type { Asset } from "../types/asset";
 
@@ -39,6 +40,8 @@ export function useAssets(missionId: string | null) {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useRefreshOnChange(missionId, ["assets"], refresh);
 
   return { assets, loading, error, refresh };
 }
