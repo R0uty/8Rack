@@ -5,7 +5,7 @@ import { FactoryDashboard } from "./FactoryDashboard";
 import { useAssets } from "../hooks/useAssets";
 import { useWorkOrders } from "../hooks/useWorkOrders";
 import { useFindings } from "../hooks/useFindings";
-import { useTools } from "../hooks/useTools";
+import { usePendingExecutions } from "../hooks/usePendingExecutions";
 import { useActivity } from "../hooks/useActivity";
 import { useReports } from "../hooks/useReports";
 import { advanceFactory } from "../services/factoryApi";
@@ -14,7 +14,7 @@ import type { Mission } from "../types/mission";
 vi.mock("../hooks/useAssets", () => ({ useAssets: vi.fn() }));
 vi.mock("../hooks/useWorkOrders", () => ({ useWorkOrders: vi.fn() }));
 vi.mock("../hooks/useFindings", () => ({ useFindings: vi.fn() }));
-vi.mock("../hooks/useTools", () => ({ useTools: vi.fn() }));
+vi.mock("../hooks/usePendingExecutions", () => ({ usePendingExecutions: vi.fn() }));
 vi.mock("../hooks/useActivity", () => ({ useActivity: vi.fn() }));
 vi.mock("../hooks/useReports", () => ({ useReports: vi.fn() }));
 vi.mock("../services/factoryApi", () => ({ advanceFactory: vi.fn() }));
@@ -31,7 +31,7 @@ vi.mock("./ActivityFeed", () => ({ ActivityFeed: () => <div data-testid="activit
 const mockUseAssets = vi.mocked(useAssets);
 const mockUseWorkOrders = vi.mocked(useWorkOrders);
 const mockUseFindings = vi.mocked(useFindings);
-const mockUseTools = vi.mocked(useTools);
+const mockUsePendingExecutions = vi.mocked(usePendingExecutions);
 const mockUseActivity = vi.mocked(useActivity);
 const mockUseReports = vi.mocked(useReports);
 const mockAdvanceFactory = vi.mocked(advanceFactory);
@@ -59,13 +59,10 @@ function setupHooks() {
     update: vi.fn(),
     remove: vi.fn(),
   });
-  mockUseTools.mockReturnValue({
-    tools: [],
+  mockUsePendingExecutions.mockReturnValue({
     executions: [{ id: "e1", status: "pending_confirmation" }] as never,
-    loading: false,
     error: null,
     refresh: vi.fn(),
-    toggleTool: vi.fn(),
   });
   mockUseActivity.mockReturnValue({ events: [], loading: false, error: null, refresh: vi.fn() });
   mockUseReports.mockReturnValue({
@@ -180,6 +177,26 @@ describe("FactoryDashboard", () => {
     expect(screen.getByText(/1 work order failed/)).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole("button", { name: "View" }));
     expect(onOpenView).toHaveBeenCalledWith("workorders");
+  });
+
+  it("stops counting a failed work order once it has been retried", () => {
+    setupHooks();
+    mockUseWorkOrders.mockReturnValue({
+      workOrders: [
+        { id: "w2", status: "completed", retryOf: "w1" },
+        { id: "w1", status: "failed" },
+      ] as never,
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      start: vi.fn(),
+      cancel: vi.fn(),
+      refreshOne: vi.fn(),
+    });
+    render(<FactoryDashboard agents={[]} mission={mission} />);
+
+    expect(screen.queryByText(/work order.* failed/)).not.toBeInTheDocument();
   });
 
   it("surfaces a failed report generation", async () => {

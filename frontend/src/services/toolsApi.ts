@@ -1,4 +1,4 @@
-import type { ExecToolWithStatus, ExecutionRecord } from "../types/execTool";
+import type { ExecToolWithStatus, ExecutionRecord, ExecutionStatus } from "../types/execTool";
 import { ApiError, apiFetch, readNdjsonStream, throwForErrorResponse } from "./httpClient";
 
 export async function fetchTools(): Promise<ExecToolWithStatus[]> {
@@ -22,8 +22,11 @@ export async function setToolEnabled(toolId: string, enabled: boolean): Promise<
   return data.tool;
 }
 
-export async function fetchExecutions(missionId: string): Promise<ExecutionRecord[]> {
-  const res = await apiFetch(`/api/tools/executions?missionId=${encodeURIComponent(missionId)}`);
+/** A mission's executions, newest first - only those with `status` when given, which keeps the
+ * Approval Queue from downloading every past run's output. */
+export async function fetchExecutions(missionId: string, status?: ExecutionStatus): Promise<ExecutionRecord[]> {
+  const query = new URLSearchParams({ missionId, ...(status ? { status } : {}) });
+  const res = await apiFetch(`/api/tools/executions?${query}`);
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { executions?: ExecutionRecord[] } | null;
   if (!data?.executions) throw new ApiError("Received an invalid response from the server", 502);

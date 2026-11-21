@@ -16,7 +16,11 @@ export interface WorkOrder {
   relatedAssets: string[];
   relatedFindings: string[];
   orchestratorTaskId?: string;
+  /** The failed/cancelled order this one retries. */
+  retryOf?: string;
+  /** Completed without the agent calling any tool - nothing was run or recorded. */
+  noOutcome?: boolean;
 }
 
 export type WorkOrderCreateInput = Pick<WorkOrder, "agentId" | "objective"> &
-  Partial<Pick<WorkOrder, "target" | "priority" | "dependencies" | "relatedAssets" | "relatedFindings">>;
+  Partial<Pick<WorkOrder, "target" | "priority" | "dependencies" | "relatedAssets" | "relatedFindings" | "retryOf">>;

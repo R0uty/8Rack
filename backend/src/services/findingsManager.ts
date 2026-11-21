@@ -384,6 +384,9 @@ export async function updateFinding(id: string, patch: FindingPatchInput): Promi
     statusChange = { from: finding.status, to: patch.status };
     finding.status = patch.status;
     finding.history.push({ status: patch.status, at: now });
+    // A human's status decision replaces whatever verdict an agent gave.
+    finding.validatedBy = patch.validatedBy;
+    delete finding.validationExecutionIds;
   }
   if (patch.severity !== undefined) finding.severity = patch.severity;
   if (patch.tags !== undefined) finding.tags = patch.tags;
@@ -418,6 +421,8 @@ export async function validateFinding(
   verdict: "confirmed" | "false_positive" | "duplicate",
   notes: string,
   severity?: FindingSeverity,
+  /** The real tool runs the validating task completed - empty when the verdict rests on nothing it ran. */
+  executionIds: string[] = [],
 ): Promise<Finding> {
   const finding = findings.get(findingId);
   if (!finding) throw new FindingNotFoundError(findingId);
@@ -429,6 +434,7 @@ export async function validateFinding(
   }
   if (severity !== undefined) finding.severity = severity;
   finding.validatedBy = agentId;
+  finding.validationExecutionIds = executionIds;
   if (!finding.relatedAgents.includes(agentId)) finding.relatedAgents.push(agentId);
   pushEvidence(finding, { type: "agent_reasoning", content: notes, createdAt: now, agentId });
   finding.updatedAt = now;

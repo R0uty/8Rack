@@ -27,7 +27,13 @@ export interface WorkOrder {
   relatedFindings: string[];
   /** Set once startWorkOrder creates the backing OrchestratorTask - undefined while still "pending". */
   orchestratorTaskId?: string;
+  /** The failed/cancelled order this one was created to retry - that one then no longer needs a
+   * human's attention. */
+  retryOf?: string;
+  /** Completed without the agent calling a single tool - it answered in prose (often a question, or
+   * a plan of what it would do) and nothing was run or recorded. Completed, but no outcome. */
+  noOutcome?: boolean;
 }
 
 export type WorkOrderCreateInput = Pick<WorkOrder, "agentId" | "objective"> &
-  Partial<Pick<WorkOrder, "target" | "priority" | "dependencies" | "relatedAssets" | "relatedFindings">>;
+  Partial<Pick<WorkOrder, "target" | "priority" | "dependencies" | "relatedAssets" | "relatedFindings" | "retryOf">>;

@@ -61,7 +61,11 @@ toolsRouter.get("/executions", (req, res) => {
     res.status(400).json({ error: "missionId query parameter is required", code: "INVALID_REQUEST" });
     return;
   }
-  res.json({ executions: listExecutions(missionId) });
+  // ?status=pending_confirmation lets the dashboard's Approval Queue fetch only what it shows, rather
+  // than up to 200 records carrying their full output.
+  const { status } = req.query;
+  const executions = listExecutions(missionId);
+  res.json({ executions: typeof status === "string" && status ? executions.filter((e) => e.status === status) : executions });
 });
 
 toolsRouter.get("/executions/:id", (req, res) => {

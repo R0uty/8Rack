@@ -615,8 +615,31 @@ describe("query_findings tool", () => {
     const task = await createTask("test-agent", "objective", missionId);
     const toolMessage = task.messages.find((m) => m.role === "tool");
     const parsed = JSON.parse(toolMessage!.content);
-    expect(parsed.parsedOutput).toHaveLength(1);
-    expect(parsed.parsedOutput[0].type).toBe("technology");
+    expect(parsed.stdout).toContain("nginx");
+    expect(parsed.stdout).not.toContain("80/tcp");
+    expect(parsed).not.toHaveProperty("parsedOutput");
+  });
+
+  it("returns one finding in full, evidence included, when given its id", async () => {
+    const missionId = "proj-findings-by-id";
+    const finding = await createFinding(missionId, {
+      type: "potential_vulnerability",
+      severity: "medium",
+      title: "Backup file exposed",
+      description: "d",
+      target: "example.com",
+      value: "/backup.zip",
+      evidence: "HTTP/1.1 200 OK content-length: 1048576",
+    });
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([`{"tool": "query_findings", "arguments": ["${finding.id}"]}`, "ok"]),
+    );
+
+    const task = await createTask("test-agent", "objective", missionId);
+    const parsed = JSON.parse(task.messages.find((m) => m.role === "tool")!.content);
+    expect(parsed.success).toBe(true);
+    expect(parsed.stdout).toContain("Backup file exposed");
+    expect(parsed.stdout).toContain("content-length: 1048576");
   });
 
   it("still counts against the tool-call cap", async () => {
@@ -684,7 +707,7 @@ describe("lookup_cves tool", () => {
     expect(parsed).toMatchObject({ tool: "lookup_cves", success: true });
     expect(parsed.stdout).toContain("CVE-2021-1234");
     // Best-effort linked to the existing "nginx" technology finding's target, not "unknown".
-    expect(parsed.parsedOutput[0].target).toBe("example.com");
+    expect(getMissionFindings(missionId).find((f) => f.type === "cve")?.target).toBe("example.com");
   });
 
   it("falls back to target 'unknown' when no matching technology finding exists", async () => {
@@ -696,8 +719,8 @@ describe("lookup_cves tool", () => {
 
     const task = await createTask("test-agent", "objective", missionId);
     const toolMessage = task.messages.find((m) => m.role === "tool");
-    const parsed = JSON.parse(toolMessage!.content);
-    expect(parsed.parsedOutput[0].target).toBe("unknown");
+    expect(JSON.parse(toolMessage!.content).success).toBe(true);
+    expect(getMissionFindings(missionId).find((f) => f.type === "cve")?.target).toBe("unknown");
   });
 
   it("still counts against the tool-call cap", async () => {
@@ -854,6 +877,8 @@ describe("create_finding tool", () => {
   });
 });
 
+const VALIDATOR = "vulnerability-validator";
+
 describe("validate_finding tool", () => {
   async function fixtureFindingFor(missionId: string) {
     return createFinding(missionId, {
@@ -875,7 +900,7 @@ describe("validate_finding tool", () => {
     mockStreamAgentChat.mockImplementation(repliesGenerator([call, call, call, "never reached"]));
     const evidenceBefore = finding.evidence.length;
 
-    const task = await createTask("test-agent", "objective", missionId);
+    const task = await createTask(VALIDATOR, "objective", missionId);
 
     expect(task.status).toBe("completed");
     expect(task.toolCallCount).toBe(1);
@@ -890,7 +915,7 @@ describe("validate_finding tool", () => {
       `{"tool": "validate_finding", "arguments": [${JSON.stringify(JSON.stringify({ findingId: finding.id, verdict: "confirmed", notes }))}]}`;
     mockStreamAgentChat.mockImplementation(repliesGenerator([verdict("first"), verdict("second"), "Done."]));
 
-    const task = await createTask("test-agent", "objective", missionId);
+    const task = await createTask(VALIDATOR, "objective", missionId);
 
     expect(task.toolCallCount).toBe(2);
     expect(task.finalResponse).toBe("Done.");
@@ -902,7 +927,7 @@ describe("validate_finding tool", () => {
     )}]}`;
     mockStreamAgentChat.mockImplementation(repliesGenerator([call, call, "Gave up."]));
 
-    const task = await createTask("test-agent", "objective", "proj-validate-failed-repeat");
+    const task = await createTask(VALIDATOR, "objective", "proj-validate-failed-repeat");
 
     expect(task.toolCallCount).toBe(2);
     expect(task.finalResponse).toBe("Gave up.");
@@ -910,7 +935,7 @@ describe("validate_finding tool", () => {
 
   it("is always listed in the preamble, with no precondition", async () => {
     mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
-    await createTask("test-agent", "objective", "proj-validate-finding-preamble");
+    await createTask(VALIDATOR, "objective", "proj-validate-finding-preamble");
     const [[request]] = mockStreamAgentChat.mock.calls;
     expect(request.toolsPreamble).toContain("validate_finding");
   });
@@ -972,7 +997,7 @@ describe("validate_finding tool", () => {
       repliesGenerator([`{"tool": "validate_finding", "arguments": [${JSON.stringify(payload)}]}`, "ok"]),
     );
 
-    const task = await createTask("test-agent", "objective", "proj-validate-finding-2");
+    const task = await createTask(VALIDATOR, "objective", "proj-validate-finding-2");
     const toolMessage = task.messages.find((m) => m.role === "tool");
     const parsed = JSON.parse(toolMessage!.content);
     expect(parsed.success).toBe(false);
@@ -984,7 +1009,7 @@ describe("validate_finding tool", () => {
       repliesGenerator(['{"tool": "validate_finding", "arguments": ["{\\"findingId\\":\\"x\\",\\"verdict\\":\\"maybe\\",\\"notes\\":\\"n\\"}"]}', "ok"]),
     );
 
-    const task = await createTask("test-agent", "objective", "proj-validate-finding-3");
+    const task = await createTask(VALIDATOR, "objective", "proj-validate-finding-3");
 
     expect(task.status).toBe("completed");
     const toolMessage = task.messages.find((m) => m.role === "tool");
@@ -1007,7 +1032,7 @@ describe("validate_finding tool", () => {
       repliesGenerator([`{"tool": "validate_finding", "arguments": [${JSON.stringify(payload)}]}`, "ok"]),
     );
 
-    const task = await createTask("test-agent", "objective", "proj-validate-finding-4");
+    const task = await createTask(VALIDATOR, "objective", "proj-validate-finding-4");
     const toolMessage = task.messages.find((m) => m.role === "tool");
     const parsed = JSON.parse(toolMessage!.content);
     expect(parsed.success).toBe(false);
@@ -1860,7 +1885,7 @@ describe("pseudo-tool JSON arguments and self-validation", () => {
       description: "d",
       target: "example.com",
       value: "v",
-      tool: "test-agent",
+      tool: "vulnerability-validator",
     });
     own.source = "agent";
     const args = JSON.stringify({ findingId: own.id, verdict: "confirmed", notes: "trust me" }).replaceAll('"', '\\"');
@@ -1868,7 +1893,7 @@ describe("pseudo-tool JSON arguments and self-validation", () => {
       repliesGenerator([`{"tool": "validate_finding", "arguments": ["${args}"]}`, "Okay."]),
     );
 
-    const task = await createTask("test-agent", "objective", "proj-self");
+    const task = await createTask("vulnerability-validator", "objective", "proj-self");
 
     expect(JSON.parse(task.messages.find((m) => m.role === "tool")!.content).message).toContain("created itself");
     expect(own.status).toBe("potential");

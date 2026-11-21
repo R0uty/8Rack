@@ -12,6 +12,7 @@ export type MissionEventType =
   | "work_order_started"
   | "work_order_completed"
   | "work_order_failed"
+  | "work_order_cancelled"
   | "finding_created"
   | "finding_status_changed"
   | "finding_validated"

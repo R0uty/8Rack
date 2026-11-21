@@ -298,7 +298,17 @@ function buildResolvedCommand(tool: ExecTool, args: string[]): string {
  * setsid-wrapped escalation would survive cancellation. `env` is deliberately NOT listed: an
  * env-wrapped escalation (`env PATH=... sudo ...`) still contains the verb itself, so the /i verb
  * match already catches it, and a bare `env VAR=x cmd` is legitimate. */
-const PRIVILEGED_COMMAND_RE = /(?<![\w.-])(sudo|doas|pkexec|su|setsid)(?![\w.-])/i;
+const PRIVILEGED_VERBS = new Set(["sudo", "doas", "pkexec", "su", "setsid"]);
+
+/** Whether any word of the command, by itself or as the last part of a path (/usr/bin/sudo), is an
+ * escalation verb. Split on whitespace and shell punctuation; a URL is never a command, so
+ * `curl https://host/su/` or `.../admin/sudo` no longer trips the check. */
+function invokesPrivilegedCommand(resolvedCommand: string): boolean {
+  return resolvedCommand
+    .split(/[\s;&|()`'"<>$]+/)
+    .filter((word) => word && !word.includes("://"))
+    .some((word) => PRIVILEGED_VERBS.has((word.split("/").pop() ?? "").toLowerCase()));
+}
 
 /** Every process is spawned via toolExecutor without a TTY or a way to answer a password prompt
  * (see runExecutable in toolExecutor.ts), so a privileged command can never succeed here — it
@@ -306,7 +316,7 @@ const PRIVILEGED_COMMAND_RE = /(?<![\w.-])(sudo|doas|pkexec|su|setsid)(?![\w.-])
  * agent an actionable reason instead of an inscrutable "a terminal is required" stderr it might
  * otherwise retry against. */
 function assertNotPrivileged(resolvedCommand: string): void {
-  if (PRIVILEGED_COMMAND_RE.test(resolvedCommand)) {
+  if (invokesPrivilegedCommand(resolvedCommand)) {
     throw new PrivilegedCommandError(resolvedCommand);
   }
 }

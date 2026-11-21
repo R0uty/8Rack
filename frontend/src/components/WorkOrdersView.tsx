@@ -37,12 +37,14 @@ function lastToolProblem(task: OrchestratorTask): string | undefined {
 
 interface WorkOrderCardProps {
   workOrder: WorkOrder;
+  /** Another order was created to retry this one - it no longer needs attention. */
+  retried?: boolean;
   onRefreshStatus: (id: string) => Promise<WorkOrder>;
   onRetry: (input: WorkOrderCreateInput) => Promise<void>;
   onCancel: (id: string) => Promise<WorkOrder>;
 }
 
-function WorkOrderCard({ workOrder, onRefreshStatus, onRetry, onCancel }: WorkOrderCardProps) {
+function WorkOrderCard({ workOrder, retried = false, onRefreshStatus, onRetry, onCancel }: WorkOrderCardProps) {
   const [task, setTask] = useState<OrchestratorTask | null>(null);
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
@@ -112,6 +114,7 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry, onCancel }: WorkOr
         priority: workOrder.priority,
         relatedAssets: workOrder.relatedAssets,
         relatedFindings: workOrder.relatedFindings,
+        retryOf: workOrder.id,
       });
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Failed to retry the work order");
@@ -139,14 +142,23 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry, onCancel }: WorkOr
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <StatusPill tone={STATUS_TONE[workOrder.status]}>{workOrder.status.replace(/_/g, " ")}</StatusPill>
+            {workOrder.noOutcome && (
+              <StatusPill tone="warning" dot={false}>
+                <span title="The agent answered without running or recording anything">no tool used</span>
+              </StatusPill>
+            )}
+            {retried && <span className="text-[11px] text-muted">retried</span>}
             <span className="text-[11px] text-muted">{workOrder.agentId}</span>
           </div>
           <p className={`mt-1.5 text-sm text-text ${open ? "" : "line-clamp-2"}`}>{workOrder.objective}</p>
           {workOrder.target && <p className="mt-0.5 font-mono text-xs text-muted">target: {workOrder.target}</p>}
+          {workOrder.status === "failed" && (
+            <p className="mt-1.5 text-xs text-critical">{workOrder.result || "It failed without recording a reason."}</p>
+          )}
           <p className="mt-1.5 text-[11px] text-muted">created {relativeTime(workOrder.createdAt)}</p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {(workOrder.status === "failed" || workOrder.status === "cancelled") && (
+          {(workOrder.status === "failed" || workOrder.status === "cancelled") && !retried && (
             <Button variant="secondary" size="sm" onClick={handleRetry} disabled={retrying}>
               {retrying ? "Retrying…" : "Retry"}
             </Button>
@@ -201,9 +213,10 @@ function WorkOrderCard({ workOrder, onRefreshStatus, onRetry, onCancel }: WorkOr
           )}
 
           {task?.finalResponse && <Markdown content={task.finalResponse} />}
-          {task && !task.finalResponse && task.status !== "waiting_guidance" && task.status !== "waiting_confirmation" && (
+          {task && !task.finalResponse && !task.error && task.status !== "waiting_guidance" && task.status !== "waiting_confirmation" && (
             <p className="text-xs text-muted">No final response yet ({task.status}).</p>
           )}
+          {task?.error && workOrder.status !== "failed" && <p className="text-xs text-critical">{task.error}</p>}
         </div>
       )}
     </GlassPanel>
@@ -224,6 +237,8 @@ export function WorkOrdersView({ mission, active = true }: { mission: Mission | 
     const created = await create(input);
     await start(created.id);
   };
+
+  const retriedIds = new Set(workOrders.map((w) => w.retryOf).filter(Boolean));
 
   const grouped = (["running", "waiting_approval", "queued", "pending", "completed", "failed", "cancelled"] as const)
     .map((status) => ({ status, items: workOrders.filter((w) => w.status === status) }))
@@ -246,7 +261,11 @@ export function WorkOrdersView({ mission, active = true }: { mission: Mission | 
             </p>
             <div className="flex flex-col gap-2">
               {group.items.map((w) => (
-                <WorkOrderCard key={w.id} workOrder={w} onRefreshStatus={refreshOne} onRetry={handleRetry} onCancel={cancel} />
+                <WorkOrderCard
+                  key={w.id}
+                  workOrder={w}
+                  retried={retriedIds.has(w.id)}
+                  onRefreshStatus={refreshOne} onRetry={handleRetry} onCancel={cancel} />
               ))}
             </div>
           </div>

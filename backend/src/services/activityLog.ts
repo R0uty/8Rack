@@ -13,6 +13,7 @@ import type { MissionEvent, MissionEventType } from "../types/missionEvent.js";
 
 const events = new Map<string, MissionEvent>();
 const ACTIVITY_FILE = "activity.json";
+let lastCreatedAt = 0;
 
 function missionEvents(missionId: string): MissionEvent[] {
   return [...events.values()].filter((e) => e.missionId === missionId).sort((a, b) => b.createdAt - a.createdAt);
@@ -54,7 +55,10 @@ export async function logActivity(
   meta?: Record<string, unknown>,
 ): Promise<void> {
   try {
-    const event: MissionEvent = { id: randomUUID(), missionId, type, summary, createdAt: Date.now(), meta };
+    // Strictly increasing, so events logged in the same millisecond (a work order's "created" and
+    // "started" routinely are) still list in the order they happened - the list is sorted on this.
+    lastCreatedAt = Math.max(Date.now(), lastCreatedAt + 1);
+    const event: MissionEvent = { id: randomUUID(), missionId, type, summary, createdAt: lastCreatedAt, meta };
     events.set(event.id, event);
     await persistActivity(missionId);
   } catch (err) {

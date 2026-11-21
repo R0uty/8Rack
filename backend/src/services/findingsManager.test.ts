@@ -166,6 +166,18 @@ describe("CRUD", () => {
     expect(events.some((e) => e.type === "finding_status_changed")).toBe(false);
   });
 
+  it("keeps the runs an agent's verdict rests on, and drops the verdict once a human changes the status", async () => {
+    const missionId = randomUUID();
+    const [created] = await ingestExecution(fixtureExecution({ missionId }));
+    await validateFinding(created.id, "vulnerability-validator", "confirmed", "Reproduced", undefined, ["exec-1"]);
+    expect(created.validatedBy).toBe("vulnerability-validator");
+    expect(created.validationExecutionIds).toEqual(["exec-1"]);
+
+    const updated = await updateFinding(created.id, { status: "false_positive" });
+    expect(updated.validatedBy).toBeUndefined();
+    expect(updated.validationExecutionIds).toBeUndefined();
+  });
+
   it("updateFinding applies parameter/impact/reproductionSteps patches", async () => {
     const missionId = randomUUID();
     const [created] = await ingestExecution(fixtureExecution({ missionId }));

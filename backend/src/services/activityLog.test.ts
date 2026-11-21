@@ -44,6 +44,20 @@ describe("logActivity / listActivity", () => {
     }
   });
 
+  it("keeps events logged in the same millisecond in the order they happened", async () => {
+    vi.useFakeTimers();
+    try {
+      const missionId = randomUUID();
+      await logActivity(missionId, "work_order_created", "created");
+      await logActivity(missionId, "work_order_started", "started");
+      await logActivity(missionId, "work_order_completed", "completed");
+
+      expect(listActivity(missionId).map((e) => e.type)).toEqual(["work_order_completed", "work_order_started", "work_order_created"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("only returns events for the requested mission", async () => {
     const missionA = randomUUID();
     const missionB = randomUUID();

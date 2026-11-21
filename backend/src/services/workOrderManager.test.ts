@@ -104,6 +104,28 @@ describe("createWorkOrder", () => {
   });
 });
 
+describe("retries and outcomes", () => {
+  it("records which order a retry replaces", async () => {
+    const missionId = randomUUID();
+    const original = await createWorkOrder(missionId, { agentId: "recon-agent", objective: "o" });
+    const retry = await createWorkOrder(missionId, { agentId: "recon-agent", objective: "o", retryOf: original.id });
+
+    expect(retry.retryOf).toBe(original.id);
+    expect(original.retryOf).toBeUndefined();
+  });
+
+  it("marks an order that completed without a single tool call as having no outcome", async () => {
+    const missionId = randomUUID();
+    const prose = await createWorkOrder(missionId, { agentId: "recon-agent", objective: "o" });
+    mockCreateTask.mockResolvedValueOnce(fixtureTask({ missionId, finalResponse: "Shall I proceed?" }));
+    expect((await startWorkOrder(prose.id)).noOutcome).toBe(true);
+
+    const worked = await createWorkOrder(missionId, { agentId: "recon-agent", objective: "o" });
+    mockCreateTask.mockResolvedValueOnce(fixtureTask({ missionId, toolCallCount: 2 }));
+    expect((await startWorkOrder(worked.id)).noOutcome).toBeUndefined();
+  });
+});
+
 describe("dependenciesSatisfied", () => {
   it("is true with no dependencies", async () => {
     const wo = await createWorkOrder(randomUUID(), { agentId: "a", objective: "o" });
@@ -247,6 +269,13 @@ describe("cancelWorkOrder", () => {
     expect(mockCancelTask).toHaveBeenCalledWith(task.id);
     expect(cancelled.status).toBe("cancelled");
     expect(cancelled.completedAt).toBeTruthy();
+  });
+
+  it("logs the cancellation to the mission's activity", async () => {
+    const missionId = randomUUID();
+    const wo = await createWorkOrder(missionId, { agentId: "recon-agent", objective: "never mind" });
+    cancelWorkOrder(wo.id);
+    await vi.waitFor(() => expect(listActivity(missionId).map((e) => e.type)).toContain("work_order_cancelled"));
   });
 
   it("still cancels a never-started work order (no task to abort)", async () => {
