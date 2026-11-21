@@ -301,8 +301,17 @@ in control of what runs and against what.
   don't have route tests yet.
 - `cd frontend && npm test`: hooks and components with React Testing Library.
 - `cd mcp-servers/rag && .venv/bin/python -m pytest`.
-- `backend/scripts/smoke-test.mjs` (`npm run smoke`) is **broken**. It still calls `/api/projects` and
-  `/api/plans`, which no longer exist (see `TODO.md`).
+- `cd backend && npm run smoke` (`scripts/smoke-test.mjs`) needs a running backend and Ollama. It
+  covers:
+  - health, setup, agents and a streamed agent reply;
+  - the mission event stream;
+  - a work order that asks for a tool, the approval, the run, and the run resuming by itself to a
+    final answer.
+
+  It works in a throwaway mission with no scope and deletes it at the end. The only request it ever
+  approves is `list_directory` on the workspace root. Anything else is rejected and fails the stage,
+  so it never approves a scan on its own. The agent is a real model, so a run where it answers
+  without using the tool fails stage 6; run it again before calling that a regression.
 - **Live checks matter here:** most real bugs in this project were found by running a mission against
   a local target, not by the unit suites. Use a throwaway mission with scope `127.0.0.1` (or a
   `127.0.0.2` server, so nmap can't reach anything else) and delete it afterwards. Tool approvals are
