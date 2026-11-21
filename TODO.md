@@ -115,7 +115,5 @@ Design and reasoning: `DEVELOPMENT.md`, "Knowledge base and MCP", and in full in
 
 ## Local environment (this machine, not the code)
 
-- [ ] Delete `backend/data/missions/00000000-0000-0000-0000-000000000000/` by hand. It's skipped at
-      load, but still on disk.
 - [ ] `katana`, `subfinder` and `amass` aren't installed, and `/usr/bin/httpx` is the Python tool, not
       ProjectDiscovery's. The setup checklist has the install commands.
