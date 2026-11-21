@@ -1,6 +1,6 @@
 import { Database, RefreshCw } from "lucide-react";
 import { useRag } from "../hooks/useRag";
-import { Button, GlassPanel, SectionHeading, Skeleton } from "./ui";
+import { Button, GlassPanel, SectionHeading, Skeleton, Notice } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
 
 /**
@@ -31,7 +31,7 @@ export function KnowledgeBasePanel() {
         Knowledge Base
       </SectionHeading>
 
-      {error && <p className="mb-2 text-xs text-critical">{error}</p>}
+      {error && <Notice className="mb-2">{error}</Notice>}
 
       {loading && !status && <Skeleton className="h-16 w-full" />}
 

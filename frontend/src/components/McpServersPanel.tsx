@@ -1,6 +1,6 @@
 import { RefreshCw } from "lucide-react";
 import { useMcpServers } from "../hooks/useMcpServers";
-import { Button, GlassPanel, SectionHeading, Skeleton, StatusPill, type Tone } from "./ui";
+import { Button, GlassPanel, SectionHeading, Skeleton, StatusPill, type Tone, Notice } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
 import type { McpServerState, McpServerStatus } from "../types/mcp";
 
@@ -40,7 +40,7 @@ export function McpServersPanel() {
         MCP Servers
       </SectionHeading>
 
-      {error && <p className="mb-2 text-xs text-critical">{error}</p>}
+      {error && <Notice className="mb-2">{error}</Notice>}
       {loading && !servers && <Skeleton className="h-16 w-full" />}
 
       {servers && servers.length === 0 && (
@@ -83,7 +83,7 @@ function ServerCard({ server }: { server: McpServerStatus }) {
           {server.url}
         </p>
       )}
-      {server.error && <p className="mt-2 text-xs text-critical">{server.error}</p>}
+      {server.error && <Notice className="mt-2">{server.error}</Notice>}
 
       {server.state === "online" && (
         <div className="mt-3">

@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import { Search, Sparkles, X } from "lucide-react";
+import { Bug, Play, Plus, Search, Sparkles, X } from "lucide-react";
+import { NewFindingSheet } from "./NewFindingSheet";
+import { useAppNav } from "../lib/appNav";
 import { FindingsTable } from "./FindingsTable";
 import { FindingDetails } from "./FindingDetails";
 import { Markdown } from "./Markdown";
 import { NoMission } from "./NoMission";
-import { Button, GlassPanel, SELECT_CLASS, SkeletonRows, StreamingCursor } from "./ui";
+import { Button, EmptyState, GlassPanel, SELECT_CLASS, SkeletonRows, StreamingCursor, Notice } from "./ui";
 import { useFindings } from "../hooks/useFindings";
 import { useReports } from "../hooks/useReports";
 import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
 import { FINDING_STATUSES } from "../lib/findingStatus";
-import type { Finding, FindingSeverity } from "../types/finding";
+import type { Finding, FindingSeverity, FindingStatus } from "../types/finding";
 import type { Mission } from "../types/mission";
 
 const SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
@@ -23,9 +25,10 @@ function matchesQuery(f: Finding, query: string): boolean {
  * to generate a report. Filtering is client-side over the already-fetched list. */
 export function FindingsView({ mission, active = true }: { mission: Mission | null; active?: boolean }) {
   const missionId = mission?.id ?? null;
-  const { findings, loading, error, update, refresh: refreshFindings } = useFindings(missionId);
+  const { findings, loading, error, create, update, refresh: refreshFindings } = useFindings(missionId);
   const { generating, streamingText, error: reportError, generate } = useReports(missionId);
   useRefreshOnActivate(active, refreshFindings);
+  const { openView } = useAppNav();
 
   const [query, setQuery] = useState("");
   const [severity, setSeverity] = useState("");
@@ -34,6 +37,10 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [reportTitle, setReportTitle] = useState("");
+  const [bulkStatus, setBulkStatus] = useState<FindingStatus | "">("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
 
   // A finding selection (report checkboxes, or the details drawer) made for one mission shouldn't
   // silently carry over once you switch to another - the drawer previously kept showing the old
@@ -70,6 +77,27 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
     }
   };
 
+  // One PATCH per finding: the API has no bulk route, and a mission's selection is small. Stops at the
+  // first failure and says how far it got.
+  const handleBulkStatus = async () => {
+    if (!bulkStatus || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkError(null);
+    const ids = [...selectedIds];
+    let done = 0;
+    try {
+      for (const id of ids) {
+        await update(id, { status: bulkStatus });
+        done++;
+      }
+      setBulkStatus("");
+    } catch (err) {
+      setBulkError(`Updated ${done} of ${ids.length}: ${err instanceof Error ? err.message : "the rest failed"}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const types = useMemo(() => [...new Set(findings.map((f) => f.type))].sort(), [findings]);
 
   const filtered = useMemo(() => {
@@ -87,6 +115,11 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
 
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex justify-end">
+        <Button variant="secondary" size="sm" icon={Plus} onClick={() => setAdding(true)}>
+          Add finding
+        </Button>
+      </div>
       {findings.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 basis-56">
@@ -132,6 +165,26 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
             <span className="text-xs text-muted">
               {selectedIds.size} finding{selectedIds.size === 1 ? "" : "s"} selected
             </span>
+            <select
+              aria-label="New status for selected findings"
+              value={bulkStatus}
+              onChange={(e) => setBulkStatus(e.target.value as FindingStatus | "")}
+              disabled={bulkBusy}
+              className={SELECT_CLASS}
+            >
+              <option value="">Set status…</option>
+              {FINDING_STATUSES.map((s) => (
+                <option key={s} value={s}>
+                  {s.replace(/_/g, " ")}
+                </option>
+              ))}
+            </select>
+            <Button variant="secondary" size="sm" onClick={handleBulkStatus} disabled={!bulkStatus || bulkBusy}>
+              {bulkBusy ? "Updating…" : "Apply"}
+            </Button>
+          </div>
+          {bulkError && <Notice>{bulkError}</Notice>}
+          <div className="flex flex-wrap items-center gap-2">
             <input
               aria-label="Report title"
               value={reportTitle}
@@ -147,7 +200,7 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
               Clear
             </Button>
           </div>
-          {reportError && <p className="text-xs text-critical">{reportError}</p>}
+          {reportError && <Notice>{reportError}</Notice>}
           {generating && streamingText && (
             <div className="max-h-56 overflow-y-auto rounded-lg border border-border bg-surface-2 p-3">
               <Markdown content={streamingText} />
@@ -157,10 +210,12 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
         </GlassPanel>
       )}
 
-      {error && <p className="text-xs text-critical">{error}</p>}
+      {error && <Notice>{error}</Notice>}
       {loading && findings.length === 0 && <SkeletonRows count={5} />}
       {!loading && findings.length === 0 && !error && (
-        <p className="text-xs text-muted">No findings yet - advance the factory or run a scan to discover some.</p>
+        <EmptyState icon={Bug} title="No findings yet" action={{ label: "Open the Factory", icon: Play, onClick: openView && (() => openView("factory")) }}>
+          Findings come from tool output and from the agents. Advance the factory, or run a scan from Tools.
+        </EmptyState>
       )}
       {findings.length > 0 && (
         <FindingsTable
@@ -171,6 +226,8 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
           onToggleSelectAll={toggleSelectAll}
         />
       )}
+
+      <NewFindingSheet open={adding} onClose={() => setAdding(false)} onCreate={create} />
 
       <FindingDetails
         finding={openFinding}

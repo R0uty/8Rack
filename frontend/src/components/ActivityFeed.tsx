@@ -1,7 +1,7 @@
 import { Activity } from "lucide-react";
 import type { MissionEvent, MissionEventType } from "../types/missionEvent";
 import { relativeTime } from "../lib/relativeTime";
-import { GlassPanel, SkeletonRows, StatusPill, type Tone } from "./ui";
+import { GlassPanel, SkeletonRows, StatusPill, type Tone, Notice } from "./ui";
 
 interface ActivityFeedProps {
   events: MissionEvent[];
@@ -13,6 +13,7 @@ const EVENT_TONE: Record<MissionEventType, Tone> = {
   mission_created: "neutral",
   mission_status_changed: "neutral",
   asset_discovered: "info",
+  asset_removed: "neutral",
   work_order_created: "info",
   work_order_started: "info",
   work_order_completed: "primary",
@@ -30,6 +31,7 @@ const EVENT_LABEL: Record<MissionEventType, string> = {
   mission_created: "mission",
   mission_status_changed: "mission",
   asset_discovered: "asset",
+  asset_removed: "asset",
   work_order_created: "work order",
   work_order_started: "work order",
   work_order_completed: "work order",
@@ -50,7 +52,7 @@ const EVENT_LABEL: Record<MissionEventType, string> = {
  * mission status changes, and blocked out-of-scope executions - the factory's full audit trail.
  */
 export function ActivityFeed({ events, loading, error }: ActivityFeedProps) {
-  if (error) return <p className="text-xs text-critical">{error}</p>;
+  if (error) return <Notice>{error}</Notice>;
   if (loading && events.length === 0) return <SkeletonRows count={5} />;
   if (events.length === 0) return <p className="text-xs text-muted">No activity yet for this mission.</p>;
 

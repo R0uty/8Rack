@@ -11,7 +11,7 @@ import type { ChunkListener } from "./orchestrator.js";
 import type { Mission, MissionStatus } from "../types/mission.js";
 import type { Asset } from "../types/asset.js";
 import type { Finding } from "../types/finding.js";
-import type { WorkOrder } from "../types/workOrder.js";
+import type { WorkOrder, WorkOrderCreateInput } from "../types/workOrder.js";
 
 /**
  * The Factory Director: reads a mission's scope/assets/findings/work orders and drives the factory
@@ -102,13 +102,14 @@ async function withScopeHosts(mission: Mission, assets: Asset[]): Promise<Asset[
  * testable end-to-end without depending on an LLM planning call. Idempotent against *concurrent*
  * duplicates (never seeds a second work order while a matching one is still in progress).
  */
-async function seedWorkOrders(
+function planSeeds(
   mission: Mission,
   assets: Asset[],
   findings: Finding[],
   existing: WorkOrder[],
   isFollowUp: boolean,
-): Promise<void> {
+): WorkOrderCreateInput[] {
+  const seeds: WorkOrderCreateInput[] = [];
   // Re-trying a settled Recon/Validation order is what a human's fresh advance call asks for (see
   // IN_PROGRESS_WORK_ORDER_STATUSES) - never the auto-chain's follow-up passes. A model that answers
   // in prose instead of calling a tool "completes" without changing the outcome, so re-seeding there
@@ -116,7 +117,7 @@ async function seedWorkOrders(
   const blocksReseed = isFollowUp ? hasBlockingWorkOrder : hasInProgressWorkOrder;
 
   if (assets.length === 0 && mission.scope?.length && !blocksReseed(existing, (wo) => wo.agentId === RECON_AGENT_ID)) {
-    await createWorkOrder(mission.id, {
+    seeds.push({
       agentId: RECON_AGENT_ID,
       objective:
         `Perform initial reconnaissance on this mission's in-scope targets: ${mission.scope.join(", ")}. Discover ` +
@@ -133,7 +134,7 @@ async function seedWorkOrders(
   for (const asset of assets) {
     if (!ENUMERABLE_ASSET_TYPES.includes(asset.type)) continue;
     if (hasBlockingWorkOrder(existing, (wo) => wo.agentId === WEB_ANALYZER_AGENT_ID && wo.target === asset.value)) continue;
-    await createWorkOrder(mission.id, {
+    seeds.push({
       agentId: WEB_ANALYZER_AGENT_ID,
       objective:
         `Enumerate and analyze "${asset.value}" (${asset.type}) for this mission - identify running ` +
@@ -149,7 +150,7 @@ async function seedWorkOrders(
   for (const finding of findings) {
     if (!UNSETTLED_FINDING_STATUSES.includes(finding.status)) continue;
     if (blocksReseed(existing, (wo) => wo.agentId === VALIDATOR_AGENT_ID && wo.relatedFindings.includes(finding.id))) continue;
-    await createWorkOrder(mission.id, {
+    seeds.push({
       agentId: VALIDATOR_AGENT_ID,
       objective:
         `Validate finding "${finding.title}" (id: ${finding.id}, target: ${finding.target}) for this ` +
@@ -160,6 +161,21 @@ async function seedWorkOrders(
       priority: 8,
       relatedFindings: [finding.id],
     });
+  }
+  return seeds;
+}
+
+/** Creates the orders planSeeds asks for. Split so previewAdvance can ask the same question without
+ * creating anything. */
+async function seedWorkOrders(
+  mission: Mission,
+  assets: Asset[],
+  findings: Finding[],
+  existing: WorkOrder[],
+  isFollowUp: boolean,
+): Promise<void> {
+  for (const seed of planSeeds(mission, assets, findings, existing, isFollowUp)) {
+    await createWorkOrder(mission.id, seed);
   }
 }
 
@@ -318,4 +334,61 @@ async function advanceChain(
   }
 
   return advanceChain(missionId, onChunk, signal, ranSoFar + 1, onWorkOrder);
+}
+
+export interface FactoryPreview {
+  /** The order Advance would start first, if any: an existing pending one, or one it would create. */
+  next?: { agentId: string; objective: string; target?: string; existing: boolean };
+  /** Why nothing would run, when that's the case. */
+  blockedReason?: string;
+  /** Orders paused on a human, which Advance resumes first once they're settled. */
+  waitingOnApproval: number;
+  waitingOnGuidance: number;
+  /** Findings still to triage (potential/investigating) and confirmed ones, for the "nothing to run" line. */
+  unsettledFindings: number;
+  confirmedFindings: number;
+}
+
+/**
+ * What the next Advance would do, without doing any of it: the same seeding rules and runnable-order
+ * choice as advanceChain, minus creating orders or adding scope hosts. Approximate in one way: scope
+ * hosts that advanceChain would add as assets aren't counted, so their Enumeration orders show up
+ * one Advance later than they run.
+ */
+export async function previewAdvance(missionId: string): Promise<FactoryPreview> {
+  const mission = await getMission(missionId);
+  if (!mission) throw new MissionNotFoundError(missionId);
+  const workOrders = listWorkOrders(missionId);
+  const assets = listAssets(missionId);
+  const findings = getMissionFindings(missionId);
+  const waiting = workOrders.filter((wo) => wo.status === "waiting_approval");
+  const waitingOnGuidance = waiting.filter(workOrderNeedsGuidance).length;
+  const counts = {
+    waitingOnApproval: waiting.length - waitingOnGuidance,
+    waitingOnGuidance,
+    unsettledFindings: findings.filter((f) => UNSETTLED_FINDING_STATUSES.includes(f.status)).length,
+    confirmedFindings: findings.filter((f) => f.status === "confirmed").length,
+  };
+
+  if (HALTED_MISSION_STATUSES.includes(mission.status)) {
+    return { ...counts, blockedReason: `This mission is ${mission.status} - move it back to an active status to run more work.` };
+  }
+  if (assets.length === 0 && !mission.scope?.length) {
+    return { ...counts, blockedReason: "This mission has no scope yet - add at least one in-scope target." };
+  }
+
+  const pending = workOrders
+    .filter((wo) => wo.status === "pending" && dependenciesSatisfied(wo))
+    .map((wo) => ({ agentId: wo.agentId, objective: wo.objective, target: wo.target, priority: wo.priority, createdAt: wo.createdAt, existing: true }));
+  const seeded = planSeeds(mission, assets, findings, workOrders, false).map((seed, i) => ({
+    agentId: seed.agentId,
+    objective: seed.objective,
+    target: seed.target,
+    priority: seed.priority ?? 0,
+    createdAt: Number.MAX_SAFE_INTEGER - 1000 + i,
+    existing: false,
+  }));
+  const next = [...pending, ...seeded].sort((a, b) => b.priority - a.priority || a.createdAt - b.createdAt)[0];
+  if (!next) return counts;
+  return { ...counts, next: { agentId: next.agentId, objective: next.objective, target: next.target, existing: next.existing } };
 }

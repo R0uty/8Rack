@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { env } from "./config/env.js";
 import { modelsRouter } from "./routes/models.js";
+import { setupRouter } from "./routes/setup.js";
 import { chatRouter } from "./routes/chat.js";
 import { agentsRouter } from "./routes/agents.js";
 import { toolsRouter } from "./routes/tools.js";
@@ -67,6 +68,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/api/models", modelsRouter);
+app.use("/api/setup", setupRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/agents", agentsRouter);
 app.use("/api/tools/request", requireMission);
@@ -83,7 +85,7 @@ app.use("/api/mcp", mcpRouter);
 app.use("/api/scanners", scannersRouter);
 app.use("/api/missions/:missionId/scans", requireMission, missionScansRouter);
 app.use("/api/missions/:missionId/reports", requireMission, missionReportsRouter);
-app.use("/api/missions/:missionId/assets", missionAssetsRouter);
+app.use("/api/missions/:missionId/assets", requireMission, missionAssetsRouter);
 app.use("/api/missions/:missionId/workorders", requireMission, missionWorkOrdersRouter);
 
 app.use(errorHandler);

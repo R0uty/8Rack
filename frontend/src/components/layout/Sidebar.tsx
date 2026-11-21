@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Bot, FactoryIcon, FileText, ListChecks, Radar, ShieldAlert, Wrench } from "lucide-react";
 import { FOCUS_RING, StatusPill } from "../ui";
 import { cn } from "../../lib/cn";
@@ -22,6 +22,13 @@ const NAV_ICON: Record<AppView, typeof Bot> = {
 };
 
 export function Sidebar({ activeView, onChangeView, missionSwitcher, ollamaStatus }: SidebarProps) {
+  // Below md the nav is one horizontal strip that scrolls; without this, picking a view from
+  // elsewhere (an empty state's action, the command palette) left its tab off-screen at 375px.
+  const activeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    activeRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [activeView]);
+
   return (
     <aside className="flex w-full shrink-0 flex-col border-b border-border bg-surface/80 backdrop-blur-xl md:h-full md:w-[232px] md:border-b-0 md:border-r">
       <div className="flex items-center gap-2.5 px-4 pb-2 pt-3 md:pb-3 md:pt-4">
@@ -35,18 +42,19 @@ export function Sidebar({ activeView, onChangeView, missionSwitcher, ollamaStatu
 
       <div className="px-3 pb-2 md:pb-3">{missionSwitcher}</div>
 
-      <nav className="flex gap-1 overflow-x-auto px-3 pb-2 md:flex-col md:overflow-visible md:pb-3">
+      <nav aria-label="Main" className="flex snap-x gap-1 overflow-x-auto scroll-px-3 px-3 pb-2 md:flex-col md:overflow-visible md:pb-3">
         {PRIMARY_VIEWS.map((view) => {
           const Icon = NAV_ICON[view];
           const active = view === activeView;
           return (
             <button
               key={view}
+              ref={active ? activeRef : undefined}
               type="button"
               onClick={() => onChangeView(view)}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors duration-150",
+                "flex shrink-0 snap-start items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors duration-150",
                 view === "agents" && "md:mt-3",
                 FOCUS_RING,
                 active ? "bg-primary-dim text-primary" : "text-muted hover:bg-card hover:text-text",

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { AppShell, Sidebar, TopBar, type AppView } from "./components/layout";
 import { cn } from "./lib/cn";
 import { AgentEditor } from "./components/AgentEditor";
@@ -17,6 +17,7 @@ import { useAgents } from "./hooks/useAgents";
 import { useMissions } from "./hooks/useMissions";
 import { useSelectedMission } from "./hooks/useSelectedMission";
 import { useMissionEventStream, useRefreshOnChange } from "./hooks/useMissionEvents";
+import { AppNavContext, type AppNav } from "./lib/appNav";
 import { useTools } from "./hooks/useTools";
 import { useTheme } from "./hooks/useTheme";
 import type { AgentWithStatus } from "./types/agent";
@@ -62,6 +63,8 @@ function App() {
   // undefined = editor closed, null = create mode, an agent/mission = edit mode.
   const [editingAgent, setEditingAgent] = useState<AgentWithStatus | null | undefined>(undefined);
   const [editingMission, setEditingMission] = useState<Mission | null | undefined>(undefined);
+  // A target another view asked to scan; `at` makes asking twice for the same target count.
+  const [scanRequest, setScanRequest] = useState<{ target: string; at: number } | null>(null);
   // One event stream for the selected mission; every mission-scoped hook refreshes from it.
   useMissionEventStream(mission?.id ?? null);
   useRefreshOnChange(mission?.id ?? null, ["mission"], refreshMissions);
@@ -85,8 +88,23 @@ function App() {
       </div>
     );
 
+  const nav = useMemo<AppNav>(
+    () => ({
+      openView: changeView,
+      newMission: () => setEditingMission(null),
+      editMission: setEditingMission,
+      scanTarget: (target: string) => {
+        setScanRequest({ target, at: Date.now() });
+        changeView("tools");
+      },
+    }),
+    // changeView only calls state setters, so it never needs to be re-captured.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   return (
-    <>
+    <AppNavContext.Provider value={nav}>
       <AppShell
         sidebar={
           <Sidebar
@@ -119,8 +137,8 @@ function App() {
                 onOpenView={changeView}
               />,
             )}
-            {view("workorders", <WorkOrdersView mission={mission} active={activeView === "workorders"} />)}
-            {view("assets", <AssetsView mission={mission} active={activeView === "assets"} />)}
+            {view("workorders", <WorkOrdersView mission={mission} agents={agents} active={activeView === "workorders"} />)}
+            {view("assets", <AssetsView mission={mission} agents={agents} active={activeView === "assets"} />)}
             {view("findings", <FindingsView mission={mission} active={activeView === "findings"} />)}
             {view("reports", <ReportsView mission={mission} active={activeView === "reports"} />)}
             {view(
@@ -136,7 +154,7 @@ function App() {
                 onEditAgent={setEditingAgent}
               />,
             )}
-            {view("tools", <ToolsView agents={agents} mission={mission} active={activeView === "tools"} />)}
+            {view("tools", <ToolsView agents={agents} mission={mission} active={activeView === "tools"} scanRequest={scanRequest} />)}
           </>
         }
       />
@@ -158,7 +176,7 @@ function App() {
         onDelete={removeMission}
         onClose={() => setEditingMission(undefined)}
       />
-    </>
+    </AppNavContext.Provider>
   );
 }
 

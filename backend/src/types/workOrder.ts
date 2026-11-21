@@ -33,6 +33,8 @@ export interface WorkOrder {
   /** Completed without the agent calling a single tool - it answered in prose (often a question, or
    * a plan of what it would do) and nothing was run or recorded. Completed, but no outcome. */
   noOutcome?: boolean;
+  /** Tool calls its task has made so far (real tools and pseudo-tools), as of the last sync. */
+  toolCallCount?: number;
 }
 
 export type WorkOrderCreateInput = Pick<WorkOrder, "agentId" | "objective"> &

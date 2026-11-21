@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ExecToolWithStatus } from "../types/execTool";
 import { iconFor, ToolFallbackIcon } from "../lib/icons";
-import { GlassPanel, IconButton, SkeletonRows, StatusPill } from "./ui";
+import { GlassPanel, IconButton, SELECT_CLASS, SkeletonRows, StatusPill, Notice } from "./ui";
 import { Power } from "lucide-react";
 
 interface ToolRegistryProps {
@@ -17,8 +17,18 @@ export function ToolRegistry({ tools, loading, error, onToggleEnabled }: ToolReg
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
 
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("");
+  const [onlyMissing, setOnlyMissing] = useState(false);
+  const categories = useMemo(() => [...new Set(tools.map((t) => t.category))].sort(), [tools]);
+
+  const q = query.trim().toLowerCase();
   // What can actually run first - an uninstalled tool is the exception worth seeing last.
-  const sorted = [...tools].sort((a, b) => Number(b.availability === "available") - Number(a.availability === "available"));
+  const sorted = [...tools]
+    .filter((t) => !category || t.category === category)
+    .filter((t) => !onlyMissing || t.availability !== "available")
+    .filter((t) => !q || [t.name, t.id, t.description, t.executable].some((field) => field.toLowerCase().includes(q)))
+    .sort((a, b) => Number(b.availability === "available") - Number(a.availability === "available"));
 
   async function handleToggle(tool: ExecToolWithStatus) {
     if (!onToggleEnabled) return;
@@ -35,10 +45,38 @@ export function ToolRegistry({ tools, loading, error, onToggleEnabled }: ToolReg
 
   return (
     <section>
-      {error && <p className="mb-2 text-xs text-critical">{error}</p>}
-      {toggleError && <p className="mb-2 text-xs text-critical">{toggleError}</p>}
+      {error && <Notice className="mb-2">{error}</Notice>}
+      {toggleError && <Notice className="mb-2">{toggleError}</Notice>}
       {loading && tools.length === 0 && <SkeletonRows count={5} />}
       {!error && !loading && tools.length === 0 && <p className="text-xs text-muted">No tools registered</p>}
+      {tools.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <input
+            type="search"
+            aria-label="Search tools"
+            placeholder="Search tools"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="min-w-40 flex-1 rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60"
+          />
+          <select aria-label="Category" value={category} onChange={(e) => setCategory(e.target.value)} className={SELECT_CLASS}>
+            <option value="">All categories</option>
+            {categories.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          <label className="flex items-center gap-1.5 text-xs text-muted">
+            <input type="checkbox" checked={onlyMissing} onChange={(e) => setOnlyMissing(e.target.checked)} />
+            Not installed only
+          </label>
+          <span role="status" className="text-[11px] text-muted">
+            {sorted.length} of {tools.length}
+          </span>
+        </div>
+      )}
+      {tools.length > 0 && sorted.length === 0 && <p className="text-xs text-muted">No tools match.</p>}
 
       <div className="flex flex-col gap-2">
         {sorted.map((tool) => {

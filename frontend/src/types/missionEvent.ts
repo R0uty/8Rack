@@ -2,6 +2,7 @@ export type MissionEventType =
   | "mission_created"
   | "mission_status_changed"
   | "asset_discovered"
+  | "asset_removed"
   | "work_order_created"
   | "work_order_started"
   | "work_order_completed"

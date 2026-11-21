@@ -9,6 +9,7 @@ import type { WorkOrder } from "../types/workOrder";
 import type { OrchestratorTask } from "../types/orchestrator";
 
 vi.mock("../hooks/useWorkOrders", () => ({ useWorkOrders: vi.fn() }));
+vi.mock("../hooks/useFindings", () => ({ useFindings: vi.fn(() => ({ findings: [] })) }));
 vi.mock("../services/orchestratorApi", () => ({ fetchTask: vi.fn() }));
 
 const mockUseWorkOrders = vi.mocked(useWorkOrders);
@@ -92,14 +93,14 @@ describe("WorkOrdersView", () => {
     await waitFor(() => expect(screen.getByText("Found 3 open ports.")).toBeInTheDocument());
   });
 
-  it("points a pending tool confirmation at the Approval Queue", async () => {
+  it("points a pending tool confirmation at the dashboard's Needs you list", async () => {
     setup([fixtureWorkOrder({ status: "waiting_approval" })]);
     mockFetchTask.mockResolvedValue(fixtureTask({ status: "waiting_confirmation" }));
 
     render(<WorkOrdersView mission={mission} />);
     await userEvent.setup().click(screen.getByRole("button", { name: "Inspect" }));
 
-    await waitFor(() => expect(screen.getByText(/Approval Queue/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Needs you list/)).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
   });
 
@@ -226,5 +227,67 @@ describe("WorkOrdersView", () => {
     await user.click(screen.getByRole("button", { name: "Retry" }));
 
     expect(await screen.findByText("mission is gone")).toBeInTheDocument();
+  });
+
+  it("shows the agent's name, how long the order took and how many tools it called", () => {
+    setup([fixtureWorkOrder({ status: "completed", startedAt: 1_000, completedAt: 96_000, toolCallCount: 3 })]);
+    render(<WorkOrdersView mission={mission} agents={[{ id: "recon-agent", name: "Recon Agent" } as never]} />);
+    expect(screen.getByText("Recon Agent")).toBeInTheDocument();
+    expect(screen.getByText(/took 1m 35s/)).toBeInTheDocument();
+    expect(screen.getByText(/3 tool calls/)).toBeInTheDocument();
+  });
+
+  it("starts a pending order", async () => {
+    const start = vi.fn().mockResolvedValue(fixtureWorkOrder({ status: "running" }));
+    setup([fixtureWorkOrder({ status: "pending", orchestratorTaskId: undefined })], { start });
+    render(<WorkOrdersView mission={mission} />);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Start" }));
+    expect(start).toHaveBeenCalledWith("wo-1");
+  });
+
+  it("shows the whole transcript on Inspect: the agent's words, its tool calls and their results", async () => {
+    setup([fixtureWorkOrder({ status: "completed" })]);
+    mockFetchTask.mockResolvedValue(
+      fixtureTask({
+        messages: [
+          { role: "user", content: "Recon example.com" },
+          { role: "assistant", content: 'Scanning ports.\n{"tool": "nmap", "arguments": ["-sV", "example.com"]}' },
+          { role: "tool", content: JSON.stringify({ tool: "nmap", status: "completed", success: true, exitCode: 0, stdout: "80/tcp open http" }) },
+          { role: "user", content: "focus on 443" },
+        ],
+        finalResponse: "Done.",
+      }),
+    );
+    render(<WorkOrdersView mission={mission} />);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Inspect" }));
+
+    await waitFor(() => expect(screen.getByText("Scanning ports.")).toBeInTheDocument());
+    expect(screen.getByText("nmap -sV example.com")).toBeInTheDocument();
+    expect(screen.getByText("80/tcp open http")).toBeInTheDocument();
+    expect(screen.getByText("focus on 443")).toBeInTheDocument();
+    expect(screen.getByText("Done.")).toBeInTheDocument();
+  });
+
+  it("creates a work order for any enabled agent, and starts it on request", async () => {
+    const create = vi.fn().mockResolvedValue(fixtureWorkOrder({ id: "wo-5", status: "pending" }));
+    const start = vi.fn().mockResolvedValue(fixtureWorkOrder({ id: "wo-5", status: "running" }));
+    setup([], { create, start });
+    const agents = [
+      { id: "recon-agent", name: "Recon Agent", enabled: true, status: "online" },
+      { id: "planner", name: "Planner", enabled: true, status: "online" },
+      { id: "off", name: "Disabled Agent", enabled: false, status: "online" },
+    ] as never;
+    render(<WorkOrdersView mission={mission} agents={agents} />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "New work order" }));
+    expect(screen.queryByRole("option", { name: /Disabled Agent/ })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Agent"), "planner");
+    await user.type(screen.getByLabelText("Objective"), "Plan the API tests");
+    await user.type(screen.getByLabelText("Target (optional)"), "api.example.com");
+    await user.click(screen.getByRole("button", { name: "Create and start" }));
+
+    await waitFor(() => expect(start).toHaveBeenCalledWith("wo-5"));
+    expect(create).toHaveBeenCalledWith({ agentId: "planner", objective: "Plan the API tests", target: "api.example.com" });
   });
 });

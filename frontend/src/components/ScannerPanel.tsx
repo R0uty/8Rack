@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { Play, Radar, Square, X } from "lucide-react";
 import { useScans } from "../hooks/useScans";
-import { Button, GlassPanel, ProgressRing, Skeleton, StatusPill, type Tone } from "./ui";
+import { Button, GlassPanel, ProgressRing, Skeleton, StatusPill, type Tone, Notice } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
 import type { ScanRunStatus, ScanStepStatus } from "../types/scanner";
 
 interface ScannerPanelProps {
   missionId: string | null;
+  /** A target another view asked to scan (Assets → Scan). */
+  prefill?: { target: string; at: number } | null;
 }
 
 const STEP_STATUS_LABEL: Record<ScanStepStatus, string> = {
@@ -38,7 +40,7 @@ const RUN_STATUS_TONE: Record<ScanRunStatus, Tone> = {
  * scanRunner.ts and DEVELOPMENT.md's "Security scanners" section for why this differs from the
  * Orchestrator's per-tool-call confirmation.
  */
-export function ScannerPanel({ missionId }: ScannerPanelProps) {
+export function ScannerPanel({ missionId, prefill }: ScannerPanelProps) {
   const {
     profiles,
     scans,
@@ -57,7 +59,10 @@ export function ScannerPanel({ missionId }: ScannerPanelProps) {
   } = useScans(missionId);
 
   const [profileId, setProfileId] = useState("");
-  const [target, setTarget] = useState("");
+  const [target, setTarget] = useState(prefill?.target ?? "");
+  useEffect(() => {
+    if (prefill) setTarget(prefill.target);
+  }, [prefill]);
 
   // The hook's run/preview are keyed to whatever missionId it was constructed with; when the
   // selected mission changes (a scan for the old mission may still be settling server-side), drop
@@ -84,7 +89,7 @@ export function ScannerPanel({ missionId }: ScannerPanelProps) {
   return (
     <section>
       {!missionId && <p className="mb-2 text-xs text-muted">Select or create a mission above to run a scan.</p>}
-      {error && <p className="mb-2 text-xs text-critical">{error}</p>}
+      {error && <Notice className="mb-2">{error}</Notice>}
 
       {loading && profiles.length === 0 && <Skeleton className="h-24 w-full" />}
 

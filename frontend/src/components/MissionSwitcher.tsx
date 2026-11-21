@@ -1,6 +1,6 @@
 import { Pencil, Plus } from "lucide-react";
 import type { Mission } from "../types/mission";
-import { Button, IconButton, SELECT_CLASS } from "./ui";
+import { Button, IconButton, SELECT_CLASS, Notice } from "./ui";
 import { cn } from "../lib/cn";
 
 interface MissionSwitcherProps {
@@ -17,7 +17,7 @@ interface MissionSwitcherProps {
 }
 
 export function MissionSwitcher({ missions, selected, loading, error, disabled, onSelect, onNew, onEdit }: MissionSwitcherProps) {
-  if (error) return <p className="text-xs text-critical">{error}</p>;
+  if (error) return <Notice>{error}</Notice>;
   if (!loading && missions.length === 0) {
     return (
       <Button variant="primary" size="sm" icon={Plus} onClick={onNew} className="w-full justify-center">

@@ -1434,7 +1434,8 @@ Steps:
 Whole-project review covering fixes, UI, usability and backend: see `PLAN.md`. Phase 1 (small fixes)
 is done as of 2026-11-20, except 1.4/1.5, which moved into Phase 2 - see DEVELOPMENT.md's "Phase 1
 fixes (2026-11-20)". Phase 2 (server-owned factory runs, items 1.4/1.5 with it) is done as of
-2026-11-20, not committed - see DEVELOPMENT.md's "Phase 2: server-owned factory runs". Next is Phase 3.
+2026-11-20, committed. Phase 3 (UI and usability) is done as of 2026-11-21, not committed - see
+DEVELOPMENT.md's "Phase 3: UI and usability". Next is Phase 4.
 
 - [ ] Delete `backend/data/missions/00000000-0000-0000-0000-000000000000/` by hand. It's skipped at
       load now, but still on disk (local data, left for you).
@@ -1444,3 +1445,7 @@ fixes (2026-11-20)". Phase 2 (server-owned factory runs, items 1.4/1.5 with it) 
 - [ ] Phase 2 follow-ups: tool output printed before a page reload isn't replayed (keep a server-side
       tail per running execution and send it on connect); Retry/guidance return 409 while a run is going
       instead of queueing behind it.
+- [ ] Phase 3 follow-ups: scope entries with a port or path are accepted but only the host is
+      enforced (the editor warns on each such line) - the "recon scanned 1000 ports when the rules named
+      one" item. Not seen live: the Needs-you queue's approval, guidance and failed cards against a real
+      run, the Work Orders transcript, adding a finding by hand, bulk status (tests only).

@@ -106,6 +106,10 @@ transformation" backend half. Do it behind the existing tests for `factoryDirect
 
 ## Phase 3 - UI and usability
 
+**Status (2026-11-21): done, not committed**, except port and path granularity in scope (deferred:
+the editor now says plainly that neither is enforced). Details in DEVELOPMENT.md's "Phase 3: UI and
+usability (2026-11-21)".
+
 ### Factory Dashboard
 
 - **One "Needs you" queue.** Approvals, guidance requests and failed orders in one list at the top.

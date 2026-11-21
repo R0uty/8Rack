@@ -70,7 +70,8 @@ backend/src/
 │                       caps, EMBEDDING_MODEL, OLLAMA_NUM_CTX, NVD_API_KEY, MCP_SERVERS, MCP_RAG_SERVER (all from
 │                       .env; each MCP server's token comes from its own MCP_TOKEN_<ID>)
 ├── routes/             one file per concern: models, chat, agents, tools, orchestrator, missions,
-│                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports, mcp
+│                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports, mcp,
+│                       setup (first-run checklist)
 ├── services/           the real logic - see the list below
 ├── middleware/         errorHandler.ts - maps every domain Error subclass (services/errors.ts) to
 │                       an HTTP status + JSON body; every route's catch/next(err) funnels here.
@@ -104,13 +105,15 @@ Key files under `backend/src/services/`:
 | `missionManager.ts` / `missionStore.ts` | The mission-scoping primitive everything else below is keyed on - see "Missions" below |
 | `assetManager.ts` | The Asset Inventory - a real, deduplicated store (`upsertAsset`) of everything discovered about a mission, with a parent/child relationship tree |
 | `workOrderManager.ts` | Security Work Orders - a trackable unit of agent work backed 1:1 by a real `OrchestratorTask` |
-| `factoryDirector.ts` | The Factory Director - reads a mission's scope/assets/findings/work orders and deterministically seeds/starts Work Orders, auto-chaining through everything that doesn't need human approval. Also resumes paused orders whose execution a human has settled. Not a background timer: started through `missionRunner.ts` |
+| `factoryDirector.ts` | The Factory Director - reads a mission's scope/assets/findings/work orders and deterministically seeds/starts Work Orders, auto-chaining through everything that doesn't need human approval. Also resumes paused orders whose execution a human has settled. Not a background timer: started through `missionRunner.ts`. `previewAdvance` says what the next advance would do without doing it |
 | `missionRunner.ts` / `missionEvents.ts` | A mission's factory run, owned by the server: one per mission (409 on a second), started by `POST /factory/advance` (returns at once), stopped by `/factory/stop`, resumed by itself when a tool run a waiting order depends on settles. `missionEvents.ts` is the pub/sub behind `GET /api/missions/:id/events`; `missionStore.writeMissionJson` publishes a `changed` event on every write |
 | `activityLog.ts` | The Mission Activity Timeline - an explicit, named-event append-only log (`logActivity`), not derived from executions/tasks |
 | `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `knowledgeBase.ts` | The one entry point for the knowledge base (Orchestrator's `search_knowledge_base`, `/api/rag/*`, startup) - routes to the RAG MCP server named by `MCP_RAG_SERVER`, or to `ragIndex.ts` when unset. No fallback to the local index when the server is down |
 | `ragIndex.ts` | The built-in knowledge-base indexer/search over `WORKSPACE_ROOT` - only reached through `knowledgeBase.ts` |
 | `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS`, lists their tools (Tools → MCP servers), and `callTool` (used only by `knowledgeBase.ts` so far; agents can't call MCP tools by name yet). See "Planned: MCP servers as the tool and RAG providers" and "RAG server (step 2)" in `DEVELOPMENT.md` |
+| `missionAttention.ts` | Everything on a mission waiting on a human (`GET /api/missions/:id/attention`): tool approvals with tool description/targets/agent text, running tools, orders needing a note, failed orders not yet retried. Feeds the dashboard's Needs-you queue |
+| `setupCheck.ts` | The first-run checklist (`GET /api/setup`): Ollama reachable, each enabled agent's model and the embedding model pulled, which recon tools are missing (with install commands) |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
 | `reportManager.ts` / `reportEvidence.ts` | Report generation - one Report Writer agent call over a set of selected findings, tracked through a `status` field (`draft/ai_generated/human_review/ready/submitted`). The agent writes only the summary, impact and remediation; evidence and reproduction are built from recorded executions, and anything else on a finding is labelled unverified |
 
@@ -127,7 +130,7 @@ backend/data/
 ```
 frontend/src/
 ├── components/         One top-level component per nav view - FactoryDashboard (+FactoryPipeline/
-│                        ApprovalQueue), AssetsView, WorkOrdersView, FindingsView (+FindingDetails/
+│                        NeedsYouQueue/SetupChecklist), AssetsView, WorkOrdersView, FindingsView (+FindingDetails/
 │                        FindingsTable), ReportsView, AgentsView, ToolsView (tabs: ScannerPanel/
 │                        ExecutionHistoryPanel/ToolRegistry/KnowledgeBasePanel). MissionSwitcher +
 │                        MissionEditor are the only mission picker/editor. components/layout/

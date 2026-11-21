@@ -4,7 +4,7 @@ import type { AgentConfigWarning, AgentWithStatus } from "../types/agent";
 import type { ExecToolWithStatus } from "../types/execTool";
 import { iconFor } from "../lib/icons";
 import { AgentToolAccess } from "./AgentToolAccess";
-import { Button, GlassPanel, IconButton, SkeletonRows, StatusDot } from "./ui";
+import { Button, GlassPanel, IconButton, SkeletonRows, StatusDot, Notice } from "./ui";
 
 interface AgentsViewProps {
   agents: AgentWithStatus[];
@@ -35,7 +35,7 @@ export function AgentsView({ agents, loading, error, warnings, execTools, onRefr
         </Button>
       </div>
 
-      {error && <p className="text-xs text-critical">{error}</p>}
+      {error && <Notice>{error}</Notice>}
       {warnings.length > 0 && (
         <div className="rounded-lg border border-warning/30 bg-warning-dim px-2.5 py-2 text-xs text-warning">
           <p className="mb-1 font-medium">

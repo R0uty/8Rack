@@ -4036,3 +4036,81 @@ and the interrupted validator order went back to pending. No backend errors logg
 Known gaps: output printed before a reload isn't replayed (the store is client-side); Retry and
 guidance get a 409 while a run is going rather than queueing; run state is lost on a backend restart
 (orders and tasks aren't - the next advance picks them up).
+
+## Phase 3: UI and usability (2026-11-21)
+
+PLAN.md Phase 3. Built on Phase 2's event stream: every new list re-reads through
+`useRefreshOnChange` rather than polling.
+
+### Backend
+
+- **`services/missionAttention.ts`**, `GET /api/missions/:id/attention`: everything waiting on a human.
+  Approvals and running tools carry the tool's name, description and timeout, the hosts/IPs/URLs in
+  the arguments (`extractTargets`), the work order, and the agent's prose from the reply that asked
+  (fences and tool JSON stripped, 600 chars) - only while that request is the one the task is paused
+  on. Orders needing a note carry the error/stderr they stopped on. Failed orders exclude ones already
+  retried (`retryOf`).
+- **`factoryDirector.previewAdvance`**, `GET /:id/factory/preview`: what the next advance would start
+  (agent, objective, target, new or existing order) or why it wouldn't, plus waiting counts. Seeding was
+  split into a pure `planSeeds` so the preview and the real advance share it.
+- **Assets** gained `POST` (manual, defaults to `unverified`), `PATCH {status}` and `DELETE`
+  (`assetManager.deleteAsset` unlinks children and logs the new `asset_removed` event), with an
+  ownership check on `:assetId`; the router is now behind `requireMission`.
+- **Work orders** record `toolCallCount` (from the task, in `syncFromTask`).
+- **`services/setupCheck.ts`**, `GET /api/setup`: Ollama reachable; each enabled agent's model and,
+  when the built-in index serves the knowledge base, the embedding model (a bare name matches its
+  `:latest`); each enabled recon tool that `listExecToolsWithStatus` says is unavailable, with an install
+  command. A tool whose name resolves on PATH but fails the identity check (the python `httpx`) is
+  reported as "a different X is on PATH".
+
+### Frontend
+
+- **Shared:** `ui/Notice` (critical = `role="alert"`, others `role="status"`) replaced every inline red
+  error line; `ui/EmptyState` (icon, title, text, one action) replaced the grey one-liners in Assets,
+  Work Orders, Findings, Reports and NoMission. `lib/appNav.ts` is a context any view uses to switch
+  view, open the mission editor or prefill a scan (App provides it).
+- **Dashboard:** `NeedsYouQueue` replaced `ApprovalQueue` (and `usePendingExecutions`): approval cards
+  with tool description, targets, timeout, objective and agent text; guidance cards with a note box;
+  failed cards with Retry; running cards with live output and Cancel; an sr-only live count. Live
+  output is split into labelled tool lines (`lib/agentOutput.ts`). A "Next:" line from the preview, a
+  Stop button, a no-scope link into the editor. `useAttentionAlerts` puts the count in the tab title
+  and, if switched on with the bell, raises a browser notification when it grows while the tab is
+  hidden (`8rack.notifyOnAttention`). `SetupChecklist` sits on top while anything is missing; Hide
+  remembers the set of gaps (`8rack.setupChecklistHidden`), so a new gap shows it again.
+- **Work Orders:** agent names, duration, tool-call count, Start on pending, Retry, a New work order
+  sheet (`NewWorkOrderSheet`, also opened from an asset), and Inspect showing the transcript
+  (`TaskTranscript`), final answer, and the tool runs and findings the order produced.
+- **Assets:** add form; per asset a status select, Scan (opens Tools → Scans prefilled), New work
+  order, Mark out of scope (appends to `mission.outOfScope` and sets it inactive), Remove with confirm.
+- **Findings:** Add finding (`NewFindingSheet`, `tool: "manual"`), bulk status for the selected rows,
+  sortable columns (`lib/findingSort.ts`, `aria-sort`).
+- **Mission editor:** the status dropdown is gone. A pill shows the status and buttons offer only
+  the moves the Director never makes: Pause / Send to review / Complete while active, Resume /
+  Complete when paused, Complete / Reopen in review, Reopen when completed or cancelled. They save at
+  once; Resume and Reopen go to `ready`. The form's reset now keys on the mission id, so a status save
+  doesn't wipe typed edits. Under Scope and Out of scope each line is shown as read
+  (`lib/scopeLines.ts`, mirroring `scopeMatcher.matchesEntry`): lines that match nothing are red;
+  `host:port` and URLs with a path get a warning that ports/paths aren't enforced.
+- **Nav:** the active item scrolls into view in the horizontal strip below `md`; nav is labelled.
+- **Tool Registry:** search (name, id, description, executable), category filter, "Not installed
+  only", and a live "N of M".
+
+### Deferred
+
+Port and path granularity in scope. The matcher still drops both; the editor now says so per line.
+
+### Tests and verification
+
+Backend 661 (was 649): `missionAttention.test.ts` (4), `setupCheck.test.ts` (3), preview tests in
+`factoryDirector.test.ts` (3), asset delete (2). Frontend 253 (was 212): NeedsYouQueue, agentOutput,
+SetupChecklist (4), ToolRegistry filters (3), scopeLines (15), MissionEditor status/scope (3),
+FindingsTable sorting, FindingsView add/bulk, AssetsView controls (4), and the updated dashboard and
+work-order tests. Typechecks and oxlint clean.
+
+Seen live with a throwaway mission (deleted afterwards): the setup checklist against this machine
+(flagged amass, katana, subfinder missing and the wrong httpx on PATH); the scope check on six kinds
+of line; Pause saving at once, switching the actions to Resume/Complete and keeping unsaved scope
+edits; the active nav item visible at 375px after switching to Tools; Registry search. Asset
+POST/PATCH/DELETE (including a 400 on a bad status and 404 on a second delete), `/attention` and
+`/factory/preview` (blocked reason for a paused mission) checked with curl. Not seen live: the queue's
+cards against a real run, the transcript, adding a finding, bulk status.

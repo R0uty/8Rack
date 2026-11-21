@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ToolRegistry } from "./ToolRegistry";
 import { ExecutionHistoryPanel } from "./ExecutionHistoryPanel";
 import { ScannerPanel } from "./ScannerPanel";
@@ -25,13 +25,18 @@ interface ToolsViewProps {
   agents: AgentWithStatus[];
   mission: Mission | null;
   active?: boolean;
+  /** A target another view asked to scan - switches to Scans and fills it in. */
+  scanRequest?: { target: string; at: number } | null;
 }
 
 /** Running tools (Scans), what ran (History), and what's available to run (Registry, Knowledge base, MCP
  * servers).
  * Tabs stay mounted when hidden, so a scan keeps streaming while you look at something else. */
-export function ToolsView({ agents, mission, active = true }: ToolsViewProps) {
+export function ToolsView({ agents, mission, active = true, scanRequest }: ToolsViewProps) {
   const [tab, setTab] = useState<Tab>("scans");
+  useEffect(() => {
+    if (scanRequest) setTab("scans");
+  }, [scanRequest]);
   const { tools, executions, loading, error, refresh, toggleTool } = useTools(mission?.id ?? null);
   useRefreshOnActivate(active, refresh);
 
@@ -45,7 +50,7 @@ export function ToolsView({ agents, mission, active = true }: ToolsViewProps) {
         ))}
       </div>
 
-      <div className={cn(tab !== "scans" && "hidden")}>{mission ? <ScannerPanel missionId={mission.id} /> : <NoMission />}</div>
+      <div className={cn(tab !== "scans" && "hidden")}>{mission ? <ScannerPanel missionId={mission.id} prefill={scanRequest} /> : <NoMission />}</div>
       <div className={cn(tab !== "history" && "hidden")}>
         {mission ? <ExecutionHistoryPanel executions={executions} loading={loading} error={error} agents={agents} /> : <NoMission />}
       </div>
