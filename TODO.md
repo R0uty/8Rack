@@ -88,9 +88,6 @@ Design and reasoning: `DEVELOPMENT.md`, "Knowledge base and MCP", and in full in
 
 ## Engineering
 
-- [ ] **The smoke test is broken.** `backend/scripts/smoke-test.mjs` still uses `/api/projects` and
-      `/api/plans`. Rewrite it around missions and work orders, or delete it. The route tests and a
-      live mission run now cover what it checked.
 - [ ] **Route tests for the rest:** findings, assets, reports, scans and agents (missions, work orders
       and tools have them; use `test-utils/httpHarness.ts`).
 - [ ] **One NDJSON helper.** `routes/reports.ts`, `routes/scanners.ts` and `routes/missions.ts` (events)
