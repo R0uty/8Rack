@@ -1,0 +1,26 @@
+[project]
+name = "8rack-tools-server"
+version = "0.1.0"
+description = "8Rack's recon/scanning tools as an MCP server: runs a fixed catalog of CLI tools on a scanning host and returns raw stdout, stderr and exit code."
+requires-python = ">=3.11"
+dependencies = [
+  "mcp==2.3.0",
+  "anyio>=4.10",
+  "uvicorn>=0.31.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.2"]
+
+[project.scripts]
+8rack-tools-server = "tools_server.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tools_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

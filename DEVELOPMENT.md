@@ -12,13 +12,14 @@ this file is current.
 
 ## State (2026-11-21)
 
-- Backend 667 tests, frontend 260, the RAG server 29 (Python). Both typechecks are clean, and oxlint
-  reports only warnings that were already there.
+- Backend 686 tests, frontend 263, the RAG server 29 and the tool server 30 (Python). Both typechecks
+  are clean, and oxlint reports only warnings that were already there.
 - Last full live run: 2026-11-21, a throwaway mission against `127.0.0.1` on `qwen2.5-coder:7b` with a
   16k context window. It ran to idle with 7 work orders, 6 tool runs and 5 confirmed findings. The
   problems it showed are in `TODO.md`.
-- Not built yet: agents calling MCP tools by name (MCP step 3) and removing the local executor (step 4),
-  scope by port or path, binary evidence. See `TODO.md`.
+- Not built yet: removing the local executor (MCP step 4), scope by port or path, binary evidence. See
+  `TODO.md`. MCP step 3 (agents calling a tool server's tools, `mcp-servers/tools/`) landed on
+  2026-11-22 and hasn't had a live mission run yet.
 
 ## The shape of a mission run
 
@@ -56,7 +57,8 @@ in control of what runs and against what.
   rebinding) and `originCheck.ts` rejects POSTs from foreign origins with a 403.
   `securityHeaders.ts` adds a strict CSP, `nosniff`, `X-Frame-Options: DENY` and related headers.
 - **Every real tool run needs a human's confirmation.** `requestExecution` only creates a
-  `pending_confirmation` record; `confirmExecution` is the only thing that starts a process. The
+  `pending_confirmation` record; `confirmExecution` is the only thing that starts a process, or calls
+  an MCP tool server (see "Knowledge base and MCP" - an MCP tool always needs confirmation). The
   pseudo-tools (`create_finding`, `upsert_asset`, `validate_finding`, `query_findings`, `lookup_cves`,
   `search_knowledge_base`) skip confirmation because they only read or write 8Rack's own records. A
   confirm called twice, or a reject that lands during a confirm, can't run the tool twice or after
@@ -69,7 +71,8 @@ in control of what runs and against what.
   `scopeMatcher.ts`). Targets are pulled out of the arguments: hosts, IPs, CIDRs and URLs, with the
   mission's own TLDs recognized, trailing dots trimmed, and IPv4-mapped IPv6 compared as IPv4. A target
   outside scope gets a 403 and a `scope_blocked` activity event. A command with no identifiable target is
-  refused, unless the tool is in `LOCAL_ONLY_TOOL_IDS` (filesystem tools). **Ports and paths in scope
+  refused, unless the tool is in `LOCAL_ONLY_TOOL_IDS` (filesystem tools). MCP tools are never in that
+  set, whatever the server says about them. **Ports and paths in scope
   entries are not enforced.** Only the host is, and the mission editor says so on each such line.
 - **Processes:** spawned with an argument list, never a shell string. Filesystem paths must stay inside
   `WORKSPACE_ROOT`. `sudo`/`su`/`doas`/`pkexec`/`setsid` are refused wherever they appear as a command
@@ -81,7 +84,8 @@ in control of what runs and against what.
   record id just as strictly. Add new mission-scoped stores through these functions, never a
   hand-built path.
 - **Target-controlled text is untrusted.** Tool output, finding evidence and MCP tool descriptions can
-  all carry prompt injection. Report prompts mark finding data as untrusted. Rendered Markdown never
+  all carry prompt injection. An enabled MCP tool's description (cut to a fixed length) is shown to
+  agents in the tools list, so a server can put text in front of a model. Report prompts mark finding data as untrusted. Rendered Markdown never
   loads remote images (they become links), so viewing a report can't make a request to a host an agent
   picked. Report evidence is fenced so it can't open a new section. None of this stops a model from
   *following* injected text. The approval gate is the actual control.
@@ -261,16 +265,38 @@ in control of what runs and against what.
   `MCP_TOKEN_<ID>`, never in the URL). It requires https except for localhost, and follows redirects
   only within the same origin. Tool names and descriptions are untrusted: only safe names are kept,
   with a cap per server and descriptions cut. Each call connects, works and disconnects.
-- **Agents can't call MCP tools yet.** Only `search_knowledge_base` reaches a server, behind the
-  existing pseudo-tool, so no server tool name or description reaches a model.
-- **The plan for steps 3 and 4** (agreed 2026-11-08; full reasoning in
-  `docs/history/development-3-mcp-and-review.md`):
-  - A Python tool server on a separate scanning host, over HTTPS with a bearer token, reimplements the
-    ExecTools.
-  - 8Rack keeps the approval gate, the scope checks, the enabled switch, ingestion and history. MCP
-    tools are scope-checked by default, and exemptions live in 8Rack's config, never on the server's
-    word.
-  - The local executor is removed only after the same mission gives matching results both ways.
+- **The tool server** (`mcp-servers/tools/`, Python) runs a fixed catalog of eight recon tools (nmap,
+  httpx, nuclei, subfinder, dig, whois, ffuf, katana), not "any command". Each tool's one `args`
+  parameter is the argv appended after a fixed executable and default arguments. It runs argv only,
+  with a timeout and output caps, confines path-shaped arguments to its own workspace, and kills the
+  process group on timeout or disconnect. It returns raw stdout, stderr and exit code, so 8Rack's
+  parsers keep working. It binds loopback by default; any other bind must serve HTTPS, directly or
+  behind a TLS proxy.
+- **Agents call a server's tools through the same approval path as a local tool.** An MCP execution
+  is an ordinary `ExecutionRecord` with an `mcp: {serverId, toolName}` marker. `requestExecution`
+  parks it at `pending_confirmation` (always: the server can't tell an approved call from an
+  unapproved one), and `confirmExecution` re-checks scope, then `toolManager.ts#runMcpRecord` calls
+  the server (`mcpClient.ts#callMcpTool`) instead of spawning a process. It counts against the
+  concurrency cap, can be cancelled, fires `onStarted` so the confirm route answers at once, and
+  settles like a local run: history, `execution-output/`, `ingestExecution`. Findings are parsed under
+  the tool's own name (`nmap`), not its catalog id. Live output isn't streamed; only the final result
+  lands.
+- **Scope applies in full.** MCP tool ids are never in `LOCAL_ONLY_TOOL_IDS`: a tool on a scanning host
+  reaches the network by definition, so an out-of-scope target, or no identifiable target under a scope
+  allowlist, is refused at request and at confirm time. There's no exemption list for MCP tools; a targetless one would need
+  one in 8Rack's config, never on the server's word.
+- **Discovered tools start disabled.** `mcpClient.ts` keeps a registry of callable tools, rebuilt from
+  the online servers on every check, and a persisted enable flag per tool
+  (`backend/data/mcp/tool-overrides.json`, gitignored; `PATCH /api/mcp/tools/:id` from Tools → MCP
+  servers). The catalog id is `<serverId>.<tool>`, so two servers' `nmap` never collide. Enabled tools
+  are listed in `buildToolsPreamble`, and an agent's `execTools` allowlist gates them at listing and at
+  request time, like local tools. The knowledge-base server's tools are never in the registry and have
+  no switch: `knowledgeBase.ts` calls them itself.
+- **Two timeouts:** `MCP_REQUEST_TIMEOUT_MS` bounds discovery and the knowledge-base calls,
+  `MCP_TOOL_TIMEOUT_MS` (default 15 min) one tool call. The server has its own per-tool timeout too.
+- **What's left** (`TODO.md`): a scan source IP per mission, then step 4 - run the same mission with
+  local and MCP tools, and remove the local executor only once findings, assets and reports match. Full
+  reasoning for the plan is in `docs/history/development-3-mcp-and-review.md`.
 
 ## Frontend
 
@@ -300,7 +326,7 @@ in control of what runs and against what.
   layer, so they never touch `backend/data`. Routes for findings, assets, reports, scans and agents
   don't have route tests yet.
 - `cd frontend && npm test`: hooks and components with React Testing Library.
-- `cd mcp-servers/rag && .venv/bin/python -m pytest`.
+- `cd mcp-servers/rag && .venv/bin/python -m pytest`, and the same in `mcp-servers/tools`.
 - `cd backend && npm run smoke` (`scripts/smoke-test.mjs`) needs a running backend and Ollama. It
   covers:
   - health, setup, agents and a streamed agent reply;

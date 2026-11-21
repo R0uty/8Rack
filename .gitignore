@@ -25,6 +25,10 @@ backend/data/rag/*
 backend/data/tools/*
 !backend/data/tools/.gitkeep
 
+# MCP tool enable/disable overrides - runtime state, not shipped config
+backend/data/mcp/*
+!backend/data/mcp/.gitkeep
+
 # MCP servers (Python) - virtualenvs, build/test output, and the RAG server's index, which embeds
 # chunks of whatever its workspace holds
 mcp-servers/*/.venv/

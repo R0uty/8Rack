@@ -19,7 +19,11 @@ import { loadActivityFromDisk } from "./services/activityLog.js";
 import { listMissions } from "./services/missionManager.js";
 import { getStatus as getRagStatus, loadIndexFromDisk } from "./services/ragIndex.js";
 import { refreshStatus as refreshKnowledgeBaseStatus } from "./services/knowledgeBase.js";
-import { listServers as listMcpServers, refreshServers as refreshMcpServers } from "./services/mcpClient.js";
+import {
+  listServers as listMcpServers,
+  loadMcpToolOverridesFromDisk,
+  refreshServers as refreshMcpServers,
+} from "./services/mcpClient.js";
 import { builtinExecTools } from "./tools/exec/builtins.js";
 import { registerScanProfile } from "./extensions/scannerRegistry.js";
 import { builtinScanProfiles } from "./scanners/builtins.js";
@@ -91,6 +95,8 @@ const server = app.listen(env.port, env.host, async (listenError?: Error) => {
       );
     }
 
+    // Before the first check, so the first registry rebuild already knows which tools a human enabled.
+    await loadMcpToolOverridesFromDisk();
     // Not awaited - a slow or unreachable MCP server shouldn't hold up anything else, and the Tools
     // page shows each server as "checking" until this finishes.
     if (listMcpServers().length > 0) {
