@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
 import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
-import { cancelExecution, getExecution, listExecToolsWithStatus, rejectExecution, requestExecution } from "./toolManager.js";
+import {
+  cancelExecution,
+  getExecution,
+  listExecToolsWithStatus,
+  listExecutions,
+  rejectExecution,
+  requestExecution,
+} from "./toolManager.js";
 import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./knowledgeBase.js";
 import { listMcpTools } from "./mcpClient.js";
 import {
@@ -141,6 +148,9 @@ export interface OrchestratorTask {
    * change what the agent should do next. */
   queuedToolCalls?: ToolRequest[];
   pendingExecutionId?: string;
+  /** Earlier runs in this mission whose recorded output answered one of this task's requests instead
+   * of running the same command again (see findReusableRun). A verdict can rest on them too. */
+  reusedExecutionIds?: string[];
   finalResponse?: string;
   error?: string;
   /** Time spent actually generating, accumulated across every advance() run - what
@@ -826,9 +836,12 @@ async function runValidateFinding(task: OrchestratorTask, args: string[]): Promi
   }
 
   try {
-    // The real runs this task actually completed - what the verdict can rest on. None means the
-    // agent judged from what was already recorded, which the UI shows as unverified.
-    const ranExecutionIds = task.toolExecutionIds.filter((id) => getExecution(id)?.status === "completed");
+    // The real runs this task completed or was handed (an identical earlier run's recorded output) -
+    // what the verdict can rest on. None means the agent judged from the finding's own text alone,
+    // which the UI shows as unverified.
+    const ranExecutionIds = [...new Set([...task.toolExecutionIds, ...(task.reusedExecutionIds ?? [])])].filter(
+      (id) => getExecution(id)?.status === "completed",
+    );
     const finding = await validateFinding(
       parsed.input.findingId,
       agentId,
@@ -989,6 +1002,54 @@ function wasRejectedBefore(task: OrchestratorTask, toolId: string, args: string[
   return task.toolExecutionIds.some((id) => {
     const execution = getExecution(id);
     return execution?.status === "rejected" && execution.toolId === toolId && JSON.stringify(execution.arguments) === key;
+  });
+}
+
+/** Read-only scanners whose recorded output can stand in for running the identical command again.
+ * Not bash/python/curl/http_request or the filesystem tools: their output can depend on state that
+ * changes between runs, or they can change state themselves. */
+const REUSABLE_RUN_TOOL_IDS = new Set(["nmap", "httpx", "ffuf", "katana", "nuclei", "subfinder", "amass", "whois", "dig", "nslookup"]);
+/** Older than this, a run is stale enough that asking again is reasonable - it goes to a human. */
+const REUSE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Validators kept asking for the exact scan recon had just run (in one live run, 4 of 5 re-requested
+ * the same `nmap -sV --top-ports 1000`), putting an approval card in front of the human for output
+ * that already exists. The newest successful run of the identical command (same tool, same
+ * arguments) in this mission, within REUSE_MAX_AGE_MS, is returned instead - nothing runs, so
+ * nothing needs approving. Any change to the arguments, such as a narrower port, is a new request.
+ */
+export function findReusableRun(missionId: string, toolId: string, args: string[], now = Date.now()): ExecutionRecord | undefined {
+  if (!REUSABLE_RUN_TOOL_IDS.has(toolId)) return undefined;
+  const key = JSON.stringify(args);
+  let newest: ExecutionRecord | undefined;
+  for (const e of listExecutions(missionId)) {
+    if (e.status !== "completed" || !e.result?.success || e.toolId !== toolId) continue;
+    if (JSON.stringify(e.arguments) !== key) continue;
+    const finished = e.finishedAt ?? e.createdAt;
+    if (now - finished > REUSE_MAX_AGE_MS) continue;
+    if (!newest || finished > (newest.finishedAt ?? newest.createdAt)) newest = e;
+  }
+  return newest;
+}
+
+function reusedRunMessage(execution: ExecutionRecord, alreadyGiven: boolean): string {
+  const ranAt = new Date(execution.finishedAt ?? execution.createdAt).toISOString();
+  return JSON.stringify({
+    tool: execution.toolId,
+    status: execution.status,
+    success: execution.result?.success ?? false,
+    exitCode: execution.result?.exitCode ?? null,
+    reused: true,
+    executionId: execution.id,
+    ranAt,
+    note: alreadyGiven
+      ? "You already have this output (see above) - it was not run again. Use it: record your verdict or finish."
+      : `This exact command already ran in this mission at ${ranAt}. This is its recorded output - it was not ` +
+        "run again and needed no approval. If you need something it doesn't show, ask for a narrower command " +
+        "(for nmap, only the port you are checking: -sV -p <port> <host>).",
+    stdout: alreadyGiven ? "" : truncateForTranscript(execution.result?.stdout ?? ""),
+    stderr: alreadyGiven ? "" : truncateForTranscript(execution.result?.stderr ?? ""),
   });
 }
 
@@ -1199,6 +1260,15 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
       touch(task);
       return task;
     }
+    return advance(task, onChunk, signal);
+  }
+
+  const earlier = stdin === undefined ? findReusableRun(task.missionId, toolRequest.tool, execArguments) : undefined;
+  if (earlier) {
+    const alreadyGiven = task.reusedExecutionIds?.includes(earlier.id) ?? false;
+    if (!alreadyGiven) task.reusedExecutionIds = [...(task.reusedExecutionIds ?? []), earlier.id];
+    task.messages.push({ role: "tool", content: reusedRunMessage(earlier, alreadyGiven) });
+    touch(task);
     return advance(task, onChunk, signal);
   }
 

@@ -12,6 +12,9 @@ interface ToolResult {
   stderr?: string;
   error?: string;
   message?: string;
+  /** The backend answered with an identical earlier run's recorded output instead of running it again. */
+  reused?: boolean;
+  ranAt?: string;
 }
 
 /** How much of a tool's stdout to show inline - the full record is in Tools → History. */
@@ -38,6 +41,11 @@ function ToolResultLine({ content }: { content: string }) {
         <Icon size={11} aria-hidden />
         {r.tool ?? "Tool"} {r.status ?? (failed ? "failed" : "result")}
         {typeof r.exitCode === "number" && <span className="text-muted">(exit {r.exitCode})</span>}
+        {r.reused && (
+          <span className="text-muted" title={r.ranAt ? `Ran ${new Date(r.ranAt).toLocaleString()}` : undefined}>
+            · earlier run reused, not run again
+          </span>
+        )}
       </p>
       {problem && <pre className="whitespace-pre-wrap font-mono text-[11px] text-critical">{problem}</pre>}
       {output && (

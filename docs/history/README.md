@@ -69,12 +69,13 @@ section"). Every heading of the old `DEVELOPMENT.md` is listed below with the fi
 - Planned: MCP servers as the tool and RAG providers (design, 2026-11-08)
 - MCP client (step 1, 2026-11-08)
 - RAG server (step 2, 2026-11-08)
-- MCP tool server (step 3, 2026-11-08), at the end of the file
+- MCP tool server (step 3, 2026-11-08), after Phase 4 (written later, merged after it)
 - Fixed: every agent call ran in a 2048-token context window (2026-11-08)
 - Phase 1 fixes (2026-11-20)
 - Phase 2: server-owned factory runs (2026-11-20)
 - Phase 3: UI and usability (2026-11-21)
 - Phase 4: backend (2026-11-21)
+- Validators reuse runs instead of re-scanning (2026-11-21)
 
 ## Plans and lists
 

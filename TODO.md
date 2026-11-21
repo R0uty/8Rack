@@ -10,10 +10,14 @@ design change in `DEVELOPMENT.md` if there is one.
 These are what an operator notices most. All were seen on `qwen2.5-coder:7b`, the 2026-11-21 run at
 16k context included.
 
-- [ ] **Validators re-run scans that were already done.** In the 2026-11-21 run, 4 of 5 validators asked
-      for the same `nmap -sV --top-ports 1000` that recon had already run, to confirm a single port. Each
-      one is an extra approval card with nothing new behind it. Options: give the validator the matching
-      execution's output in its objective, or point it at a narrow check (`-p <port>`, `http_request`).
+- [ ] **A validator can do the work and still skip the verdict.** Seen 2026-11-21: one ran its check,
+      reasoned the port was open, and ended in prose without calling `validate_finding`. The finding
+      stayed `potential` and the Director seeded a second order for it. That one got the reused run
+      and recorded the verdict, but it cost a whole agent run. Same root cause as "Agents write findings as text" below.
+- [ ] **Repeated `http_request` still asks every time.** The Web Analyzer asked again for a URL it had
+      already fetched in the same order. `http_request` is deliberately not reused, because a web
+      response can change between requests. A per-task "you already fetched this" note, like the one for
+      rejected repeats, might be enough.
 - [ ] **Agents write findings as text instead of calling the tool.** The Web Analyzer replied with
       findings as markdown JSON blocks without a `tool` key, so nothing was recorded. One of them was
       an invented XSS. It ended with a question to the user. The order was correctly marked "no tool
