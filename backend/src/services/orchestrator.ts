@@ -3,7 +3,7 @@ import { env } from "../config/env.js";
 import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
 import { cancelExecution, getExecution, listExecToolsWithStatus, rejectExecution, requestExecution } from "./toolManager.js";
-import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragIndex.js";
+import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./knowledgeBase.js";
 import {
   createAgentFinding,
   getFinding,
@@ -25,7 +25,7 @@ import type { Asset, AssetCreateInput, AssetType } from "../types/asset.js";
 import type { Mission } from "../types/mission.js";
 
 /** A read-only pseudo-tool, not a registered ExecTool - it's an in-process vector search over the
- * RAG index (see services/ragIndex.ts), not an OS command, so it doesn't go through
+ * knowledge base (see services/knowledgeBase.ts), not an OS command, so it doesn't go through
  * toolManager.ts/requestExecution and deliberately skips the human-confirmation gate every real
  * ExecTool requires (nothing runs, nothing touches the filesystem beyond the pre-built index). */
 const SEARCH_KNOWLEDGE_BASE_TOOL = "search_knowledge_base";

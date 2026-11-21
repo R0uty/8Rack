@@ -70,4 +70,6 @@ export interface ChatResponseChunk {
   done_reason?: string;
   total_duration?: number;
   eval_count?: number;
+  /** Prompt tokens Ollama read - on the final chunk. Close to num_ctx means the prompt was cut. */
+  prompt_eval_count?: number;
 }

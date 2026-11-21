@@ -10,6 +10,8 @@ export interface McpToolInfo {
 export interface McpServerStatus {
   id: string;
   url: string;
+  /** True for the server named by MCP_RAG_SERVER, which serves the knowledge base. */
+  knowledgeBase: boolean;
   state: McpServerState;
   error?: string;
   tools: McpToolInfo[];

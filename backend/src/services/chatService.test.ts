@@ -131,6 +131,42 @@ describe("system prompt + options assembly", () => {
     expect(options?.temperature).toBe(0.1);
     expect(options?.top_p).toBe(0.9);
   });
+
+  // Without num_ctx Ollama uses 2048 tokens and silently drops the start of a longer prompt - the
+  // Orchestrator's system prompt alone is about that long.
+  it("always sends OLLAMA_NUM_CTX as the context window", async () => {
+    await drain("planner");
+    const [{ options }] = mockStreamChat.mock.calls[0];
+    expect(options?.num_ctx).toBe(16_384);
+  });
+
+  it("lets a request set its own context window", async () => {
+    await drain("planner", { agentId: "planner", messages: [], options: { num_ctx: 4096 } });
+    expect(mockStreamChat.mock.calls[0][0].options?.num_ctx).toBe(4096);
+  });
+});
+
+describe("prompt cut warning", () => {
+  it("warns when the prompt filled the context window", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockStreamChat.mockImplementation(async function* () {
+      yield { ...fixtureChunk, prompt_eval_count: 2050 };
+    });
+    await drain("planner", { agentId: "planner", messages: [], options: { num_ctx: 2048 } });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("filled the whole context window (2050 of 2048 tokens)"));
+    warn.mockRestore();
+  });
+
+  it("stays quiet when the prompt fits", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockStreamChat.mockImplementation(async function* () {
+      yield { ...fixtureChunk, prompt_eval_count: 6964 };
+    });
+    const chunks = await drain("planner");
+    expect(warn).not.toHaveBeenCalled();
+    expect(chunks).toHaveLength(1);
+    warn.mockRestore();
+  });
 });
 
 describe("tool resolution branch", () => {

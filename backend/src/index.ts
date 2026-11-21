@@ -39,6 +39,7 @@ import { loadReportsFromDisk } from "./services/reportManager.js";
 import { loadActivityFromDisk } from "./services/activityLog.js";
 import { listMissions } from "./services/missionManager.js";
 import { getStatus as getRagStatus, loadIndexFromDisk } from "./services/ragIndex.js";
+import { refreshStatus as refreshKnowledgeBaseStatus } from "./services/knowledgeBase.js";
 import { listServers as listMcpServers, refreshServers as refreshMcpServers } from "./services/mcpClient.js";
 import { builtinExecTools } from "./tools/exec/builtins.js";
 import { registerScanProfile } from "./extensions/scannerRegistry.js";
@@ -132,13 +133,22 @@ const server = app.listen(env.port, env.host, async (listenError?: Error) => {
       `Loaded ${missions.length} mission(s) with persisted execution/task/plan/finding/asset/work-order/scan/report/activity history`,
     );
 
-    await loadIndexFromDisk();
-    const ragStatus = getRagStatus();
-    console.log(
-      ragStatus.indexedAt
-        ? `RAG index loaded: ${ragStatus.chunkCount} chunk(s) across ${ragStatus.fileCount} file(s) (${ragStatus.embeddingModel})`
-        : "RAG index not built yet - POST /api/rag/reindex once an embedding model is pulled",
-    );
+    if (env.mcpRagServer) {
+      // Not awaited, like the MCP check below. Until it answers, agents aren't offered the knowledge base.
+      const server = env.mcpRagServer;
+      void refreshKnowledgeBaseStatus().then(
+        (s) => console.log(`Knowledge base: MCP server "${server}", ${s.chunkCount} chunk(s) across ${s.fileCount} file(s)`),
+        (err: unknown) => console.warn(`Knowledge base: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    } else {
+      await loadIndexFromDisk();
+      const ragStatus = getRagStatus();
+      console.log(
+        ragStatus.indexedAt
+          ? `RAG index loaded: ${ragStatus.chunkCount} chunk(s) across ${ragStatus.fileCount} file(s) (${ragStatus.embeddingModel})`
+          : "RAG index not built yet - POST /api/rag/reindex once an embedding model is pulled",
+      );
+    }
 
     // Not awaited - a slow or unreachable MCP server shouldn't hold up anything else, and the Tools
     // page shows each server as "checking" until this finishes.

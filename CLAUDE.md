@@ -10,9 +10,10 @@ out-of-scope, rules of engagement) that runs through a factory pipeline - Scope 
 Discovery → Enumeration → Analysis → Vulnerability Discovery → Validation → Evidence → Report →
 Human Review - driven by purpose-built agents, real tool execution gated behind human confirmation,
 and a Factory Director that reads a mission's scope/assets/findings and advances that pipeline on
-its own between approvals. Two workspaces, no shared root `package.json`: `backend/` (Express +
-TypeScript, ESM) and `frontend/` (React + TypeScript + Vite). No accounts, no external database, no
-cloud storage - everything is local by design.
+its own between approvals. Two main workspaces, no shared root `package.json`: `backend/` (Express +
+TypeScript, ESM) and `frontend/` (React + TypeScript + Vite), plus `mcp-servers/rag/` - an optional
+Python MCP server for the knowledge base, with its own venv and tests (`.venv/bin/python -m pytest`; see
+its README). No accounts, no external database, no cloud storage - everything is local by design.
 
 For the full build history, key architectural decisions (and why), and known gaps, read
 `DEVELOPMENT.md` before making non-trivial changes - it has context that isn't obvious from the
@@ -66,8 +67,8 @@ per feature with the full design rationale and what was verified - this section 
 backend/src/
 ├── config/env.ts      PORT, HOST (default 127.0.0.1 - no auth on this app, see below),
 │                       OLLAMA_BASE_URL, CORS_ORIGIN, WORKSPACE_ROOT, orchestrator loop-prevention
-│                       caps, EMBEDDING_MODEL, NVD_API_KEY, MCP_SERVERS (all from .env; each MCP
-│                       server's token comes from its own MCP_TOKEN_<ID>)
+│                       caps, EMBEDDING_MODEL, OLLAMA_NUM_CTX, NVD_API_KEY, MCP_SERVERS, MCP_RAG_SERVER (all from
+│                       .env; each MCP server's token comes from its own MCP_TOKEN_<ID>)
 ├── routes/             one file per concern: models, chat, agents, tools, orchestrator, missions,
 │                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports, mcp
 ├── services/           the real logic - see the list below
@@ -106,8 +107,9 @@ Key files under `backend/src/services/`:
 | `factoryDirector.ts` | The Factory Director - reads a mission's scope/assets/findings/work orders and deterministically seeds/starts Work Orders, auto-chaining through everything that doesn't need human approval. Also resumes paused orders whose execution a human has settled. Request-driven (`POST /api/missions/:id/factory/advance`), not a background timer |
 | `activityLog.ts` | The Mission Activity Timeline - an explicit, named-event append-only log (`logActivity`), not derived from executions/tasks |
 | `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
-| `ragIndex.ts` | The knowledge-base indexer/search over `WORKSPACE_ROOT` |
-| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS` and lists their tools (Tools → MCP servers). Nothing calls an MCP tool yet; see "Planned: MCP servers as the tool and RAG providers" in `DEVELOPMENT.md` |
+| `knowledgeBase.ts` | The one entry point for the knowledge base (Orchestrator's `search_knowledge_base`, `/api/rag/*`, startup) - routes to the RAG MCP server named by `MCP_RAG_SERVER`, or to `ragIndex.ts` when unset. No fallback to the local index when the server is down |
+| `ragIndex.ts` | The built-in knowledge-base indexer/search over `WORKSPACE_ROOT` - only reached through `knowledgeBase.ts` |
+| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS`, lists their tools (Tools → MCP servers), and `callTool` (used only by `knowledgeBase.ts` so far; agents can't call MCP tools by name yet). See "Planned: MCP servers as the tool and RAG providers" and "RAG server (step 2)" in `DEVELOPMENT.md` |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
 | `reportManager.ts` / `reportEvidence.ts` | Report generation - one Report Writer agent call over a set of selected findings, tracked through a `status` field (`draft/ai_generated/human_review/ready/submitted`). The agent writes only the summary, impact and remediation; evidence and reproduction are built from recorded executions, and anything else on a finding is labelled unverified |
 

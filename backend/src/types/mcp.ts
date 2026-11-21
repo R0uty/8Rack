@@ -19,6 +19,8 @@ export interface McpServerStatus {
   id: string;
   /** Empty when the entry was too malformed to find one. Never carries credentials - those are rejected. */
   url: string;
+  /** True for the server named by MCP_RAG_SERVER, which 8Rack uses as its knowledge base. */
+  knowledgeBase: boolean;
   state: McpServerState;
   error?: string;
   tools: McpToolInfo[];

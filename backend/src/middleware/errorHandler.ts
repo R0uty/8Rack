@@ -40,6 +40,7 @@ import {
   InvalidWorkOrderStateError,
   RagReindexInProgressError,
   RagReindexTimeoutError,
+  McpRequestError,
 } from "../services/errors.js";
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
@@ -162,6 +163,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof RagReindexTimeoutError) {
     res.status(504).json({ error: err.message, code: "RAG_REINDEX_TIMEOUT" });
+    return;
+  }
+  if (err instanceof McpRequestError) {
+    res.status(502).json({ error: err.message, code: "MCP_REQUEST_FAILED" });
     return;
   }
   if (err instanceof FindingNotFoundError) {

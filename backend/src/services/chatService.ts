@@ -1,3 +1,4 @@
+import { env } from "../config/env.js";
 import { getAgent } from "./agentManager.js";
 import { resolveOllamaTools, streamChat, streamChatWithTools } from "./ollama.js";
 import { AgentDisabledError, AgentNotFoundError, AgentOfflineError, UnknownToolError } from "./errors.js";
@@ -45,6 +46,7 @@ export async function* streamAgentChat(
     : agent.systemPrompt;
   const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...request.messages];
   const options: ChatOptions = {
+    num_ctx: env.ollamaNumCtx,
     temperature: agent.temperature,
     top_p: agent.topP,
     // maxTokens: 0 means "unlimited" (num_predict omitted), same convention as the frontend settings.
@@ -69,11 +71,30 @@ export async function* streamAgentChat(
   // one the Orchestrator actually parses.
   const tools = request.tools ?? (request.toolsPreamble ? undefined : agent.tools);
 
+  let stream: AsyncGenerator<ChatResponseChunk>;
   if (tools?.length) {
     const { specs, unknown } = resolveOllamaTools(tools);
     if (unknown.length) throw new UnknownToolError(unknown);
-    yield* streamChatWithTools({ ...chatRequest, tools: specs }, signal);
+    stream = streamChatWithTools({ ...chatRequest, tools: specs }, signal);
   } else {
-    yield* streamChat(chatRequest, signal);
+    stream = streamChat(chatRequest, signal);
+  }
+
+  for await (const chunk of stream) {
+    if (chunk.done) warnIfPromptCut(agent.id, chunk.prompt_eval_count, options.num_ctx);
+    yield chunk;
+  }
+}
+
+/** Ollama doesn't fail a prompt that's too long for num_ctx - it drops the beginning (the system
+ * prompt and the task) and answers anyway, usually with nonsense. All it reports is how many prompt
+ * tokens it read, so a count at the limit is the only sign. */
+function warnIfPromptCut(agentId: string, promptTokens: number | undefined, numCtx: number | undefined): void {
+  if (promptTokens === undefined || numCtx === undefined) return;
+  if (promptTokens >= numCtx * 0.95) {
+    console.warn(
+      `[chat] ${agentId}: the prompt filled the whole context window (${promptTokens} of ${numCtx} tokens) - ` +
+        "Ollama has probably cut its beginning. Raise OLLAMA_NUM_CTX.",
+    );
   }
 }

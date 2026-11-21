@@ -308,3 +308,13 @@ export class RagReindexTimeoutError extends Error {
     this.name = "RagReindexTimeoutError";
   }
 }
+
+/** A call to an MCP server failed - unreachable, rejected the token, timed out, or the tool itself
+ * reported an error. The message is safe to show: it never carries the token. */
+export class McpRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpRequestError";
+  }
+}
+

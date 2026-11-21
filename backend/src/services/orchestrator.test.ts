@@ -21,7 +21,7 @@ import {
   provideGuidance,
   resumeTask,
 } from "./orchestrator.js";
-import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./ragIndex.js";
+import { getStatus as getRagStatus, search as searchKnowledgeBase } from "./knowledgeBase.js";
 import { createFinding, getMissionFindings } from "./findingsManager.js";
 import { listAssets } from "./assetManager.js";
 import { queryNvd } from "./cveLookup.js";
@@ -46,7 +46,7 @@ vi.mock("./missionStore.js", () => ({
   writeMissionJson: vi.fn(async () => undefined),
 }));
 vi.mock("./missionManager.js", () => ({ getMission: vi.fn(async () => undefined), onMissionDeleted: vi.fn() }));
-vi.mock("./ragIndex.js", () => ({ getStatus: vi.fn(), search: vi.fn() }));
+vi.mock("./knowledgeBase.js", () => ({ getStatus: vi.fn(), search: vi.fn() }));
 vi.mock("./cveLookup.js", () => ({ queryNvd: vi.fn() }));
 
 const mockOnMissionDeleted = vi.mocked(onMissionDeleted);
