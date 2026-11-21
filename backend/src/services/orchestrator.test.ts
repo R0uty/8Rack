@@ -26,6 +26,7 @@ import { createFinding, getMissionFindings } from "./findingsManager.js";
 import { listAssets } from "./assetManager.js";
 import { queryNvd } from "./cveLookup.js";
 import { getMission, onMissionDeleted } from "./missionManager.js";
+import { writeMissionJson } from "./missionStore.js";
 import type { AgentWithStatus } from "../types/agent.js";
 import type { ChatResponseChunk } from "../types/ollama.js";
 import type { ExecToolWithStatus, ExecutionRecord } from "../types/execTool.js";
@@ -1897,5 +1898,99 @@ describe("pseudo-tool JSON arguments and self-validation", () => {
 
     expect(JSON.parse(task.messages.find((m) => m.role === "tool")!.content).message).toContain("created itself");
     expect(own.status).toBe("potential");
+  });
+});
+
+describe("persistence", () => {
+  it("writes the transcript after each step, not only when the run ends", async () => {
+    mockGetRagStatus.mockReturnValue({ indexedAt: Date.now(), fileCount: 1, chunkCount: 1, embeddingModel: "e", workspaceRoot: "/w" });
+    mockSearchKnowledgeBase.mockResolvedValue([]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let call = 0;
+    mockStreamAgentChat.mockImplementation(async function* (): AsyncGenerator<ChatResponseChunk> {
+      call++;
+      if (call === 1) {
+        yield { model: "m", created_at: "", message: { role: "assistant", content: '{"tool": "search_knowledge_base", "arguments": ["q"]}' }, done: true };
+        return;
+      }
+      await held; // the second generation hangs - a crash here used to lose the whole run
+      yield { model: "m", created_at: "", message: { role: "assistant", content: "Done." }, done: true };
+    });
+    vi.mocked(writeMissionJson).mockClear();
+
+    const running = createTask("test-agent", "look something up", "proj-persist-1");
+    await vi.waitFor(
+      () => {
+        const written = vi.mocked(writeMissionJson).mock.calls.map((c) => c[2] as { messages: { role: string }[] }[]);
+        expect(written.some((tasks) => tasks.some((t) => t.messages.some((m) => m.role === "tool")))).toBe(true);
+      },
+      { timeout: 2000 },
+    );
+    expect(call).toBe(2);
+    release();
+    expect((await running).status).toBe("completed");
+  });
+});
+
+describe("time cap during a generation", () => {
+  it("stops a generation that runs past the task's time budget", async () => {
+    const original = env.maxOrchestratorTaskTimeMs;
+    env.maxOrchestratorTaskTimeMs = 80;
+    try {
+      mockStreamAgentChat.mockImplementation(async function* (_req, signal): AsyncGenerator<ChatResponseChunk> {
+        yield { model: "m", created_at: "", message: { role: "assistant", content: "thinking…" }, done: false };
+        // Never finishes on its own - like a model rambling forever. Only the abort ends it.
+        await new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new RequestCancelledError())));
+      });
+
+      const task = await createTask("test-agent", "never ends", "proj-timecap-1");
+
+      expect(task.status).toBe("max_time_reached");
+      expect(task.error).toMatch(/MAX_ORCHESTRATOR_TASK_TIME_MS/);
+    } finally {
+      env.maxOrchestratorTaskTimeMs = original;
+    }
+  });
+});
+
+describe("repeat of a rejected request", () => {
+  it("refuses an exact repeat without a new approval, then pauses on a second one", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([
+        '{"tool": "bash", "arguments": ["rm -rf x"]}',
+        '{"tool": "bash", "arguments": ["rm -rf x"]}',
+        '{"tool": "bash", "arguments": ["rm -rf x"]}',
+      ]),
+    );
+    const record = fixtureExecution({ toolId: "bash", arguments: ["rm -rf x"], status: "pending_confirmation" });
+    mockRequestExecution.mockResolvedValue(record);
+    const task = await createTask("test-agent", "objective", "proj-repeat-1");
+    mockRequestExecution.mockClear();
+
+    mockGetExecution.mockReturnValue({ ...record, status: "rejected" });
+    const resumed = await resumeTask(task.id);
+
+    expect(mockRequestExecution).not.toHaveBeenCalled();
+    expect(resumed.status).toBe("waiting_guidance");
+    const refusals = resumed.messages.filter((m) => m.role === "tool" && m.content.includes("already rejected"));
+    expect(refusals).toHaveLength(2);
+  });
+
+  it("still asks for a different command after a rejection", async () => {
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator(['{"tool": "bash", "arguments": ["rm -rf x"]}', '{"tool": "bash", "arguments": ["ls"]}']),
+    );
+    const record = fixtureExecution({ toolId: "bash", arguments: ["rm -rf x"], status: "pending_confirmation" });
+    mockRequestExecution.mockResolvedValue(record);
+    const task = await createTask("test-agent", "objective", "proj-repeat-2");
+    mockRequestExecution.mockClear();
+    mockRequestExecution.mockResolvedValue(fixtureExecution({ id: randomUUID(), toolId: "bash", arguments: ["ls"] }));
+
+    mockGetExecution.mockReturnValue({ ...record, status: "rejected" });
+    const resumed = await resumeTask(task.id);
+
+    expect(mockRequestExecution).toHaveBeenCalledTimes(1);
+    expect(resumed.status).toBe("waiting_confirmation");
   });
 });

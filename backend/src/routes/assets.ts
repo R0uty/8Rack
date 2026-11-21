@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { deleteAsset, getAsset, listAssets, updateAsset, upsertAsset } from "../services/assetManager.js";
 import { AssetNotFoundError } from "../services/errors.js";
-import type { AssetStatus, AssetType } from "../types/asset.js";
+import { ASSET_STATUSES, ASSET_TYPES } from "../types/asset.js";
+import type { AssetStatus } from "../types/asset.js";
+import { isOneOf, oneOfMessage } from "./validate.js";
 
 /** Mission-scoped Asset Inventory routes - /api/missions/:missionId/assets. MUST be created with
  * { mergeParams: true } or req.params.missionId is undefined once mounted under a parent router's
@@ -9,9 +11,6 @@ import type { AssetStatus, AssetType } from "../types/asset.js";
  * missionFindingsRouter. Agents write assets through the upsert_asset pseudo-tool and finding
  * mirroring; these routes are for a human adding, correcting or removing one. */
 export const missionAssetsRouter = Router({ mergeParams: true });
-
-const ASSET_TYPES: AssetType[] = ["domain", "subdomain", "url", "ip", "port", "service", "api", "technology"];
-const ASSET_STATUSES: AssetStatus[] = ["active", "inactive", "unverified"];
 
 function missionIdOf(req: { params: Record<string, string> }): string {
   return req.params.missionId;
@@ -29,21 +28,21 @@ missionAssetsRouter.get("/", (req, res) => {
 
 missionAssetsRouter.post("/", async (req, res, next) => {
   const { type, value, status } = (req.body ?? {}) as { type?: unknown; value?: unknown; status?: unknown };
-  if (!ASSET_TYPES.includes(type as AssetType)) {
-    res.status(400).json({ error: `type must be one of: ${ASSET_TYPES.join(", ")}`, code: "INVALID_REQUEST" });
+  if (!isOneOf(type, ASSET_TYPES)) {
+    res.status(400).json({ error: oneOfMessage("type", ASSET_TYPES), code: "INVALID_REQUEST" });
     return;
   }
   if (typeof value !== "string" || !value.trim()) {
     res.status(400).json({ error: "value is required", code: "INVALID_REQUEST" });
     return;
   }
-  if (status !== undefined && !ASSET_STATUSES.includes(status as AssetStatus)) {
-    res.status(400).json({ error: `status must be one of: ${ASSET_STATUSES.join(", ")}`, code: "INVALID_REQUEST" });
+  if (status !== undefined && !isOneOf(status, ASSET_STATUSES)) {
+    res.status(400).json({ error: oneOfMessage("status", ASSET_STATUSES), code: "INVALID_REQUEST" });
     return;
   }
   try {
     const asset = await upsertAsset(missionIdOf(req), {
-      type: type as AssetType,
+      type,
       value: value.trim(),
       status: (status as AssetStatus | undefined) ?? "unverified",
       discoveredBy: "manual",
@@ -57,12 +56,12 @@ missionAssetsRouter.post("/", async (req, res, next) => {
 
 missionAssetsRouter.patch("/:assetId", async (req, res, next) => {
   const { status } = (req.body ?? {}) as { status?: unknown };
-  if (!ASSET_STATUSES.includes(status as AssetStatus)) {
-    res.status(400).json({ error: `status must be one of: ${ASSET_STATUSES.join(", ")}`, code: "INVALID_REQUEST" });
+  if (!isOneOf(status, ASSET_STATUSES)) {
+    res.status(400).json({ error: oneOfMessage("status", ASSET_STATUSES), code: "INVALID_REQUEST" });
     return;
   }
   try {
-    res.json({ asset: await updateAsset(req.params.assetId, { status: status as AssetStatus }) });
+    res.json({ asset: await updateAsset(req.params.assetId, { status }) });
   } catch (err) {
     next(err);
   }

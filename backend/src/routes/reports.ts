@@ -2,9 +2,10 @@ import { Router } from "express";
 import { ReportNotFoundError, RequestCancelledError } from "../services/errors.js";
 import { createReport, deleteReport, getReport, listReports, updateReportStatus } from "../services/reportManager.js";
 import { abortOnClientDisconnect } from "./streamUtils.js";
+import { REPORT_STATUSES } from "../types/report.js";
+import { isOneOf, oneOfMessage } from "./validate.js";
 import type { ReportStatus } from "../types/report.js";
 
-const VALID_STATUSES: ReportStatus[] = ["draft", "ai_generated", "human_review", "ready", "submitted"];
 
 /** Mission-scoped report routes - GET/POST/DELETE /api/missions/:missionId/reports[...]. MUST be
  * created with { mergeParams: true } or req.params.missionId is undefined once mounted under a
@@ -100,9 +101,9 @@ missionReportsRouter.post("/", async (req, res, next) => {
 
 missionReportsRouter.patch("/:id", async (req, res, next) => {
   const status = (req.body as { status?: unknown }).status;
-  if (typeof status !== "string" || !VALID_STATUSES.includes(status as ReportStatus)) {
+  if (!isOneOf(status, REPORT_STATUSES)) {
     res.status(400).json({
-      error: `status must be one of: ${VALID_STATUSES.join(", ")}`,
+      error: oneOfMessage("status", REPORT_STATUSES),
       code: "INVALID_REQUEST",
     });
     return;

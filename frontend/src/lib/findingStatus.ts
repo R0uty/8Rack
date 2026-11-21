@@ -2,14 +2,7 @@ import type { Tone } from "../components/ui";
 import type { FindingStatus } from "../types/finding";
 
 /** Shared across FindingsView/FindingsTable/FindingDetails. */
-export const FINDING_STATUSES: FindingStatus[] = [
-  "potential",
-  "investigating",
-  "confirmed",
-  "false_positive",
-  "reported",
-  "duplicate",
-];
+export { FINDING_STATUSES } from "../types/finding";
 
 export const STATUS_TONE: Record<FindingStatus, Tone> = {
   potential: "info",

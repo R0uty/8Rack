@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkScope, extractTargets, isInScope, isTargetOutOfScope } from "./scopeMatcher.js";
+import { checkScope, extractTargets, ipv4FromMapped, isInScope, isTargetOutOfScope } from "./scopeMatcher.js";
 
 describe("extractTargets", () => {
   it("extracts a bare domain", () => {
@@ -186,3 +186,32 @@ describe("host normalization", () => {
     expect(extractTargets(["nmap", "2001:db8::1"])).toContain("2001:db8::1");
   });
 });
+
+describe("IPv4-mapped IPv6", () => {
+  it.each([
+    ["::ffff:10.0.0.5", "10.0.0.5"],
+    ["::FFFF:10.0.0.5", "10.0.0.5"],
+    ["0:0:0:0:0:ffff:10.0.0.5", "10.0.0.5"],
+    ["::ffff:a00:5", "10.0.0.5"],
+    ["::ffff:7f00:1", "127.0.0.1"],
+  ])("reads %s as %s", (addr, ipv4) => {
+    expect(ipv4FromMapped(addr)).toBe(ipv4);
+  });
+
+  it.each(["::1", "2001:db8::ffff:a00:5", "::fffe:a00:5", "10.0.0.5", "example.com"])("leaves %s alone", (addr) => {
+    expect(ipv4FromMapped(addr)).toBeUndefined();
+  });
+
+  it("extracts the whole address, not a valid-looking prefix of it", () => {
+    expect(extractTargets(["nmap", "::ffff:10.0.0.6"])).toContain("::ffff:10.0.0.6");
+    expect(extractTargets(["nmap", "::ffff:10.0.0.6"])).not.toContain("::ffff:10");
+    expect(extractTargets(["ping6 ::1."])).toEqual(["::1"]);
+  });
+
+  it("is caught by an IPv4 out-of-scope entry, bare and inside a URL", () => {
+    expect(checkScope(["10.0.0.0/24"], ["10.0.0.5"], ["nmap", "::ffff:10.0.0.5"]).verdict).toBe("out_of_scope");
+    expect(checkScope(["10.0.0.0/24"], ["10.0.0.5"], ["curl", "http://[::ffff:10.0.0.5]/"]).verdict).toBe("out_of_scope");
+    expect(checkScope(["10.0.0.0/24"], ["10.0.0.5"], ["nmap", "::ffff:10.0.0.6"]).verdict).toBe("in_scope");
+  });
+});
+

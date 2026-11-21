@@ -15,8 +15,7 @@ import type { WorkOrder, WorkOrderCreateInput } from "../types/workOrder.js";
 
 /**
  * Security Work Orders - a unit of factory work assigned to one agent. Starting one creates a real
- * single-agent OrchestratorTask via services/orchestrator.ts (the exact reuse pattern
- * multiAgentOrchestrator.ts#createPlan already uses for a plan's first step) - no separate execution
+ * single-agent OrchestratorTask via services/orchestrator.ts - no separate execution
  * mechanism, no duplicated tool-call/confirmation loop.
  */
 
@@ -33,7 +32,7 @@ async function persistWorkOrders(missionId: string): Promise<void> {
 
 // See missionManager.ts#onMissionDeleted - a deleted mission's work orders must stop returning, and
 // a still-running one's underlying task is already aborted by orchestrator.ts's own independently-
-// registered handler (same projectId->missionId, same pattern multiAgentOrchestrator.ts's plans use).
+// registered handler.
 onMissionDeleted((missionId) => {
   for (const [id, wo] of workOrders) {
     if (wo.missionId === missionId) workOrders.delete(id);
@@ -89,8 +88,7 @@ export function dependenciesSatisfied(wo: WorkOrder): boolean {
   return wo.dependencies.every((depId) => workOrders.get(depId)?.status === "completed");
 }
 
-/** Maps an OrchestratorTask's status onto the WorkOrder vocabulary - mirrors
- * multiAgentOrchestrator.ts#continueAfterStepTask's own task-status mapping one level up.
+/** Maps an OrchestratorTask's status onto the WorkOrder vocabulary.
  * "waiting_guidance" (a failed tool request/execution needing a human note) is folded into
  * "waiting_approval" too - from a WorkOrder's-eye view both are "needs a human before this can keep
  * going", and the underlying task transcript still has the exact distinction for anyone drilling in. */
@@ -281,8 +279,8 @@ export function cancelWorkOrder(id: string): WorkOrder {
   }
   wo.status = "cancelled";
   wo.completedAt = Date.now();
-  // Fire-and-forget: same synchronous-route tradeoff as orchestrator.ts#cancelTask/
-  // multiAgentOrchestrator.ts#cancelPlan. logActivity never throws.
+  // Fire-and-forget: same synchronous-route tradeoff as orchestrator.ts#cancelTask. logActivity
+  // never throws.
   void persistWorkOrders(wo.missionId).catch((err) => console.error("[workOrderManager] persist failed:", err));
   void logActivity(wo.missionId, "work_order_cancelled", `Work order cancelled: ${wo.objective}`, { workOrderId: wo.id });
   return wo;

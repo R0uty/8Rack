@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { env } from "../config/env.js";
 import { runExecutable } from "./toolExecutor.js";
 import type { OutputChunk } from "./toolExecutor.js";
-import { listMissionIds, readMissionJson, writeMissionJson } from "./missionStore.js";
+import { listMissionIds, readMissionJson, readMissionRecord, writeMissionJson, writeMissionRecord } from "./missionStore.js";
 import { ingestExecution } from "./findingsManager.js";
 import { getMission, onMissionDeleted } from "./missionManager.js";
 import { checkScope } from "./scopeMatcher.js";
@@ -51,6 +51,7 @@ onMissionDeleted((missionId) => {
     runningControllers.get(id)?.abort();
     runningControllers.delete(id);
     pendingStdin.delete(id);
+    outputStored.delete(id);
     executions.delete(id);
   }
 });
@@ -339,8 +340,37 @@ function missionExecutions(missionId: string): ExecutionRecord[] {
   return [...executions.values()].filter((r) => r.missionId === missionId).sort((a, b) => b.createdAt - a.createdAt);
 }
 
+/** A finished run's output lives in execution-output/<id>.json, written once; executions.json keeps
+ * the record with `outputStored` in its place. Before this, every status change on any execution
+ * rewrote the full stdout/stderr of every run the mission had ever made. */
+const OUTPUT_DIR = "execution-output";
+type ExecutionOutput = Pick<ExecutionResult, "stdout" | "stderr" | "parsedOutput">;
+type StoredExecutionRecord = ExecutionRecord & { outputStored?: boolean };
+const outputStored = new Set<string>();
+
+function hasOutput(result: ExecutionResult | undefined): result is ExecutionResult {
+  return !!result && (result.stdout !== "" || result.stderr !== "" || result.parsedOutput !== undefined);
+}
+
+function toStored(record: ExecutionRecord): StoredExecutionRecord {
+  if (!outputStored.has(record.id) || !record.result) return record;
+  const { stdout: _stdout, stderr: _stderr, parsedOutput: _parsed, ...rest } = record.result;
+  return { ...record, result: { ...rest, stdout: "", stderr: "" }, outputStored: true };
+}
+
 async function persistExecutions(missionId: string): Promise<void> {
-  await writeMissionJson(missionId, EXECUTIONS_FILE, missionExecutions(missionId));
+  const records = missionExecutions(missionId);
+  // Output first, so the index never points at a file that isn't there yet. Only settled runs: a
+  // running one's result isn't final.
+  const settled = records.filter((r) => !outputStored.has(r.id) && r.status !== "running" && r.status !== "pending_confirmation" && hasOutput(r.result));
+  await Promise.all(
+    settled.map(async (r) => {
+      const { stdout, stderr, parsedOutput } = r.result!;
+      await writeMissionRecord(missionId, OUTPUT_DIR, r.id, { stdout, stderr, parsedOutput } satisfies ExecutionOutput);
+      outputStored.add(r.id);
+    }),
+  );
+  await writeMissionJson(missionId, EXECUTIONS_FILE, records.map(toStored));
 }
 
 /** Hydrates the in-memory execution history from disk — called once at server startup so history
@@ -348,8 +378,20 @@ async function persistExecutions(missionId: string): Promise<void> {
 export async function loadExecutionsFromDisk(): Promise<void> {
   const missionIds = await listMissionIds();
   for (const missionId of missionIds) {
-    const records = await readMissionJson<ExecutionRecord>(missionId, EXECUTIONS_FILE);
-    for (const record of records) executions.set(record.id, recoverInterruptedExecution(record));
+    const records = await readMissionJson<StoredExecutionRecord>(missionId, EXECUTIONS_FILE);
+    for (const stored of records) {
+      const { outputStored: wasStored, ...record } = stored;
+      if (wasStored && record.result) {
+        const output = await readMissionRecord<ExecutionOutput>(missionId, OUTPUT_DIR, record.id);
+        if (output) {
+          record.result = { ...record.result, ...output };
+          outputStored.add(record.id);
+        } else {
+          record.result = { ...record.result, stderr: "(The saved output for this run is missing.)" };
+        }
+      }
+      executions.set(record.id, recoverInterruptedExecution(record));
+    }
   }
 }
 

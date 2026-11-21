@@ -1,14 +1,16 @@
-export type MissionStatus =
-  | "draft"
-  | "ready"
-  | "recon"
-  | "investigating"
-  | "validating"
-  | "reporting"
-  | "review"
-  | "completed"
-  | "paused"
-  | "cancelled";
+export const MISSION_STATUSES = [
+  "draft",
+  "ready",
+  "recon",
+  "investigating",
+  "validating",
+  "reporting",
+  "review",
+  "completed",
+  "paused",
+  "cancelled",
+] as const;
+export type MissionStatus = (typeof MISSION_STATUSES)[number];
 
 export interface Mission {
   id: string;

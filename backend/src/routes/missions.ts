@@ -6,23 +6,12 @@ import { previewAdvance } from "../services/factoryDirector.js";
 import { getMissionAttention } from "../services/missionAttention.js";
 import { listActivity, logActivity } from "../services/activityLog.js";
 import { MissionNotFoundError } from "../services/errors.js";
+import { MISSION_STATUSES } from "../types/mission.js";
 import type { MissionStatus } from "../types/mission.js";
 import type { MissionStreamEvent } from "../types/missionRun.js";
 
 export const missionsRouter = Router();
 
-const MISSION_STATUSES: MissionStatus[] = [
-  "draft",
-  "ready",
-  "recon",
-  "investigating",
-  "validating",
-  "reporting",
-  "review",
-  "completed",
-  "paused",
-  "cancelled",
-];
 
 interface MissionFieldsBody {
   description?: unknown;
@@ -108,7 +97,7 @@ missionsRouter.post("/", async (req, res, next) => {
   try {
     const mission = await createMission(body.name.trim(), body.notes ?? "", missionFieldsFrom(body));
     await logActivity(mission.id, "mission_created", `Mission "${mission.name}" created`);
-    res.json({ mission });
+    res.status(201).json({ mission });
   } catch (err) {
     next(err);
   }

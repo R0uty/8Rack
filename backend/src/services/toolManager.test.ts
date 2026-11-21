@@ -19,7 +19,7 @@ import {
 } from "./toolManager.js";
 import { getMission, onMissionDeleted } from "./missionManager.js";
 import { listActivity } from "./activityLog.js";
-import { listMissionIds, readMissionJson } from "./missionStore.js";
+import { listMissionIds, readMissionJson, readMissionRecord, writeMissionJson, writeMissionRecord } from "./missionStore.js";
 import {
   ExecToolDisabledError,
   ExecToolNotFoundError,
@@ -37,6 +37,8 @@ vi.mock("./missionStore.js", () => ({
   listMissionIds: vi.fn(async () => []),
   readMissionJson: vi.fn(async () => []),
   writeMissionJson: vi.fn(async () => undefined),
+  writeMissionRecord: vi.fn(async () => undefined),
+  readMissionRecord: vi.fn(async () => undefined),
 }));
 
 vi.mock("./missionManager.js", () => ({ getMission: vi.fn(async () => undefined), onMissionDeleted: vi.fn() }));
@@ -748,3 +750,56 @@ describe("loadExecutionsFromDisk recovery", () => {
     expect(getExecution("hyd-pending")?.status).toBe("pending_confirmation");
   });
 });
+
+describe("execution output on disk", () => {
+  const result = { stdout: "", stderr: "", exitCode: 0, executionTimeMs: 1, success: true, timedOut: false, cancelled: false, truncated: false };
+
+  it("merges a run's stored output back into its record on load", async () => {
+    vi.mocked(listMissionIds).mockResolvedValueOnce(["proj-output"]);
+    vi.mocked(readMissionJson).mockResolvedValueOnce([
+      { id: "out-1", missionId: "proj-output", toolId: "t", status: "completed", resolvedCommand: "t", arguments: [], createdAt: 0, result, outputStored: true },
+    ]);
+    vi.mocked(readMissionRecord).mockResolvedValueOnce({ stdout: "open 443/tcp", stderr: "" });
+
+    await loadExecutionsFromDisk();
+
+    expect(readMissionRecord).toHaveBeenCalledWith("proj-output", "execution-output", "out-1");
+    expect(getExecution("out-1")?.result?.stdout).toBe("open 443/tcp");
+  });
+
+  it("says so when the stored output is gone", async () => {
+    vi.mocked(listMissionIds).mockResolvedValueOnce(["proj-output"]);
+    vi.mocked(readMissionJson).mockResolvedValueOnce([
+      { id: "out-2", missionId: "proj-output", toolId: "t", status: "completed", resolvedCommand: "t", arguments: [], createdAt: 0, result, outputStored: true },
+    ]);
+    vi.mocked(readMissionRecord).mockResolvedValueOnce(undefined);
+
+    await loadExecutionsFromDisk();
+
+    expect(getExecution("out-2")?.result?.stderr).toMatch(/missing/);
+  });
+
+  it("writes a settled run's output once, to its own file, and keeps it out of executions.json", async () => {
+    vi.mocked(listMissionIds).mockResolvedValueOnce(["proj-output-2"]);
+    vi.mocked(readMissionJson).mockResolvedValueOnce([
+      // An old-format record: output inline. The next persist moves it out.
+      { id: "out-3", missionId: "proj-output-2", toolId: "t", status: "pending_confirmation", resolvedCommand: "t", arguments: [], createdAt: 0 },
+      { id: "out-4", missionId: "proj-output-2", toolId: "t", status: "completed", resolvedCommand: "t", arguments: [], createdAt: 1, result: { ...result, stdout: "big output" } },
+    ]);
+    await loadExecutionsFromDisk();
+    vi.mocked(writeMissionJson).mockClear();
+    vi.mocked(writeMissionRecord).mockClear();
+
+    rejectExecution("out-3"); // any change persists the mission's executions
+
+    await vi.waitFor(() => expect(writeMissionJson).toHaveBeenCalled());
+    expect(writeMissionRecord).toHaveBeenCalledWith("proj-output-2", "execution-output", "out-4", expect.objectContaining({ stdout: "big output" }));
+    const index = vi.mocked(writeMissionJson).mock.calls.at(-1)![2] as { id: string; outputStored?: boolean; result?: { stdout: string } }[];
+    const stored = index.find((r) => r.id === "out-4")!;
+    expect(stored.outputStored).toBe(true);
+    expect(stored.result?.stdout).toBe("");
+    // In memory the record keeps its output.
+    expect(getExecution("out-4")?.result?.stdout).toBe("big output");
+  });
+});
+

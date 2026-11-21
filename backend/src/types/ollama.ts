@@ -39,27 +39,12 @@ export interface ChatOptions {
   num_ctx?: number;
 }
 
-/** Ollama's native function-calling tool schema, passed in ChatRequest.tools. */
-export interface OllamaToolSpec {
-  type: "function";
-  function: {
-    name: string;
-    description: string;
-    parameters: {
-      type: "object";
-      properties: Record<string, unknown>;
-      required?: string[];
-    };
-  };
-}
-
 export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
   stream?: boolean;
   keep_alive?: string;
   options?: ChatOptions;
-  tools?: OllamaToolSpec[];
 }
 
 export interface ChatResponseChunk {

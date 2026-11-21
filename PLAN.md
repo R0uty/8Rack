@@ -169,6 +169,12 @@ usability (2026-11-21)".
 
 ## Phase 4 - Backend
 
+**Status (2026-11-21): done, not committed, including the live 16k mission run.** The run reached
+idle. Its findings for the operator (validators re-scanning, a web-analyzer that made no tool calls,
+duplicate assets) are now TODO items. Two items are deferred: MCP steps 3 and 4, and a schema library
+(enums now come from `types/`, checks from `routes/validate.ts`). Details in DEVELOPMENT.md's "Phase 4: backend
+(2026-11-21)".
+
 - **Remove API surface nothing calls.** `/api/plans` and `multiAgentOrchestrator.ts` (278 lines plus
   284 of tests), `POST /api/orchestrator/tasks`, `/tasks/:id/continue`, `/tasks/:id/resume`. The
   frontend uses only `GET /tasks/:id` and `/tasks/:id/guidance`. These are unauthenticated endpoints

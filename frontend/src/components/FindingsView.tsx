@@ -11,10 +11,11 @@ import { useFindings } from "../hooks/useFindings";
 import { useReports } from "../hooks/useReports";
 import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
 import { FINDING_STATUSES } from "../lib/findingStatus";
-import type { Finding, FindingSeverity, FindingStatus } from "../types/finding";
+import { FINDING_SEVERITIES } from "../types/finding";
+import type { Finding, FindingStatus } from "../types/finding";
 import type { Mission } from "../types/mission";
 
-const SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
+const SEVERITIES = FINDING_SEVERITIES;
 
 function matchesQuery(f: Finding, query: string): boolean {
   if (!query) return true;

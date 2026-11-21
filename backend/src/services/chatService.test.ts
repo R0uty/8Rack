@@ -1,22 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getAgent } from "./agentManager.js";
-import { resolveOllamaTools, streamChat, streamChatWithTools } from "./ollama.js";
-import { AgentDisabledError, AgentNotFoundError, AgentOfflineError, UnknownToolError } from "./errors.js";
+import { streamChat } from "./ollama.js";
+import { AgentDisabledError, AgentNotFoundError, AgentOfflineError } from "./errors.js";
 import { streamAgentChat } from "./chatService.js";
 import type { AgentWithStatus } from "../types/agent.js";
-import type { ChatResponseChunk } from "../types/ollama.js";
+import type { ChatMessage, ChatResponseChunk } from "../types/ollama.js";
 
 vi.mock("./agentManager.js", () => ({ getAgent: vi.fn() }));
-vi.mock("./ollama.js", () => ({
-  streamChat: vi.fn(),
-  streamChatWithTools: vi.fn(),
-  resolveOllamaTools: vi.fn(),
-}));
+vi.mock("./ollama.js", () => ({ streamChat: vi.fn() }));
 
 const mockGetAgent = vi.mocked(getAgent);
 const mockStreamChat = vi.mocked(streamChat);
-const mockStreamChatWithTools = vi.mocked(streamChatWithTools);
-const mockResolveOllamaTools = vi.mocked(resolveOllamaTools);
 
 const fixtureAgent: AgentWithStatus = {
   id: "planner",
@@ -50,9 +44,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockGetAgent.mockResolvedValue(fixtureAgent);
   mockStreamChat.mockImplementation(async function* () {
-    yield fixtureChunk;
-  });
-  mockStreamChatWithTools.mockImplementation(async function* () {
     yield fixtureChunk;
   });
 });
@@ -169,80 +160,6 @@ describe("prompt cut warning", () => {
   });
 });
 
-describe("tool resolution branch", () => {
-  it("calls streamChat (not streamChatWithTools) when no tools are requested", async () => {
-    await drain("planner");
-    expect(mockStreamChat).toHaveBeenCalledOnce();
-    expect(mockStreamChatWithTools).not.toHaveBeenCalled();
-  });
-
-  it("resolves and passes tool specs through to streamChatWithTools", async () => {
-    mockResolveOllamaTools.mockReturnValue({
-      specs: [{ type: "function", function: { name: "calc", description: "", parameters: { type: "object", properties: {} } } }],
-      unknown: [],
-    });
-
-    await drain("planner", { agentId: "planner", messages: [], tools: ["calc"] });
-
-    expect(mockResolveOllamaTools).toHaveBeenCalledWith(["calc"]);
-    expect(mockStreamChatWithTools).toHaveBeenCalledOnce();
-    expect(mockStreamChat).not.toHaveBeenCalled();
-    const [{ tools }] = mockStreamChatWithTools.mock.calls[0];
-    expect(tools).toEqual([{ type: "function", function: { name: "calc", description: "", parameters: { type: "object", properties: {} } } }]);
-  });
-
-  it("throws UnknownToolError and never calls streamChatWithTools for unresolvable tools", async () => {
-    mockResolveOllamaTools.mockReturnValue({ specs: [], unknown: ["ghost-tool"] });
-
-    await expect(drain("planner", { agentId: "planner", messages: [], tools: ["ghost-tool"] })).rejects.toThrow(
-      UnknownToolError,
-    );
-    expect(mockStreamChatWithTools).not.toHaveBeenCalled();
-  });
-});
-
-describe("agent.tools fallback", () => {
-  beforeEach(() => {
-    mockResolveOllamaTools.mockReturnValue({
-      specs: [{ type: "function", function: { name: "search_knowledge_base", description: "", parameters: { type: "object", properties: {} } } }],
-      unknown: [],
-    });
-  });
-
-  it("activates the agent's own configured tools when the request doesn't specify any", async () => {
-    mockGetAgent.mockResolvedValue({ ...fixtureAgent, tools: ["search_knowledge_base"] });
-
-    await drain("planner");
-
-    expect(mockResolveOllamaTools).toHaveBeenCalledWith(["search_knowledge_base"]);
-    expect(mockStreamChatWithTools).toHaveBeenCalledOnce();
-    expect(mockStreamChat).not.toHaveBeenCalled();
-  });
-
-  it("lets an explicit request.tools override the agent's configured tools", async () => {
-    mockGetAgent.mockResolvedValue({ ...fixtureAgent, tools: ["search_knowledge_base"] });
-
-    await drain("planner", { agentId: "planner", messages: [], tools: ["other-tool"] });
-
-    expect(mockResolveOllamaTools).toHaveBeenCalledWith(["other-tool"]);
-  });
-
-  it("does not activate the agent's tools when toolsPreamble is set (the Orchestrator path)", async () => {
-    mockGetAgent.mockResolvedValue({ ...fixtureAgent, tools: ["search_knowledge_base"] });
-
-    await drain("planner", { agentId: "planner", messages: [], toolsPreamble: "Available tools: bash" });
-
-    expect(mockStreamChatWithTools).not.toHaveBeenCalled();
-    expect(mockStreamChat).toHaveBeenCalledOnce();
-  });
-
-  it("still calls plain streamChat when the agent has no tools configured", async () => {
-    await drain("planner");
-    expect(mockStreamChat).toHaveBeenCalledOnce();
-    expect(mockStreamChatWithTools).not.toHaveBeenCalled();
-  });
-});
-
 describe("passthrough", () => {
   it("yields exactly what the underlying generator produced", async () => {
     const custom: ChatResponseChunk = {
@@ -257,5 +174,23 @@ describe("passthrough", () => {
 
     const chunks = await drain("planner");
     expect(chunks).toEqual([custom]);
+  });
+});
+
+describe("context budget", () => {
+  it("sends older tool results shortened when the transcript would overflow the window", async () => {
+    const messages: ChatMessage[] = [{ role: "user", content: "objective" }];
+    for (let i = 0; i < 10; i++) {
+      messages.push({ role: "assistant", content: "{}" });
+      messages.push({ role: "tool", content: JSON.stringify({ tool: `t${i}`, success: true, stdout: "x".repeat(8000) }) });
+    }
+
+    await drain("planner", { agentId: "planner", messages });
+
+    const sent = mockStreamChat.mock.calls[0][0].messages;
+    expect(sent[0].role).toBe("system");
+    expect(sent[1].content).toBe("objective");
+    expect(sent.filter((m) => m.content.includes('"elided":true')).length).toBeGreaterThan(0);
+    expect(sent.at(-1)!.content).toBe(messages.at(-1)!.content);
   });
 });

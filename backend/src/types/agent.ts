@@ -11,8 +11,6 @@ export interface Agent {
   color: string;
   /** Admin-level toggle for whether this agent is offered at all, independent of model availability. */
   enabled: boolean;
-  /** Names of tools (see types/tool.ts) this agent may use. */
-  tools?: string[];
   /** Ids of exec tools (see types/execTool.ts) this agent may request via the Orchestrator.
    * Omitted means every enabled exec tool is available (unrestricted); an empty array means none. */
   execTools?: string[];

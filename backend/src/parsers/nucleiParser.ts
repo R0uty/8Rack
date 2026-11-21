@@ -1,7 +1,7 @@
+import { FINDING_SEVERITIES } from "../types/finding.js";
 import type { FindingSeverity, ParsedFinding } from "../types/finding.js";
 
 const RESULT_LINE = /^\[([^\]]+)]\s*\[([^\]]+)]\s*\[([^\]]+)]\s+(\S+)/;
-const VALID_SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
 
 /** nuclei's only default argument is `-silent` (see builtins.ts), whose plain-text line format is
  * "[template-id] [protocol] [severity] matched-at". nuclei's own severity vocabulary maps 1:1 onto
@@ -17,7 +17,7 @@ export function parse(stdout: string, target: string): ParsedFinding[] {
 
     const [, templateId, protocol, rawSeverity, matchedAt] = match;
     const severity = rawSeverity.toLowerCase() as FindingSeverity;
-    if (!VALID_SEVERITIES.includes(severity)) continue;
+    if (!(FINDING_SEVERITIES as readonly string[]).includes(severity)) continue;
 
     findings.push({
       type: "potential_vulnerability",

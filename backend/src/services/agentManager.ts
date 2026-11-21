@@ -32,7 +32,6 @@ function isValidAgent(value: unknown): value is Agent {
     typeof v.icon === "string" &&
     typeof v.color === "string" &&
     typeof v.enabled === "boolean" &&
-    (v.tools === undefined || (Array.isArray(v.tools) && v.tools.every((t) => typeof t === "string"))) &&
     (v.execTools === undefined || (Array.isArray(v.execTools) && v.execTools.every((t) => typeof t === "string")))
   );
 }

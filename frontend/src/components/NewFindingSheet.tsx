@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { Button, Notice, SELECT_CLASS, Sheet } from "./ui";
+import { FINDING_SEVERITIES } from "../types/finding";
 import type { FindingCreateInput, FindingSeverity, FindingType } from "../types/finding";
 
+/** Display order - the likeliest kinds of hand-added finding first. */
 const TYPES: FindingType[] = [
   "potential_vulnerability",
   "confirmed_vulnerability",
@@ -20,7 +22,7 @@ const TYPES: FindingType[] = [
   "information",
   "cve",
 ];
-const SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
+const SEVERITIES = FINDING_SEVERITIES;
 
 const INPUT_CLASS =
   "w-full rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/60";

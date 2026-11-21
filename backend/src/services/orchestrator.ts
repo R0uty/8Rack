@@ -20,7 +20,9 @@ import type { ChatMessage } from "../types/ollama.js";
 import type { ExecutionRecord } from "../types/execTool.js";
 import type { RagSearchResult } from "../types/rag.js";
 import type { AgentWithStatus } from "../types/agent.js";
+import { FINDING_SEVERITIES, FINDING_TYPES } from "../types/finding.js";
 import type { Finding, FindingCreateInput, FindingSeverity, FindingType } from "../types/finding.js";
+import { ASSET_STATUSES, ASSET_TYPES } from "../types/asset.js";
 import type { Asset, AssetCreateInput, AssetType } from "../types/asset.js";
 import type { Mission } from "../types/mission.js";
 
@@ -173,6 +175,8 @@ function missionTasks(missionId: string): OrchestratorTask[] {
 // listTasks/getTask, and a still-running one must actually be aborted so it can't resurrect the
 // just-deleted directory via a later persistTasks() call.
 onMissionDeleted((missionId) => {
+  clearTimeout(persistTimers.get(missionId));
+  persistTimers.delete(missionId);
   for (const [id, task] of tasks) {
     if (task.missionId !== missionId) continue;
     runningTaskControllers.get(id)?.abort();
@@ -183,6 +187,23 @@ onMissionDeleted((missionId) => {
 
 async function persistTasks(missionId: string): Promise<void> {
   await writeMissionJson(missionId, TASKS_FILE, missionTasks(missionId));
+}
+
+/** Before this, a task was written only when a whole advanceTask run ended, so a crash mid-run lost
+ * every step of it. Now each step (and every status change, via touch) schedules a write; writes
+ * within PERSIST_DEBOUNCE_MS of each other coalesce into one, since a run of pseudo-tool calls can
+ * change the task many times a second. */
+const PERSIST_DEBOUNCE_MS = 250;
+const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function schedulePersist(missionId: string): void {
+  if (persistTimers.has(missionId)) return;
+  const timer = setTimeout(() => {
+    persistTimers.delete(missionId);
+    void persistTasks(missionId).catch((err) => console.error("[orchestrator] persist failed:", err));
+  }, PERSIST_DEBOUNCE_MS);
+  timer.unref?.();
+  persistTimers.set(missionId, timer);
 }
 
 /** Hydrates in-memory tasks from disk - called once at server startup so task history survives a
@@ -450,6 +471,7 @@ async function collectAgentReply(
 
 function touch(task: OrchestratorTask): void {
   task.updatedAt = Date.now();
+  schedulePersist(task.missionId);
 }
 
 function formatKnowledgeBaseResults(results: RagSearchResult[]): string {
@@ -498,29 +520,10 @@ async function runKnowledgeBaseSearch(args: string[]): Promise<string> {
   }
 }
 
-const VALID_FINDING_TYPES: FindingType[] = [
-  "port",
-  "service",
-  "technology",
-  "domain",
-  "subdomain",
-  "directory",
-  "endpoint",
-  "credential",
-  "cookie",
-  "api",
-  "header",
-  "interesting_file",
-  "potential_vulnerability",
-  "confirmed_vulnerability",
-  "information",
-  "cve",
-];
-
-const VALID_SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
-
-const VALID_ASSET_TYPES: AssetType[] = ["domain", "subdomain", "url", "ip", "port", "service", "api", "technology"];
-const VALID_ASSET_STATUSES: Asset["status"][] = ["active", "inactive", "unverified"];
+const VALID_FINDING_TYPES: readonly string[] = FINDING_TYPES;
+const VALID_SEVERITIES: readonly string[] = FINDING_SEVERITIES;
+const VALID_ASSET_TYPES: readonly string[] = ASSET_TYPES;
+const VALID_ASSET_STATUSES: readonly string[] = ASSET_STATUSES;
 
 /** Parses a pseudo-tool's single JSON-string argument. `JSON.parse("null")`/`"[]"` succeed but aren't
  * the object every caller destructures - null would throw out of the tool-result error path. */
@@ -964,6 +967,23 @@ function stuckRecordingFailure(messages: OrchestratorTask["messages"], request: 
   return failures >= MAX_FAILED_RECORDING_REPEATS ? lastFailure : undefined;
 }
 
+const REPEATED_REJECTION_MARK = "repeatOfRejected";
+
+function wasRejectedBefore(task: OrchestratorTask, toolId: string, args: string[]): boolean {
+  const key = JSON.stringify(args);
+  return task.toolExecutionIds.some((id) => {
+    const execution = getExecution(id);
+    return execution?.status === "rejected" && execution.toolId === toolId && JSON.stringify(execution.arguments) === key;
+  });
+}
+
+function stopForTime(task: OrchestratorTask): OrchestratorTask {
+  task.status = "max_time_reached";
+  task.error = `Stopped after ${Math.round(env.maxOrchestratorTaskTimeMs / 60_000)} minutes of agent time (MAX_ORCHESTRATOR_TASK_TIME_MS).`;
+  touch(task);
+  return task;
+}
+
 /** Every tool-call attempt counts against the cap, valid or not, so a model that keeps requesting
  * malformed/unknown tools can't loop forever without ever incrementing toward the limit. */
 function spendToolCall(task: OrchestratorTask): boolean {
@@ -978,12 +998,10 @@ function spendToolCall(task: OrchestratorTask): boolean {
 }
 
 async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?: AbortSignal): Promise<OrchestratorTask> {
-  if (activeTimeMs(task) > env.maxOrchestratorTaskTimeMs) {
-    task.status = "max_time_reached";
-    task.error = `Stopped after ${Math.round(env.maxOrchestratorTaskTimeMs / 60_000)} minutes of agent time (MAX_ORCHESTRATOR_TASK_TIME_MS).`;
-    touch(task);
-    return task;
-  }
+  // Each step starts with the previous one's messages on disk - a pseudo-tool result appended just
+  // before this recursion would otherwise wait out the next (possibly minutes-long) generation.
+  schedulePersist(task.missionId);
+  if (activeTimeMs(task) > env.maxOrchestratorTaskTimeMs) return stopForTime(task);
 
   const agent = await getAgent(task.agentId);
 
@@ -1000,9 +1018,21 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
     task.messages.push({ role: "assistant", content: JSON.stringify(toolRequest) });
   } else {
     let reply: string;
+    // The cap used to be checked only between generations, so one runaway generation could run as
+    // long as it liked. The rest of the budget now bounds this call too.
+    const timeLeft = AbortSignal.timeout(Math.max(1, env.maxOrchestratorTaskTimeMs - activeTimeMs(task)));
     try {
-      reply = await collectAgentReply(task.agentId, agent, task.missionId, task.messages, task.model, onChunk, signal);
+      reply = await collectAgentReply(
+        task.agentId,
+        agent,
+        task.missionId,
+        task.messages,
+        task.model,
+        onChunk,
+        signal ? AbortSignal.any([signal, timeLeft]) : timeLeft,
+      );
     } catch (err) {
+      if (timeLeft.aborted && !signal?.aborted) return stopForTime(task);
       if (err instanceof RequestCancelledError) {
         task.status = "cancelled";
         touch(task);
@@ -1135,6 +1165,27 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
   }
 
   const { arguments: execArguments, stdin } = splitWriteFileContent(toolRequest);
+
+  // Local models often answer a rejection by asking for the very same command again, putting the
+  // same approval card back in front of the human each time. An exact repeat of a rejected request
+  // is refused here instead; a second refused repeat pauses the task for a note.
+  if (wasRejectedBefore(task, toolRequest.tool, execArguments)) {
+    const repeats = task.messages.filter((m) => m.role === "tool" && m.content.includes(REPEATED_REJECTION_MARK)).length;
+    task.messages.push({
+      role: "tool",
+      content: JSON.stringify({
+        rejected: true,
+        [REPEATED_REJECTION_MARK]: true,
+        message: "The user already rejected this exact request (same tool and arguments). Don't ask for it again - try a different approach or finish with what you have.",
+      }),
+    });
+    if (repeats >= 1) {
+      task.status = "waiting_guidance";
+      touch(task);
+      return task;
+    }
+    return advance(task, onChunk, signal);
+  }
 
   let record: ExecutionRecord;
   try {

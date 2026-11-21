@@ -141,3 +141,32 @@ export async function writeMissionJson<T>(id: string, filename: string, data: T[
   publishChanged(id, filename);
   return enqueueWrite(`${id}:${filename}`, dir, path.join(dir, filename), () => JSON.stringify(data, null, 2));
 }
+
+/** One file per record under a mission's subdirectory - for bulky content (tool output) that would
+ * otherwise be rewritten with every change to its list file. Both parts are checked here, at the same
+ * chokepoint as missionDir: a lowercase subdirectory name and a UUID-ish record id, nothing else. */
+const SUBDIR_PATTERN = /^[a-z][a-z-]*$/;
+const RECORD_ID_PATTERN = /^[0-9a-zA-Z-]{1,64}$/;
+
+function recordFilePath(id: string, subdir: string, recordId: string): { dir: string; filePath: string } {
+  if (!SUBDIR_PATTERN.test(subdir) || !RECORD_ID_PATTERN.test(recordId)) {
+    throw new Error(`Invalid record path "${subdir}/${recordId}"`);
+  }
+  const dir = path.join(missionDir(id), subdir);
+  return { dir, filePath: path.join(dir, `${recordId}.json`) };
+}
+
+export async function writeMissionRecord(id: string, subdir: string, recordId: string, data: unknown): Promise<void> {
+  const { dir, filePath } = recordFilePath(id, subdir, recordId);
+  return enqueueWrite(`${id}:${subdir}/${recordId}`, dir, filePath, () => JSON.stringify(data));
+}
+
+/** Undefined when the file is missing or unreadable - the caller keeps whatever it already had. */
+export async function readMissionRecord<T>(id: string, subdir: string, recordId: string): Promise<T | undefined> {
+  const { filePath } = recordFilePath(id, subdir, recordId);
+  try {
+    return JSON.parse(await readFile(filePath, "utf-8")) as T;
+  } catch {
+    return undefined;
+  }
+}

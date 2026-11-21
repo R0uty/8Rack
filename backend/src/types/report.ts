@@ -20,7 +20,8 @@ export interface ReportSection {
  * move to any other via PATCH) - same rigor level as `Finding.status`
  * (services/findingsManager.ts#updateFinding), which is equally unconstrained.
  */
-export type ReportStatus = "draft" | "ai_generated" | "human_review" | "ready" | "submitted";
+export const REPORT_STATUSES = ["draft", "ai_generated", "human_review", "ready", "submitted"] as const;
+export type ReportStatus = (typeof REPORT_STATUSES)[number];
 
 export interface Report {
   id: string;

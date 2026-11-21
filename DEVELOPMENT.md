@@ -4114,3 +4114,136 @@ edits; the active nav item visible at 375px after switching to Tools; Registry s
 POST/PATCH/DELETE (including a 400 on a bad status and 404 on a second delete), `/attention` and
 `/factory/preview` (blocked reason for a paused mission) checked with curl. Not seen live: the queue's
 cards against a real run, the transcript, adding a finding, bulk status.
+
+## Phase 4: backend (2026-11-21)
+
+PLAN.md Phase 4.
+
+### Removed API surface
+
+- `/api/plans`, `services/multiAgentOrchestrator.ts` (and its tests), `types/orchestration.ts`, the
+  frontend's `types/multiAgentPlan.ts`, `PlanNotFoundError`/`InvalidPlanStateError`. The Factory
+  Director replaced hand-authored plans; nothing called these.
+- Orchestrator routes are read-only now: `GET /api/orchestrator/tasks?missionId=` and
+  `GET /tasks/:id`. `POST /tasks`, `/continue`, `/resume`, `/guidance`, `/cancel` started or steered
+  agent runs outside the work-order model on an unauthenticated server; work orders have their own
+  start/guidance/cancel routes.
+- Native Ollama tool-calling: `extensions/toolRegistry.ts`, `types/tool.ts`,
+  `ollama.ts#resolveOllamaTools`/`streamChatWithTools`, `Agent.tools`, the `tools` field on
+  `/api/chat` and `/api/agents/:id/chat`, `UnknownToolError`, `isValidToolNames`. No agent set
+  `tools` and nothing was ever registered. An old agent file with a `tools` key still loads.
+
+### One source for enums
+
+Finding types/severities/statuses, asset types/statuses, report statuses and mission statuses are
+`as const` arrays in `types/` with the type derived from each. `routes/findings.ts`, `routes/assets.ts`,
+`routes/reports.ts`, `routes/missions.ts`, the Orchestrator's pseudo-tools and `nucleiParser.ts` used
+their own copies; they import the lists now. `routes/validate.ts` has `isOneOf`, `oneOfMessage` and
+`isStringArray`. The frontend mirrors the arrays (its own workspace can't import the backend at
+runtime); `frontend/src/types/backendMirror.test.ts` imports both and fails on any difference. No
+schema library: the bodies are small, and the hand-written 400 messages are part of the API.
+
+### Route tests and status codes
+
+`app.ts#createApp()` builds the whole app without listening; `index.ts` listens and hydrates.
+`test-utils/httpHarness.ts` serves it on a random port and sends the Host and Origin the real
+frontend sends (node:http, since fetch won't set Host), so hostCheck/originCheck/requireMission and the
+mount paths are all exercised. `routes/missions.routes.test.ts` (6), `workOrders.routes.test.ts` (7),
+`tools.routes.test.ts` (6) mock the service layer, so the real `backend/data` is never touched. They
+cover validation, a cross-site write (403), a write to a missing mission (404), starting/cancelling
+another mission's order through this mission's URL (404), `retryOf` from another mission, 409 while a
+run is going, an out-of-scope request (403), and resume after a reject.
+
+`POST /api/missions` and `POST /api/tools/request` now answer 201 (work orders, findings, assets and
+agents already did). Report creation streams, so it stays 200.
+
+### Persistence
+
+- **Tasks** are written after every step, not only when an `advanceTask` run ends: `touch()` and the
+  start of each `advance()` schedule a write, coalesced over 250 ms. A crash now loses at most the step
+  in flight. A pending write is cancelled when its mission is deleted.
+- **Execution output** moved to `execution-output/<executionId>.json`, written once when the run
+  settles; `executions.json` keeps the record with empty stdout/stderr and `outputStored: true`.
+  Loading merges it back (a missing file shows as a note in stderr). An old `executions.json` with
+  output inline loads as before, and the next write moves the output out. `missionStore` gained
+  `writeMissionRecord`/`readMissionRecord`, which check the subdirectory and record id as strictly as
+  `missionDir` checks the mission id.
+
+### Context budget
+
+`services/contextBudget.ts#fitToContext`, called from `chatService.streamAgentChat` for every agent
+call. The budget is `num_ctx` minus room for the reply (`num_predict` capped at a quarter of the
+window, else an eighth). If the system prompt plus transcript is estimated over it, older tool results
+are replaced, oldest first, by a short `{tool, success, elided: true, preview}` until it fits. The
+objective, every assistant turn and human note, and the two newest results stay whole. Only what is
+sent changes; the stored transcript keeps everything. Tokens are estimated at 3 characters each, then
+calibrated from each reply's `prompt_eval_count` (smoothed, bounded to 1.5-4). Each shortening logs
+`[chat] <agent>: shortened N older tool result(s)`. The "prompt filled the whole window" warning stays
+as the backstop.
+
+### Carried-over fixes
+
+- **Time cap during a generation.** Each generation gets `AbortSignal.timeout` for the remaining
+  budget; when it fires the task ends `max_time_reached` instead of running on.
+- **IPv4-mapped IPv6.** `scopeMatcher.ipv4FromMapped` turns `::ffff:10.0.0.5` and `::ffff:a00:5` into
+  `10.0.0.5` on both sides of a match, so an IPv4 out-of-scope entry catches them. Found on the way:
+  the IPv6 extractor stopped at the first dot, turning `::ffff:10.0.0.6` into `::ffff:10` (a valid,
+  different address) and blocking an in-scope request.
+- **Rejected tools requested again.** An exact repeat (same tool and arguments) of a request the human
+  rejected in this task is answered with a refusal instead of a new approval card; a second refused
+  repeat pauses the task for a note.
+- **Report prose.** The Report Writer's prompt now gives each finding's status and asks for
+  conditional impact wording ("if confirmed...") for anything not confirmed. Nothing checks the
+  output yet.
+
+### Not done
+
+- MCP steps 3 and 4.
+
+### Live mission rerun at 16k (2026-11-21)
+
+This was a throwaway mission with scope `127.0.0.1`, using the default agents (qwen2.5-coder:7b) and
+`OLLAMA_NUM_CTX` 16384. The human approved every tool run in the UI. The run went from start to `idle`
+with no failed orders and nothing waiting for a human note. It created 7 work orders and 6 tool runs
+(5 nmap, 1 http_request), and confirmed 5 findings.
+
+**What worked:**
+- Recon made 9 calls. They were coherent, and it ended with a closing message.
+- Each validator made 3 calls and recorded a verdict through `validate_finding`.
+- Per-step persistence held throughout.
+- Every finished run's output was in `execution-output/<id>.json`.
+
+**What the context budget did:** nothing, and that was correct. The largest transcript was recon's,
+at about 7,350 characters (about 2.5k tokens). No `[chat] ... shortened` line was logged. At 16k
+tokens, a mission this small never gets close to the limit. The elision path is covered by tests
+only.
+
+**What the operator would notice:**
+- **Validators run the full scan again.** Four of the five validators asked for the same
+  `nmap -sV --top-ports 1000` that recon had already run, just to confirm one port. Each one is a
+  separate approval card for no new information. A validator should read the existing execution
+  first, or be offered a narrower check, such as one port with `-p`.
+- **The web-analyzer made no tool calls.** It wrote two "findings" as markdown JSON blocks without a
+  `tool` key, so nothing was recorded. One of them was an invented reflected XSS on `/search?q`. It
+  also swapped which port runs what, and ended by asking the user a question. The order was labelled
+  `noOutcome`, which was correct. This is the first time the Phase 1 "no tool used" label has been
+  seen on a real order. Nothing it made up reached the findings. The problem is prompt-following in
+  the 7B model, not the context budget.
+- **Duplicate assets.** The same port showed up as `port 3001/tcp`, `service 3001/tcp:http`,
+  `service 3001` and `service http`. Agents' `upsert_asset` values aren't normalized against what the
+  parsers recorded.
+
+### Tests
+
+Backend 667 (661 before; the plans and native tool-calling tests went with their code). New tests:
+- route tests (19)
+- `contextBudget.test.ts` (5) and a chatService check that the shortened messages are what reach Ollama
+- per-step task persistence
+- execution output on disk (3)
+- the time cap during a generation
+- repeated rejections (2)
+- mapped IPv6 and the extractor (12)
+- report status in the prompt
+
+Frontend 260 (253 before; the mirror test added 7). Typechecks clean; oxlint shows only warnings that
+were already there.

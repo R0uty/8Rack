@@ -1,24 +1,29 @@
-export type FindingType =
-  | "port"
-  | "service"
-  | "technology"
-  | "domain"
-  | "subdomain"
-  | "directory"
-  | "endpoint"
-  | "credential"
-  | "cookie"
-  | "api"
-  | "header"
-  | "interesting_file"
-  | "potential_vulnerability"
-  | "confirmed_vulnerability"
-  | "information"
-  | "cve";
+/** Mirrors backend/src/types/finding.ts - backendMirror.test.ts fails if these lists drift. */
+export const FINDING_TYPES = [
+  "port",
+  "service",
+  "technology",
+  "domain",
+  "subdomain",
+  "directory",
+  "endpoint",
+  "credential",
+  "cookie",
+  "api",
+  "header",
+  "interesting_file",
+  "potential_vulnerability",
+  "confirmed_vulnerability",
+  "information",
+  "cve",
+] as const;
+export type FindingType = (typeof FINDING_TYPES)[number];
 
-export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
+export const FINDING_SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;
+export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 
-export type FindingStatus = "potential" | "investigating" | "confirmed" | "false_positive" | "reported" | "duplicate";
+export const FINDING_STATUSES = ["potential", "investigating", "confirmed", "false_positive", "reported", "duplicate"] as const;
+export type FindingStatus = (typeof FINDING_STATUSES)[number];
 
 export interface FindingHistoryEntry {
   status: FindingStatus;

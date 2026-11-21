@@ -7,35 +7,14 @@ import {
   searchFindings,
   updateFinding,
 } from "../services/findingsManager.js";
-import type { FindingCreateInput, FindingFilters, FindingPatchInput, FindingSeverity, FindingType } from "../types/finding.js";
-
-const VALID_TYPES: FindingType[] = [
-  "port",
-  "service",
-  "technology",
-  "domain",
-  "subdomain",
-  "directory",
-  "endpoint",
-  "credential",
-  "cookie",
-  "api",
-  "header",
-  "interesting_file",
-  "potential_vulnerability",
-  "confirmed_vulnerability",
-  "information",
-  "cve",
-];
-const VALID_SEVERITIES: FindingSeverity[] = ["info", "low", "medium", "high", "critical"];
-const VALID_STATUSES = ["potential", "investigating", "confirmed", "false_positive", "reported", "duplicate"];
+import { FINDING_SEVERITIES, FINDING_STATUSES, FINDING_TYPES } from "../types/finding.js";
+import type { FindingCreateInput, FindingFilters, FindingPatchInput } from "../types/finding.js";
+import { isOneOf } from "./validate.js";
 
 function parseFiltersFromQuery(query: Record<string, unknown>): FindingFilters {
   const filters: FindingFilters = {};
-  if (typeof query.type === "string" && VALID_TYPES.includes(query.type as FindingType)) filters.type = query.type as FindingType;
-  if (typeof query.severity === "string" && VALID_SEVERITIES.includes(query.severity as FindingSeverity)) {
-    filters.severity = query.severity as FindingSeverity;
-  }
+  if (isOneOf(query.type, FINDING_TYPES)) filters.type = query.type;
+  if (isOneOf(query.severity, FINDING_SEVERITIES)) filters.severity = query.severity;
   if (typeof query.tool === "string" && query.tool.trim()) filters.tool = query.tool;
   if (typeof query.target === "string" && query.target.trim()) filters.target = query.target;
   if (typeof query.tag === "string" && query.tag.trim()) filters.tag = query.tag;
@@ -67,9 +46,9 @@ interface CreateFindingBody {
 function isValidCreateBody(body: CreateFindingBody): body is CreateFindingBody & FindingCreateInput {
   return (
     typeof body.type === "string" &&
-    VALID_TYPES.includes(body.type as FindingType) &&
+    isOneOf(body.type, FINDING_TYPES) &&
     typeof body.severity === "string" &&
-    VALID_SEVERITIES.includes(body.severity as FindingSeverity) &&
+    isOneOf(body.severity, FINDING_SEVERITIES) &&
     typeof body.title === "string" &&
     body.title.trim().length > 0 &&
     typeof body.description === "string" &&
@@ -101,8 +80,8 @@ interface PatchFindingBody {
 
 function isValidPatchBody(body: PatchFindingBody): body is PatchFindingBody & FindingPatchInput {
   return (
-    (body.severity === undefined || (typeof body.severity === "string" && VALID_SEVERITIES.includes(body.severity as FindingSeverity))) &&
-    (body.status === undefined || (typeof body.status === "string" && VALID_STATUSES.includes(body.status))) &&
+    (body.severity === undefined || isOneOf(body.severity, FINDING_SEVERITIES)) &&
+    (body.status === undefined || isOneOf(body.status, FINDING_STATUSES)) &&
     (body.tags === undefined || (Array.isArray(body.tags) && body.tags.every((t) => typeof t === "string"))) &&
     (body.description === undefined || typeof body.description === "string") &&
     (body.title === undefined || typeof body.title === "string") &&

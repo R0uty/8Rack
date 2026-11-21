@@ -16,7 +16,9 @@ const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]
  * hand-rolled regex, since a regex precise enough to reject every invalid shape (too many/few
  * groups, more than one "::", etc.) without also rejecting valid compressed forms is genuinely
  * hard to get right; over-matching here is harmless because isIPv6 is the real gate. */
-const IPV6_CANDIDATE_RE = /(?<![\w.-])[0-9a-fA-F:]*:[0-9a-fA-F:]*(?![\w-])/g;
+/** Dots are allowed after the first colon so an embedded IPv4 tail ("::ffff:10.0.0.5") is captured
+ * whole - stopping at the dot gave "::ffff:10", itself a valid (and wrong) IPv6 address. */
+const IPV6_CANDIDATE_RE = /(?<![\w.-])[0-9a-fA-F:]*:[0-9a-fA-F:.]*(?![\w-])/g;
 /** Requires a letters-only final label, so it never overlaps with IPV4_RE's all-numeric matches -
  * still needs the COMMON_TLDS check below, since this alone also matches code identifier chains
  * (`process.stdout.write`) and dotted filenames (`config.yaml`, `app.py`). */
@@ -79,6 +81,26 @@ function canonicalizeIPv6(addr: string): string | undefined {
   return parts.map((p) => p.padStart(4, "0").toLowerCase()).join(":");
 }
 
+/** "::ffff:10.0.0.5" (or its hex spelling "::ffff:a00:5", which is what Node's URL parser turns it
+ * into) is the IPv4 address 10.0.0.5 - a tool connects to that host. Without this, an IPv4 out-of-scope
+ * entry didn't catch the mapped spelling of the same address. */
+export function ipv4FromMapped(addr: string): string | undefined {
+  if (!isIPv6(addr)) return undefined;
+  const lower = addr.toLowerCase();
+  const lastColon = lower.lastIndexOf(":");
+  const tail = lower.slice(lastColon + 1);
+  if (tail.includes(".")) {
+    // Swap the dotted tail for two zero groups so the prefix can be checked in canonical form.
+    const canon = canonicalizeIPv6(`${lower.slice(0, lastColon)}:0:0`);
+    return canon === "0000:0000:0000:0000:0000:ffff:0000:0000" ? tail : undefined;
+  }
+  const groups = canonicalizeIPv6(lower)?.split(":");
+  if (!groups || groups.slice(0, 5).some((g) => g !== "0000") || groups[5] !== "ffff") return undefined;
+  const hi = parseInt(groups[6], 16);
+  const lo = parseInt(groups[7], 16);
+  return [hi >> 8, hi & 255, lo >> 8, lo & 255].join(".");
+}
+
 function ipv6ToBigInt(addr: string): bigint | undefined {
   const canon = canonicalizeIPv6(addr);
   if (!canon) return undefined;
@@ -110,7 +132,8 @@ export function extractTargets(args: string[], extraTlds: ReadonlySet<string> = 
     // A trailing/leading single ":" is often just adjacent punctuation (e.g. "target: ::1"), not
     // part of the address, so it's tried both as captured and with one stray colon trimmed off
     // each end - a real "::" prefix/suffix survives this since only a single colon is stripped.
-    for (const candidate of [match[0], match[0].replace(/^:(?!:)/, "").replace(/(?<!:):$/, "")]) {
+    const trimmed = match[0].replace(/\.+$/, ""); // a sentence-ending "::1." is still ::1
+    for (const candidate of [trimmed, trimmed.replace(/^:(?!:)/, "").replace(/(?<!:):$/, "")]) {
       if (isIPv6(candidate)) {
         targets.add(candidate.toLowerCase());
         break;
@@ -136,8 +159,10 @@ function ipToInt(ip: string): number | undefined {
  * ("10.0.0.0/24"), a wildcard subdomain ("*.example.com"), a full URL (compared by hostname), or
  * a bare domain/IP (exact match, or - for a domain - any subdomain of it). */
 function matchesEntry(target: string, entry: string): boolean {
-  const t = normalizeHost(target);
+  const host = normalizeHost(target);
+  const t = ipv4FromMapped(host) ?? host;
   let e = normalizeHost(entry);
+  e = ipv4FromMapped(e) ?? e;
   if (!e) return false;
 
   // A "domain:port"/"ipv4:port" scope entry (not IPv6 - those are colon-heavy themselves) matches

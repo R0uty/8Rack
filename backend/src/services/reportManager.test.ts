@@ -144,6 +144,20 @@ describe("createReport", () => {
     expect(request.messages[0].content).toContain("My Report");
   });
 
+  it("tells the writer which findings were never confirmed", async () => {
+    mockGetFinding.mockImplementation((id: string) =>
+      fixtureFinding({ id, title: id, status: id === "finding-1" ? "confirmed" : "potential" }),
+    );
+    mockStreamAgentChat.mockImplementation(replyGenerator("report body"));
+
+    await createReport("proj-1", "Mixed", ["finding-1", "finding-2"]);
+
+    const prompt = mockStreamAgentChat.mock.calls.at(-1)![0].messages[0].content;
+    expect(prompt).toContain("Status: confirmed by validation");
+    expect(prompt).toContain("Status: potential - NOT confirmed");
+    expect(prompt).toMatch(/conditionally/);
+  });
+
   it("supports an agentId/model override", async () => {
     mockGetFinding.mockReturnValue(fixtureFinding());
     mockStreamAgentChat.mockImplementation(replyGenerator("report body"));
