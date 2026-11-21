@@ -14,7 +14,7 @@ SERVER_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = SERVER_ROOT.parent.parent
 
 # The server always listens here and nowhere else - see "Decided: the RAG server embeds through local
-# Ollama" in DEVELOPMENT.md. Not a setting on purpose.
+# Ollama" in docs/history/development-3-mcp-and-review.md. Not a setting on purpose.
 HOST = "127.0.0.1"
 
 # A short token is guessable by anything else on this machine that can reach the port.

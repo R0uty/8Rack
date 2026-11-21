@@ -37,7 +37,7 @@ const RUN_STATUS_TONE: Record<ScanRunStatus, Tone> = {
  * Scan Profiles: pick a target + a preset chain of exec-tools (see backend/src/scanners/
  * builtins.ts), review the resolved commands once, then run the whole chain with no further
  * per-step approval — deterministic, no agent/LLM in the loop. See backend/src/services/
- * scanRunner.ts and DEVELOPMENT.md's "Security scanners" section for why this differs from the
+ * scanRunner.ts and DEVELOPMENT.md's "Safety model" for why this differs from the
  * Orchestrator's per-tool-call confirmation.
  */
 export function ScannerPanel({ missionId, prefill }: ScannerPanelProps) {

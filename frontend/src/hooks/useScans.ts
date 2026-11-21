@@ -12,7 +12,7 @@ export interface LiveScanOutputChunk {
  * Drives the Scan Profiles feature (see backend/src/services/scanRunner.ts): load the built-in
  * profile roster + this mission's scan history, preview a profile resolved against a target, then
  * run it end to end with live step/output progress. One confirmation (the preview step) covers the
- * whole chained run — see DEVELOPMENT.md's "Security scanners" section for why, unlike the
+ * whole chained run — see DEVELOPMENT.md's "Safety model" for why, unlike the
  * Orchestrator's per-tool-call approval. Mission-scoped, mirrors useTools.ts's conventions.
  */
 export function useScans(missionId: string | null) {

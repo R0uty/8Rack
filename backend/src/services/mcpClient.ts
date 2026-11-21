@@ -6,11 +6,11 @@ import { McpRequestError } from "./errors.js";
 import type { McpServerStatus, McpToolInfo } from "../types/mcp.js";
 
 /**
- * 8Rack as an MCP client (see "Planned: MCP servers as the tool and RAG providers" in DEVELOPMENT.md):
+ * 8Rack as an MCP client (see "Knowledge base and MCP" in DEVELOPMENT.md):
  * connect to the servers named in `.env`, list the tools they offer, and call a tool on one.
  *
  * `callTool` has exactly one caller so far - knowledgeBase.ts, for the RAG server. Agents never reach it
- * directly: calling MCP tools from an agent needs the approval gate and enable switch (TODO.md step 3).
+ * directly: calling MCP tools from an agent needs the approval gate and enable switch (TODO.md, MCP step 3).
  *
  * Every check and call opens a connection and closes it again, rather than holding connections open:
  * calls are rare and short, and a server that restarts needs no reconnect logic.

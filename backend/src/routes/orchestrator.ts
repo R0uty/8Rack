@@ -4,7 +4,7 @@ import { getTask, listTasks } from "../services/orchestrator.js";
 /**
  * Read-only. Tasks are started, guided and cancelled through their work order
  * (routes/workOrders.ts) - the create/continue/resume/guidance/cancel routes that used to live here
- * started agent runs outside the work-order model and nothing called them (PLAN.md Phase 4).
+ * started agent runs outside the work-order model and nothing called them (review Phase 4, 2026-11-21).
  */
 export const orchestratorRouter = Router();
 

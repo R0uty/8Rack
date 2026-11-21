@@ -41,8 +41,8 @@ const UNSETTLED_FINDING_STATUSES: Finding["status"][] = ["potential", "investiga
  * the previous attempt did wasn't enough, regardless of why (an agent that declined to act because
  * the mission had no scope yet at the time, a `failed` execution, or anything else). The fresh
  * advance() call a human makes by clicking the button again *is* the attention that class of
- * non-outcome needs, not a reason to wedge the pipeline forever. See TODO.md's "Known issues" entry
- * this fixes. Enumeration doesn't get this treatment - see `hasBlockingWorkOrder` below for why. */
+ * non-outcome needs, not a reason to wedge the pipeline forever. The "Known issues" entry this fixes is in
+ * docs/history/todo-archive.md. Enumeration doesn't get this treatment - see `hasBlockingWorkOrder` below for why. */
 const IN_PROGRESS_WORK_ORDER_STATUSES: WorkOrder["status"][] = ["pending", "queued", "running", "waiting_approval"];
 
 function hasInProgressWorkOrder(existing: WorkOrder[], predicate: (wo: WorkOrder) => boolean): boolean {

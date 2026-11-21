@@ -1,3 +1,6 @@
+> Archived 2026-11-21 from POLISH.md. A record of what was built and why at the time; it is not kept
+> current. For the current design see DEVELOPMENT.md; for open work see TODO.md.
+
 # 8Rack — Polish plan
 
 Dated `2026-09-20`. The full-project assessment found the codebase healthy (backend 461 tests,
