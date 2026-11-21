@@ -3,6 +3,7 @@ import { access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { InvalidMissionIdError } from "./errors.js";
+import { publishChanged } from "./missionEvents.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -137,5 +138,6 @@ function enqueueWrite(key: string, dir: string, filePath: string, content: () =>
 
 export async function writeMissionJson<T>(id: string, filename: string, data: T[]): Promise<void> {
   const dir = missionDir(id); // validated/resolved before even entering the queue
+  publishChanged(id, filename);
   return enqueueWrite(`${id}:${filename}`, dir, path.join(dir, filename), () => JSON.stringify(data, null, 2));
 }

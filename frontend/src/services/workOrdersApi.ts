@@ -33,6 +33,16 @@ export async function startWorkOrder(missionId: string, workOrderId: string): Pr
   return unwrapWorkOrder(res);
 }
 
+/** Sends a note to an order paused on a failed tool request. The order resumes on the server as the
+ * mission's run; this returns at once. */
+export async function guideWorkOrder(missionId: string, workOrderId: string, note?: string): Promise<WorkOrder> {
+  const res = await apiFetch(
+    `/api/missions/${encodeURIComponent(missionId)}/workorders/${encodeURIComponent(workOrderId)}/guidance`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note }) },
+  );
+  return unwrapWorkOrder(res);
+}
+
 export async function refreshWorkOrder(missionId: string, workOrderId: string): Promise<WorkOrder> {
   const res = await apiFetch(
     `/api/missions/${encodeURIComponent(missionId)}/workorders/${encodeURIComponent(workOrderId)}/refresh`,

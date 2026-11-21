@@ -9,7 +9,8 @@ interface MissionSwitcherProps {
   loading: boolean;
   error: string | null;
   /** True while the factory is advancing this mission - its live output belongs to this selection. */
-  disabled: boolean;
+  /** Locks picking/editing. Nothing locks it since runs moved to the server; kept for callers that need it. */
+  disabled?: boolean;
   onSelect: (id: string) => void;
   onNew: () => void;
   onEdit: (mission: Mission) => void;

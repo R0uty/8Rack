@@ -3,17 +3,16 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { WorkOrdersView } from "./WorkOrdersView";
 import { useWorkOrders } from "../hooks/useWorkOrders";
-import { fetchTask, provideGuidance } from "../services/orchestratorApi";
+import { fetchTask } from "../services/orchestratorApi";
 import type { Mission } from "../types/mission";
 import type { WorkOrder } from "../types/workOrder";
 import type { OrchestratorTask } from "../types/orchestrator";
 
 vi.mock("../hooks/useWorkOrders", () => ({ useWorkOrders: vi.fn() }));
-vi.mock("../services/orchestratorApi", () => ({ fetchTask: vi.fn(), provideGuidance: vi.fn() }));
+vi.mock("../services/orchestratorApi", () => ({ fetchTask: vi.fn() }));
 
 const mockUseWorkOrders = vi.mocked(useWorkOrders);
 const mockFetchTask = vi.mocked(fetchTask);
-const mockProvideGuidance = vi.mocked(provideGuidance);
 
 const mission: Mission = { id: "m1", name: "Mission A", notes: "", createdAt: 1 };
 
@@ -59,6 +58,7 @@ function setup(workOrders: WorkOrder[], overrides: Partial<ReturnType<typeof use
     create: vi.fn(),
     start: vi.fn(),
     cancel: vi.fn(),
+    guide: vi.fn(),
     refreshOne,
     ...overrides,
   });
@@ -104,9 +104,11 @@ describe("WorkOrdersView", () => {
   });
 
   it("gives a failed tool request a real guidance action, not just a message", async () => {
-    setup([fixtureWorkOrder({ status: "waiting_approval" })]);
-    mockFetchTask.mockResolvedValue(fixtureTask({ status: "waiting_guidance" }));
-    mockProvideGuidance.mockResolvedValue(fixtureTask({ status: "completed", finalResponse: "Retried successfully." }));
+    const guide = vi.fn().mockResolvedValue(fixtureWorkOrder({ status: "running" }));
+    setup([fixtureWorkOrder({ status: "waiting_approval" })], { guide });
+    mockFetchTask
+      .mockResolvedValueOnce(fixtureTask({ status: "waiting_guidance" }))
+      .mockResolvedValue(fixtureTask({ status: "completed", finalResponse: "Retried successfully." }));
 
     render(<WorkOrdersView mission={mission} />);
     const user = userEvent.setup();
@@ -116,7 +118,7 @@ describe("WorkOrdersView", () => {
     await user.type(screen.getByPlaceholderText(/Optional note/), "use dig instead");
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
-    expect(mockProvideGuidance).toHaveBeenCalledWith("task-1", "use dig instead", expect.any(Function), expect.any(AbortSignal));
+    expect(guide).toHaveBeenCalledWith("wo-1", "use dig instead");
     await waitFor(() => expect(screen.getByText("Retried successfully.")).toBeInTheDocument());
   });
 

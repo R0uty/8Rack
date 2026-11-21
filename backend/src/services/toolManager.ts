@@ -404,6 +404,7 @@ async function runRecord(
   tool: ExecTool,
   stdin: string | undefined,
   onOutput?: (chunk: OutputChunk) => void,
+  onStarted?: (record: ExecutionRecord) => void,
 ): Promise<ExecutionRecord> {
   // Global cap on real OS processes spawned at once, shared across every caller (manual requests,
   // Orchestrator tasks, Scan Profiles) since they all reach this one chokepoint - runningControllers
@@ -422,6 +423,7 @@ async function runRecord(
 
   const controller = new AbortController();
   runningControllers.set(record.id, controller);
+  onStarted?.(record);
 
   const result = await runExecutable({
     // Run the identity-resolved absolute path (e.g. MissionDiscovery httpx in ~/.local/bin), not the
@@ -576,9 +578,12 @@ export async function requestExecution(body: ToolRequestBody): Promise<Execution
 /** Execution ids with a confirm currently past its status check - see confirmExecution. */
 const confirmingExecutions = new Set<string>();
 
+/** `onStarted` fires once the process is spawned, past every check that can refuse the confirm - so a
+ * caller can answer the HTTP request then and let the run finish in the background. */
 export async function confirmExecution(
   id: string,
   onOutput?: (chunk: OutputChunk) => void,
+  onStarted?: (record: ExecutionRecord) => void,
 ): Promise<ExecutionRecord> {
   const record = executions.get(id);
   if (!record) throw new ExecutionNotFoundError(id);
@@ -606,7 +611,7 @@ export async function confirmExecution(
     // Not removed from pendingStdin until runRecord is past its concurrency check: a rejected
     // confirm leaves the record pending for a retry, and retrying write_file with its content gone
     // would truncate the target file to nothing.
-    return await runRecord(record, tool, pendingStdin.get(id), onOutput);
+    return await runRecord(record, tool, pendingStdin.get(id), onOutput, onStarted);
   } finally {
     confirmingExecutions.delete(id);
   }

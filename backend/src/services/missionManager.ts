@@ -3,6 +3,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { listMissionIds, missionDir, writeFileAtomic } from "./missionStore.js";
 import { MissionNotFoundError } from "./errors.js";
+import { publishChanged } from "./missionEvents.js";
 import { migrateMissionStatus, type Mission } from "../types/mission.js";
 
 const MISSION_FILE = "mission.json";
@@ -51,6 +52,7 @@ async function readMissionMeta(id: string): Promise<Mission | undefined> {
 async function writeMissionMeta(mission: Mission): Promise<void> {
   await mkdir(missionDir(mission.id), { recursive: true });
   await writeFileAtomic(path.join(missionDir(mission.id), MISSION_FILE), JSON.stringify(mission, null, 2));
+  publishChanged(mission.id, MISSION_FILE);
 }
 
 /** No read-through cache (unlike agentManager) - missions are mutated via this API, and the

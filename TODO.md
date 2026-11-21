@@ -1433,10 +1433,14 @@ Steps:
 
 Whole-project review covering fixes, UI, usability and backend: see `PLAN.md`. Phase 1 (small fixes)
 is done as of 2026-11-20, except 1.4/1.5, which moved into Phase 2 - see DEVELOPMENT.md's "Phase 1
-fixes (2026-11-20)". Next is Phase 2: a factory run owned by the server instead of one browser tab's
-request, which the UI work depends on.
+fixes (2026-11-20)". Phase 2 (server-owned factory runs, items 1.4/1.5 with it) is done as of
+2026-11-20, not committed - see DEVELOPMENT.md's "Phase 2: server-owned factory runs". Next is Phase 3.
 
 - [ ] Delete `backend/data/missions/00000000-0000-0000-0000-000000000000/` by hand. It's skipped at
       load now, but still on disk (local data, left for you).
-- [ ] Not seen live: the validator under the new `validate_finding` rules and the "no tool used" label
-      on a real order. Both are covered by tests only; check them on the next full mission run.
+- [ ] Not seen live: the "no tool used" label on a real order. Tests only. (The validator under the
+      new `validate_finding` rules was seen live during the Phase 2 check: it recorded a
+      `false_positive` verdict.)
+- [ ] Phase 2 follow-ups: tool output printed before a page reload isn't replayed (keep a server-side
+      tail per running execution and send it on connect); Retry/guidance return 409 while a run is going
+      instead of queueing behind it.

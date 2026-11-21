@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { FileText, Play } from "lucide-react";
+import { useEffect, useState } from "react";
+import { FileText, Play, Square } from "lucide-react";
 import { FactoryPipeline } from "./FactoryPipeline";
 import { ApprovalQueue } from "./ApprovalQueue";
 import { ActivityFeed } from "./ActivityFeed";
@@ -13,7 +13,8 @@ import { usePendingExecutions } from "../hooks/usePendingExecutions";
 import { useActivity } from "../hooks/useActivity";
 import { useReports } from "../hooks/useReports";
 import { useRefreshOnActivate } from "../hooks/useRefreshOnActivate";
-import { advanceFactory } from "../services/factoryApi";
+import { useMissionLive } from "../hooks/useMissionEvents";
+import { advanceFactory, stopFactory } from "../services/factoryApi";
 import type { AgentWithStatus } from "../types/agent";
 import type { Mission } from "../types/mission";
 
@@ -22,7 +23,6 @@ interface FactoryDashboardProps {
   mission: Mission | null;
   active?: boolean;
   onMissionsChanged?: () => void;
-  onAdvancingChange?: (advancing: boolean) => void;
   onOpenView?: (view: AppView) => void;
 }
 
@@ -46,7 +46,7 @@ function StatTile({ label, value, onClick }: { label: string; value: number; onC
  * you, see where things stand, then what happened. Every number comes from hooks other views already
  * use - no aggregation endpoint.
  */
-export function FactoryDashboard({ agents, mission, active = true, onMissionsChanged, onAdvancingChange, onOpenView }: FactoryDashboardProps) {
+export function FactoryDashboard({ agents, mission, active = true, onMissionsChanged, onOpenView }: FactoryDashboardProps) {
   const missionId = mission?.id ?? null;
   const { assets, refresh: refreshAssets } = useAssets(missionId);
   const { workOrders, refresh: refreshWorkOrders } = useWorkOrders(missionId);
@@ -55,23 +55,18 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
   const { events, loading: activityLoading, error: activityError, refresh: refreshActivity } = useActivity(missionId);
   const { reports, generating, error: reportsError, refresh: refreshReports, generate: generateReport } = useReports(missionId);
 
-  const [advancing, setAdvancing] = useState(false);
-  const [streamingText, setStreamingText] = useState("");
+  // The run lives on the server: its state and output come from the mission's event stream, so they
+  // survive a reload and show the same in every tab.
+  const { run, output, outputWorkOrderId } = useMissionLive(missionId);
+  const running = run?.status === "running";
+  const blockedReason = run && (run.status === "blocked" || run.status === "waiting_guidance") ? (run.reason ?? null) : null;
+  const outputOrder = workOrders.find((w) => w.id === outputWorkOrderId);
+
+  const [requesting, setRequesting] = useState(false);
   const [advanceError, setAdvanceError] = useState<string | null>(null);
-  const [blockedReason, setBlockedReason] = useState<string | null>(null);
   const [showAllActivity, setShowAllActivity] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    return () => abortRef.current?.abort();
-  }, []);
-
-  useEffect(() => {
-    onAdvancingChange?.(advancing);
-  }, [advancing, onAdvancingChange]);
-
-  useEffect(() => {
-    setBlockedReason(null);
     setAdvanceError(null);
     setShowAllActivity(false);
   }, [missionId]);
@@ -88,33 +83,25 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
 
   useRefreshOnActivate(active, refreshAll);
 
-  const handleAdvance = async () => {
-    if (!missionId || advancing) return;
-    setAdvancing(true);
+  const runAction = async (action: (missionId: string) => Promise<unknown>, failure: string) => {
+    if (!missionId || requesting) return;
+    setRequesting(true);
     setAdvanceError(null);
-    setBlockedReason(null);
-    setStreamingText("");
-    const controller = new AbortController();
-    abortRef.current = controller;
     try {
-      const result = await advanceFactory(missionId, (chunk) => setStreamingText((prev) => prev + chunk), controller.signal);
-      setBlockedReason(result.blockedReason ?? null);
-      refreshAll();
+      await action(missionId);
     } catch (err) {
-      if (!(err instanceof DOMException && err.name === "AbortError")) {
-        setAdvanceError(err instanceof Error ? err.message : "Factory advance failed");
-        refreshAll(); // a chain can fail partway, after settling earlier work orders
-      }
+      setAdvanceError(err instanceof Error ? err.message : failure);
     } finally {
-      setAdvancing(false);
+      setRequesting(false);
     }
   };
+  const handleAdvance = () => runAction(advanceFactory, "Factory advance failed");
+  const handleStop = () => runAction(stopFactory, "Couldn't stop the run");
 
-  // A human decision is what the paused work order was waiting on, so that's what picks it back up -
-  // anything further the agent wants to run still stops at this same queue.
+  // The server resumes the paused work order itself once a decision lands; this only refreshes the
+  // queue sooner than the next event would.
   const handleApprovalSettled = () => {
-    refreshAll();
-    void handleAdvance();
+    void refreshPending();
   };
 
   if (!mission) return <NoMission />;
@@ -149,15 +136,28 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
               <p className="text-xs text-warning">No scope set - add a target before recon can start.</p>
             )}
           </div>
-          <Button variant="primary" icon={Play} onClick={handleAdvance} disabled={advancing}>
-            {advancing ? "Running…" : "Advance factory"}
-          </Button>
+          {running ? (
+            <Button variant="secondary" icon={Square} onClick={handleStop} disabled={requesting}>
+              Stop
+            </Button>
+          ) : (
+            <Button variant="primary" icon={Play} onClick={handleAdvance} disabled={requesting}>
+              Advance factory
+            </Button>
+          )}
         </div>
         <FactoryPipeline mission={mission} />
-        {advancing && streamingText && (
-          <div className="max-h-40 overflow-y-auto font-mono text-xs text-muted">
-            {streamingText}
-            <StreamingCursor />
+        {running && (
+          <div className="flex flex-col gap-1">
+            <p className="text-[11px] text-muted">
+              Running{outputOrder ? `: ${outputOrder.agentId} - ${outputOrder.objective}` : "…"}
+            </p>
+            {output && (
+              <div className="max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-xs text-muted">
+                {output}
+                <StreamingCursor />
+              </div>
+            )}
           </div>
         )}
       </GlassPanel>
@@ -187,7 +187,7 @@ export function FactoryDashboard({ agents, mission, active = true, onMissionsCha
         </GlassPanel>
       )}
 
-      <ApprovalQueue missionName={mission.name} executions={pendingExecutions} agents={agents} onSettled={handleApprovalSettled} />
+      <ApprovalQueue missionId={mission.id} missionName={mission.name} executions={pendingExecutions} agents={agents} onSettled={handleApprovalSettled} />
 
       <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
         <StatTile label="Active work orders" value={activeWorkOrders} onClick={() => onOpenView?.("workorders")} />

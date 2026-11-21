@@ -41,6 +41,7 @@ import {
   RagReindexInProgressError,
   RagReindexTimeoutError,
   McpRequestError,
+  RunInProgressError,
 } from "../services/errors.js";
 
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
@@ -211,6 +212,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof WorkOrderNotFoundError) {
     res.status(404).json({ error: err.message, code: "WORK_ORDER_NOT_FOUND" });
+    return;
+  }
+  if (err instanceof RunInProgressError) {
+    res.status(409).json({ error: err.message, code: "RUN_IN_PROGRESS" });
     return;
   }
   if (err instanceof InvalidWorkOrderStateError) {

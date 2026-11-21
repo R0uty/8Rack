@@ -162,7 +162,7 @@ export function FindingsView({ mission, active = true }: { mission: Mission | nu
       {!loading && findings.length === 0 && !error && (
         <p className="text-xs text-muted">No findings yet - advance the factory or run a scan to discover some.</p>
       )}
-      {!loading && findings.length > 0 && (
+      {findings.length > 0 && (
         <FindingsTable
           findings={filtered}
           onSelectFinding={setSelectedFinding}

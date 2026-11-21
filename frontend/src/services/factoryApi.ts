@@ -1,60 +1,42 @@
-import type { Mission } from "../types/mission";
-import type { WorkOrder } from "../types/workOrder";
+import type { MissionRunState, MissionStreamEvent } from "../types/missionRun";
 import { ApiError, apiFetch, readNdjsonStream, throwForErrorResponse } from "./httpClient";
 
-export interface FactoryAdvanceResult {
-  mission: Mission;
-  /** The work order this call started, if any - undefined means nothing was runnable. */
-  workOrder?: WorkOrder;
-  /** Set when nothing happened and there's a specific, actionable reason - e.g. no scope
-   * configured yet, so the Director correctly refused to seed a Recon work order. */
-  blockedReason?: string;
+async function unwrapRun(res: Response): Promise<MissionRunState> {
+  if (!res.ok) await throwForErrorResponse(res);
+  const data = (await res.json().catch(() => null)) as { run?: MissionRunState } | null;
+  if (!data?.run) throw new ApiError("Received an invalid response from the server", 502);
+  return data.run;
 }
 
-interface FactoryStreamLine {
-  type: "chunk" | "result" | "error";
-  content?: string;
-  mission?: Mission;
-  workOrder?: WorkOrder;
-  blockedReason?: string;
-  error?: string;
+/** Starts the mission's factory run on the server and returns at once. Progress arrives on the
+ * mission's event stream. 409 if a run is already going. */
+export async function advanceFactory(missionId: string): Promise<MissionRunState> {
+  return unwrapRun(await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/factory/advance`, { method: "POST" }));
+}
+
+/** Stops the generation in progress. Its order goes back to pending. */
+export async function stopFactory(missionId: string): Promise<MissionRunState> {
+  return unwrapRun(await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/factory/stop`, { method: "POST" }));
 }
 
 /**
- * Advances one mission's factory pipeline by one call - mirrors orchestratorApi.ts#streamTask's
- * NDJSON-reading pattern exactly: a "chunk" line per token from whichever work order is currently
- * generating, then a single terminal "result" line. Call again (after resolving any pending
- * confirmation via the existing tools API) to continue the chain once it pauses.
+ * Reads the mission's event stream until it ends or `signal` aborts. The first line is always the
+ * current run state. `onOpen` fires once the server has accepted the stream.
  */
-export async function advanceFactory(
+export async function streamMissionEvents(
   missionId: string,
-  onChunk: (content: string) => void,
-  signal?: AbortSignal,
-): Promise<FactoryAdvanceResult> {
-  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/factory/advance`, {
-    method: "POST",
-    signal,
-  });
+  onEvent: (event: MissionStreamEvent) => void,
+  signal: AbortSignal,
+  onOpen?: () => void,
+): Promise<void> {
+  const res = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/events`, { signal });
   if (!res.ok) await throwForErrorResponse(res);
-
-  let result: FactoryAdvanceResult | undefined;
+  onOpen?.();
   await readNdjsonStream(res, (line) => {
-    let parsed: FactoryStreamLine;
     try {
-      parsed = JSON.parse(line) as FactoryStreamLine;
+      onEvent(JSON.parse(line) as MissionStreamEvent);
     } catch {
-      throw new ApiError("Received an invalid response from the server", 502);
-    }
-    if (parsed.type === "error") throw new ApiError(parsed.error ?? "Factory advance failed", 502);
-    if (parsed.type === "chunk" && parsed.content) onChunk(parsed.content);
-    if (parsed.type === "result" && parsed.mission) {
-      result = { mission: parsed.mission, workOrder: parsed.workOrder, blockedReason: parsed.blockedReason };
+      // One bad line shouldn't drop the stream.
     }
   });
-
-  if (!result) {
-    if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
-    throw new ApiError("Factory advance stream ended without a result", 502);
-  }
-  return result;
 }

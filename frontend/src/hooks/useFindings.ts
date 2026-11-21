@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnChange } from "./useMissionEvents";
 import { createFinding, deleteFinding, fetchFindings, updateFinding } from "../services/findingsApi";
 import type { Finding, FindingCreateInput, FindingPatchInput } from "../types/finding";
 
@@ -66,6 +67,8 @@ export function useFindings(missionId: string | null) {
     },
     [refresh],
   );
+
+  useRefreshOnChange(missionId, ["findings"], refresh);
 
   return { findings, loading, error, refresh, create, update, remove };
 }

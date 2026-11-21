@@ -10,6 +10,8 @@ import {
   setToolEnabled,
 } from "../services/toolManager.js";
 import type { ToolRequestBody } from "../types/execTool.js";
+import { publishMission } from "../services/missionEvents.js";
+import { resumeAfterExecution } from "../services/missionRunner.js";
 
 export const toolsRouter = Router();
 
@@ -61,11 +63,12 @@ toolsRouter.get("/executions", (req, res) => {
     res.status(400).json({ error: "missionId query parameter is required", code: "INVALID_REQUEST" });
     return;
   }
-  // ?status=pending_confirmation lets the dashboard's Approval Queue fetch only what it shows, rather
-  // than up to 200 records carrying their full output.
+  // ?status=pending_confirmation,running lets the dashboard's Approval Queue fetch only what it shows,
+  // rather than up to 200 records carrying their full output.
   const { status } = req.query;
+  const wanted = typeof status === "string" && status ? new Set(status.split(",").map((s) => s.trim())) : undefined;
   const executions = listExecutions(missionId);
-  res.json({ executions: typeof status === "string" && status ? executions.filter((e) => e.status === status) : executions });
+  res.json({ executions: wanted ? executions.filter((e) => wanted.has(e.status)) : executions });
 });
 
 toolsRouter.get("/executions/:id", (req, res) => {
@@ -96,46 +99,39 @@ toolsRouter.post("/request", async (req, res, next) => {
 });
 
 /**
- * Runs a pending execution, streaming NDJSON: {type:"stdout"|"stderr", data} chunks as output
- * arrives, then a final {type:"result", record} line — same convention as POST /api/chat, so the
- * (future) Execution Console can consume this without a backend contract change.
+ * Runs a pending execution. Answers as soon as the process has started ({execution}) and lets it
+ * finish in the background: the run belongs to the server, not to this request, so closing the tab
+ * no longer kills an approved scan. Live output goes out as `execution_output` events on
+ * GET /api/missions/:id/events; cancelling is the explicit /cancel route. When the run settles, a
+ * work order waiting on it is resumed (missionRunner.ts#resumeAfterExecution).
  */
-toolsRouter.post("/executions/:id/confirm", async (req, res, next) => {
+toolsRouter.post("/executions/:id/confirm", (req, res, next) => {
   const { id } = req.params;
-
-  res.on("close", () => {
-    if (!res.writableEnded) {
-      try {
-        cancelExecution(id);
-      } catch {
-        // Already finished, rejected, or never started running - nothing to cancel.
-      }
-    }
-  });
-
-  res.setHeader("Content-Type", "application/x-ndjson");
-  res.setHeader("Cache-Control", "no-cache");
-
-  try {
-    const record = await confirmExecution(id, (chunk) => {
-      res.write(`${JSON.stringify({ type: chunk.stream, data: chunk.data })}\n`);
-    });
-    res.write(`${JSON.stringify({ type: "result", record })}\n`);
-    res.end();
-  } catch (err) {
-    if (!res.headersSent) {
-      next(err);
-      return;
-    }
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.write(`${JSON.stringify({ type: "error", error: message })}\n`);
-    res.end();
-  }
+  const missionId = getExecution(id)?.missionId;
+  let answered = false;
+  confirmExecution(
+    id,
+    (chunk) => {
+      if (missionId) publishMission(missionId, { type: "execution_output", executionId: id, stream: chunk.stream, data: chunk.data });
+    },
+    (record) => {
+      answered = true;
+      res.json({ execution: record });
+    },
+  ).then(
+    (record) => resumeAfterExecution(record.id),
+    (err: unknown) => {
+      if (!answered) next(err);
+      else console.error(`[tools] execution "${id}" failed after it started:`, err);
+    },
+  );
 });
 
 toolsRouter.post("/executions/:id/reject", (req, res, next) => {
   try {
-    res.json({ execution: rejectExecution(req.params.id) });
+    const execution = rejectExecution(req.params.id);
+    resumeAfterExecution(execution.id);
+    res.json({ execution });
   } catch (err) {
     next(err);
   }

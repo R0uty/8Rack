@@ -1,5 +1,5 @@
 import type { ExecToolWithStatus, ExecutionRecord, ExecutionStatus } from "../types/execTool";
-import { ApiError, apiFetch, readNdjsonStream, throwForErrorResponse } from "./httpClient";
+import { ApiError, apiFetch, throwForErrorResponse } from "./httpClient";
 
 export async function fetchTools(): Promise<ExecToolWithStatus[]> {
   const res = await apiFetch("/api/tools");
@@ -22,10 +22,10 @@ export async function setToolEnabled(toolId: string, enabled: boolean): Promise<
   return data.tool;
 }
 
-/** A mission's executions, newest first - only those with `status` when given, which keeps the
- * Approval Queue from downloading every past run's output. */
-export async function fetchExecutions(missionId: string, status?: ExecutionStatus): Promise<ExecutionRecord[]> {
-  const query = new URLSearchParams({ missionId, ...(status ? { status } : {}) });
+/** A mission's executions, newest first - only those with one of `statuses` when given, which keeps
+ * the Approval Queue from downloading every past run's output. */
+export async function fetchExecutions(missionId: string, statuses?: ExecutionStatus[]): Promise<ExecutionRecord[]> {
+  const query = new URLSearchParams({ missionId, ...(statuses?.length ? { status: statuses.join(",") } : {}) });
   const res = await apiFetch(`/api/tools/executions?${query}`);
   if (!res.ok) await throwForErrorResponse(res);
   const data = (await res.json().catch(() => null)) as { executions?: ExecutionRecord[] } | null;
@@ -51,50 +51,14 @@ export async function requestToolExecution(
   return data.execution;
 }
 
-interface ExecutionStreamLine {
-  type: "stdout" | "stderr" | "result" | "error";
-  data?: string;
-  record?: ExecutionRecord;
-  error?: string;
-}
-
-export type ExecutionStreamEvent =
-  | { type: "output"; stream: "stdout" | "stderr"; data: string }
-  | { type: "result"; record: ExecutionRecord };
-
-/** Runs a pending execution, streaming live stdout/stderr, resolving with the final ExecutionRecord. */
-export async function confirmExecution(
-  executionId: string,
-  onEvent: (event: ExecutionStreamEvent) => void,
-  signal?: AbortSignal,
-): Promise<ExecutionRecord> {
-  const res = await apiFetch(`/api/tools/executions/${encodeURIComponent(executionId)}/confirm`, {
-    method: "POST",
-    signal,
-  });
+/** Starts a pending execution and returns once its process is running. It finishes on the server;
+ * live output arrives as `execution_output` events on the mission's event stream. */
+export async function confirmExecution(executionId: string): Promise<ExecutionRecord> {
+  const res = await apiFetch(`/api/tools/executions/${encodeURIComponent(executionId)}/confirm`, { method: "POST" });
   if (!res.ok) await throwForErrorResponse(res);
-
-  let result: ExecutionRecord | undefined;
-  await readNdjsonStream(res, (line) => {
-    let parsed: ExecutionStreamLine;
-    try {
-      parsed = JSON.parse(line) as ExecutionStreamLine;
-    } catch {
-      throw new ApiError("Received an invalid response from the server", 502);
-    }
-    if (parsed.type === "error") throw new ApiError(parsed.error ?? "Execution failed", 502);
-    if (parsed.type === "result" && parsed.record) {
-      result = parsed.record;
-      onEvent({ type: "result", record: parsed.record });
-      return;
-    }
-    if ((parsed.type === "stdout" || parsed.type === "stderr") && parsed.data !== undefined) {
-      onEvent({ type: "output", stream: parsed.type, data: parsed.data });
-    }
-  });
-
-  if (!result) throw new ApiError("Execution stream ended without a result", 502);
-  return result;
+  const data = (await res.json().catch(() => null)) as { execution?: ExecutionRecord } | null;
+  if (!data?.execution) throw new ApiError("Received an invalid response from the server", 502);
+  return data.execution;
 }
 
 export async function rejectExecution(executionId: string): Promise<ExecutionRecord> {

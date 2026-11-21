@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FactoryDashboard } from "./FactoryDashboard";
 import { useAssets } from "../hooks/useAssets";
@@ -8,7 +8,8 @@ import { useFindings } from "../hooks/useFindings";
 import { usePendingExecutions } from "../hooks/usePendingExecutions";
 import { useActivity } from "../hooks/useActivity";
 import { useReports } from "../hooks/useReports";
-import { advanceFactory } from "../services/factoryApi";
+import { advanceFactory, stopFactory } from "../services/factoryApi";
+import { dispatchMissionEvent, resetMissionEventsForTests } from "../services/missionEvents";
 import type { Mission } from "../types/mission";
 
 vi.mock("../hooks/useAssets", () => ({ useAssets: vi.fn() }));
@@ -17,7 +18,7 @@ vi.mock("../hooks/useFindings", () => ({ useFindings: vi.fn() }));
 vi.mock("../hooks/usePendingExecutions", () => ({ usePendingExecutions: vi.fn() }));
 vi.mock("../hooks/useActivity", () => ({ useActivity: vi.fn() }));
 vi.mock("../hooks/useReports", () => ({ useReports: vi.fn() }));
-vi.mock("../services/factoryApi", () => ({ advanceFactory: vi.fn() }));
+vi.mock("../services/factoryApi", () => ({ advanceFactory: vi.fn(), stopFactory: vi.fn() }));
 vi.mock("./FactoryPipeline", () => ({ FactoryPipeline: () => <div data-testid="pipeline" /> }));
 vi.mock("./ApprovalQueue", () => ({
   ApprovalQueue: ({ onSettled }: { onSettled: () => void }) => (
@@ -48,6 +49,7 @@ function setupHooks() {
     create: vi.fn(),
     start: vi.fn(),
     cancel: vi.fn(),
+    guide: vi.fn(),
     refreshOne: vi.fn(),
   });
   mockUseFindings.mockReturnValue({
@@ -78,6 +80,13 @@ function setupHooks() {
   });
 }
 
+const runState = (status: "running" | "blocked" | "idle", extra: { workOrderId?: string; reason?: string } = {}) => ({
+  type: "run_state" as const,
+  run: { missionId: "m1", status, updatedAt: 1, ...extra },
+});
+
+beforeEach(() => resetMissionEventsForTests());
+
 describe("FactoryDashboard", () => {
   it("prompts to create a mission before showing any stats", () => {
     setupHooks();
@@ -97,11 +106,11 @@ describe("FactoryDashboard", () => {
 
   it("calls advanceFactory when Advance factory is clicked", async () => {
     setupHooks();
-    mockAdvanceFactory.mockResolvedValue({ mission });
+    mockAdvanceFactory.mockResolvedValue({ missionId: "m1", status: "running", updatedAt: 1 });
     render(<FactoryDashboard agents={[]} mission={mission} />);
     await userEvent.setup().click(screen.getByRole("button", { name: /Advance factory/ }));
 
-    await waitFor(() => expect(mockAdvanceFactory).toHaveBeenCalledWith("m1", expect.any(Function), expect.any(Object)));
+    await waitFor(() => expect(mockAdvanceFactory).toHaveBeenCalledWith("m1"));
   });
 
   it("offers a one-click report generation while a mission is at reporting with no report yet", async () => {
@@ -146,17 +155,49 @@ describe("FactoryDashboard", () => {
     expect(screen.queryByRole("button", { name: "Generate report now" })).not.toBeInTheDocument();
   });
 
-  it("picks the factory back up after a human settles an approval", async () => {
+  it("leaves resuming to the server after a human settles an approval", async () => {
     setupHooks();
     mockAdvanceFactory.mockClear();
-    mockAdvanceFactory.mockResolvedValue({} as never);
     render(<FactoryDashboard agents={[]} mission={mission} />);
-    const user = userEvent.setup();
 
-    await user.click(screen.getByTestId("approval-queue"));
+    await userEvent.setup().click(screen.getByTestId("approval-queue"));
 
-    await waitFor(() => expect(mockAdvanceFactory).toHaveBeenCalledTimes(1));
-    expect(mockAdvanceFactory.mock.calls[0][0]).toBe("m1");
+    expect(mockAdvanceFactory).not.toHaveBeenCalled();
+  });
+
+  it("shows which order is running, its output, and a Stop while the server's run is going", async () => {
+    setupHooks();
+    vi.mocked(stopFactory).mockResolvedValue({ missionId: "m1", status: "running", updatedAt: 1 });
+    mockUseWorkOrders.mockReturnValue({
+      workOrders: [{ id: "w1", status: "running", agentId: "recon-agent", objective: "Recon example.com" }] as never,
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      create: vi.fn(),
+      start: vi.fn(),
+      cancel: vi.fn(),
+      guide: vi.fn(),
+      refreshOne: vi.fn(),
+    });
+    render(<FactoryDashboard agents={[]} mission={mission} />);
+
+    act(() => {
+      dispatchMissionEvent("m1", runState("running"));
+      dispatchMissionEvent("m1", { type: "chunk", workOrderId: "w1", content: "Scanning ports" });
+    });
+
+    expect(screen.getByText(/recon-agent - Recon example.com/)).toBeInTheDocument();
+    expect(screen.getByText(/Scanning ports/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Advance factory/ })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: /Stop/ }));
+    expect(stopFactory).toHaveBeenCalledWith("m1");
+  });
+
+  it("shows why the run stopped, from the server's run state", () => {
+    setupHooks();
+    render(<FactoryDashboard agents={[]} mission={mission} />);
+    act(() => dispatchMissionEvent("m1", runState("blocked", { reason: "Paused after 25 work orders in one run" })));
+    expect(screen.getByText(/Paused after 25 work orders/)).toBeInTheDocument();
   });
 
   it("flags failed work orders and links to them", async () => {
@@ -169,6 +210,7 @@ describe("FactoryDashboard", () => {
       create: vi.fn(),
       start: vi.fn(),
       cancel: vi.fn(),
+      guide: vi.fn(),
       refreshOne: vi.fn(),
     });
     const onOpenView = vi.fn();
@@ -192,6 +234,7 @@ describe("FactoryDashboard", () => {
       create: vi.fn(),
       start: vi.fn(),
       cancel: vi.fn(),
+      guide: vi.fn(),
       refreshOne: vi.fn(),
     });
     render(<FactoryDashboard agents={[]} mission={mission} />);
