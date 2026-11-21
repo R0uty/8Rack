@@ -1,7 +1,8 @@
 import { env } from "../config/env.js";
 import { getAgent } from "./agentManager.js";
-import { resolveOllamaTools, streamChat, streamChatWithTools } from "./ollama.js";
-import { AgentDisabledError, AgentNotFoundError, AgentOfflineError, UnknownToolError } from "./errors.js";
+import { streamChat } from "./ollama.js";
+import { calibrate, fitToContext } from "./contextBudget.js";
+import { AgentDisabledError, AgentNotFoundError, AgentOfflineError } from "./errors.js";
 import type { ChatMessage, ChatOptions, ChatResponseChunk } from "../types/ollama.js";
 
 export interface AgentChatRequest {
@@ -10,9 +11,6 @@ export interface AgentChatRequest {
   messages: ChatMessage[];
   /** Per-request overrides layered on top of the agent's own temperature/topP/maxTokens. */
   options?: ChatOptions;
-  /** Overrides the agent's own configured `tools` for this request - omit to activate whatever
-   * tools the agent's config already lists (see the toolsPreamble caveat below). */
-  tools?: string[];
   keepAlive?: string;
   /** Appended after the agent's own systemPrompt — used by the Orchestrator to describe available
    * exec tools and the JSON request format, without the agent's own config needing to know about it. */
@@ -44,7 +42,6 @@ export async function* streamAgentChat(
   const systemPrompt = request.toolsPreamble
     ? `${agent.systemPrompt}\n\n${request.toolsPreamble}`
     : agent.systemPrompt;
-  const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...request.messages];
   const options: ChatOptions = {
     num_ctx: env.ollamaNumCtx,
     temperature: agent.temperature,
@@ -54,6 +51,17 @@ export async function* streamAgentChat(
     ...request.options,
   };
 
+  // Room for the reply comes off the top: a prompt that fills the window leaves the model nothing
+  // to answer with. num_predict when the agent sets one (capped), else an eighth of the window.
+  const numCtx = options.num_ctx ?? env.ollamaNumCtx;
+  const replyReserve = options.num_predict ? Math.min(options.num_predict, numCtx / 4) : numCtx / 8;
+  const fit = fitToContext(request.messages, systemPrompt.length, Math.floor(numCtx - replyReserve));
+  if (fit.elided > 0) {
+    console.info(`[chat] ${agent.id}: shortened ${fit.elided} older tool result(s) to fit ${numCtx} tokens (~${fit.estimatedTokens} sent).`);
+  }
+  const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...fit.messages];
+  const promptChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+
   const chatRequest = {
     model: request.model ?? agent.model,
     messages,
@@ -61,27 +69,13 @@ export async function* streamAgentChat(
     keep_alive: request.keepAlive,
   };
 
-  // Falls back to the agent's own configured tools when the request doesn't specify any, so
-  // selecting an agent with `tools` set activates them automatically instead of requiring the
-  // caller to look them up and pass them through every time. Only when toolsPreamble is absent,
-  // though - that field is toolsPreamble's own tell for "this call came from the Orchestrator"
-  // (see its own doc comment above), which speaks a completely separate plain-text tool-request
-  // convention and never uses Ollama's native tool_calls mechanism - activating both at once on
-  // the same request would risk the model replying in whichever format it prefers instead of the
-  // one the Orchestrator actually parses.
-  const tools = request.tools ?? (request.toolsPreamble ? undefined : agent.tools);
-
-  let stream: AsyncGenerator<ChatResponseChunk>;
-  if (tools?.length) {
-    const { specs, unknown } = resolveOllamaTools(tools);
-    if (unknown.length) throw new UnknownToolError(unknown);
-    stream = streamChatWithTools({ ...chatRequest, tools: specs }, signal);
-  } else {
-    stream = streamChat(chatRequest, signal);
-  }
+  const stream = streamChat(chatRequest, signal);
 
   for await (const chunk of stream) {
-    if (chunk.done) warnIfPromptCut(agent.id, chunk.prompt_eval_count, options.num_ctx);
+    if (chunk.done) {
+      calibrate(promptChars, chunk.prompt_eval_count);
+      warnIfPromptCut(agent.id, chunk.prompt_eval_count, options.num_ctx);
+    }
     yield chunk;
   }
 }

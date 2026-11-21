@@ -1322,17 +1322,21 @@ fixed and why. Deliberately left open:
 - [ ] `katana`, `subfinder`, `amass` aren't installed; `/usr/bin/httpx` is not the ProjectDiscovery tool.
 - [x] The same port can land as two assets (`127.0.0.1:8765` from an agent, `8765/tcp` from the parser).
       `upsertAsset` now merges them. A service still can (`8080` next to `8080/tcp:http`).
-- [ ] Time cap is checked between generations, not during one (the per-chunk idle timeout covers a
-      hung model; a slow-but-streaming reply can overrun by one generation).
+- [x] Time cap is checked between generations, not during one. Fixed 2026-11-21 (Phase 4): each
+      generation is aborted once the task's remaining budget runs out (`max_time_reached`).
 - [x] Scan and report `GET`/`PATCH` routes look ids up across missions without checking the id in the
       path belongs to that mission. Fixed 2026-11-20 for scans, reports and work orders (PLAN.md 1.3).
 - [ ] `InvalidToolArgumentsError` messages include absolute paths (local-only app, low impact).
-- [ ] An IPv4-mapped IPv6 target isn't matched against an IPv4 `outOfScope` entry.
+- [x] An IPv4-mapped IPv6 target isn't matched against an IPv4 `outOfScope` entry. Fixed 2026-11-21
+      (Phase 4, `scopeMatcher.ipv4FromMapped`). Found with it: the extractor cut "::ffff:10.0.0.6" to
+      "::ffff:10" (a valid, different address) and blocked an in-scope request - also fixed.
 - [ ] Prompt injection is reduced, not solved: report prompts now mark finding data as untrusted, and
       the UI won't auto-load remote images, but a local model can still follow injected text. The human
       confirmation gate on every real tool run remains the actual control.
-- [ ] Still open from POLISH.md: route-level integration tests (D1), a shared NDJSON helper (D2),
-      status-code consistency (D3).
+- [ ] Still open from POLISH.md: a shared NDJSON helper (D2). Route-level tests (D1: missions, work
+      orders, tools, through the real app) and status codes (D3: mission create and tool request now
+      201) were done 2026-11-21 in Phase 4. Not yet covered by route tests: findings, assets, reports,
+      scans, agents.
 - [x] After the UI cleanup (DEVELOPMENT.md, "UI cleanup"), try the Findings filter bar and report bar
       on a mission with real findings. Done live, see DEVELOPMENT.md's "End-to-end mission run".
 
@@ -1343,7 +1347,9 @@ Left open by the live run - see DEVELOPMENT.md's "End-to-end mission run":
 - [x] **Reports contain evidence the model made up.** Evidence and reproduction sections are now
       built from recorded executions, and anything else is labelled unverified - see "Report evidence
       from recorded runs" in DEVELOPMENT.md.
-- [ ] **A report's prose can still overstate a finding.** The model's impact text can treat an unverified
+- [ ] **A report's prose can still overstate a finding.** (2026-11-21: the prompt now gives each
+      finding's status and asks for conditional impact wording when it isn't confirmed. Nothing checks
+      the result yet.) The model's impact text can treat an unverified
       finding as real (live run: "the exposure of backup files" over a made-up response) or misread real
       output. It now sits next to the label that says so, but nothing checks the prose itself.
 - [ ] **Report remediation loses code blocks.** Sanitizing removes all of them, so a genuine config
@@ -1355,7 +1361,8 @@ Left open by the live run - see DEVELOPMENT.md's "End-to-end mission run":
       to medium. Offer that tool to the validator only.
 - [x] A failed order still counts toward the dashboard's "work orders failed" banner after a successful
       Retry. Fixed 2026-11-20: a retry records `retryOf`, and a retried order isn't counted (PLAN.md 1.10).
-- [ ] Agents ask for scans already done, and a rejected tool is often just requested again.
+- [ ] Agents ask for scans already done. (The other half - a rejected tool requested again - is handled
+      since 2026-11-21: an exact repeat is refused without a new approval, a second one pauses the task.)
 
 ## MCP tool and RAG providers (planned 2026-11-08)
 
@@ -1381,9 +1388,8 @@ Steps:
       adding MCP tools to the Orchestrator's catalog, and the enable switch, both go with the first
       server whose tools agents call by name (step 3). `extensions/toolRegistry.ts` / `types/tool.ts` are not the
       adapter: their `execute()` runs a tool directly, with no approval step.
-- [ ] **Delete `extensions/toolRegistry.ts` and `types/tool.ts`** once step 3 lands, along with the
-      native tool-calling branch in `chatService.ts` that reads them, unless native tool-calling is
-      picked up by then.
+- [x] **Delete `extensions/toolRegistry.ts` and `types/tool.ts`** with the native tool-calling branch.
+      Done 2026-11-21 in PLAN.md Phase 4, ahead of step 3 - nothing used it.
 - [x] **2. RAG server.** Done 2026-11-08 - see "RAG server (step 2)" in DEVELOPMENT.md.
       `mcp-servers/rag/` (Python, 127.0.0.1 only, bearer token, embeds through local Ollama) serves
       search, reindex and status; `MCP_RAG_SERVER` points 8Rack at it, through
@@ -1434,8 +1440,9 @@ Steps:
 Whole-project review covering fixes, UI, usability and backend: see `PLAN.md`. Phase 1 (small fixes)
 is done as of 2026-11-20, except 1.4/1.5, which moved into Phase 2 - see DEVELOPMENT.md's "Phase 1
 fixes (2026-11-20)". Phase 2 (server-owned factory runs, items 1.4/1.5 with it) is done as of
-2026-11-20, committed. Phase 3 (UI and usability) is done as of 2026-11-21, not committed - see
-DEVELOPMENT.md's "Phase 3: UI and usability". Next is Phase 4.
+2026-11-20, committed. Phase 3 (UI and usability) is done as of 2026-11-21, committed. Phase 4
+(backend), including the live 16k mission run, is done as of 2026-11-21, not committed - see
+DEVELOPMENT.md's "Phase 4: backend". Next is Phase 5.
 
 - [ ] Delete `backend/data/missions/00000000-0000-0000-0000-000000000000/` by hand. It's skipped at
       load now, but still on disk (local data, left for you).
@@ -1449,3 +1456,21 @@ DEVELOPMENT.md's "Phase 3: UI and usability". Next is Phase 4.
       enforced (the editor warns on each such line) - the "recon scanned 1000 ports when the rules named
       one" item. Not seen live: the Needs-you queue's approval, guidance and failed cards against a real
       run, the Work Orders transcript, adding a finding by hand, bulk status (tests only).
+- [x] Phase 4 follow-up: rerun a full mission at the 16k context window. Done 2026-11-21 against
+      127.0.0.1: it ran to idle with 7 orders, 6 tool runs and 5 confirmed findings. The largest
+      transcript was about 2.5k tokens, so no result was shortened; elision is covered by tests only.
+      See DEVELOPMENT.md's "Live mission rerun at 16k".
+- [ ] From the 16k run: validators re-request the full `nmap -sV --top-ports 1000` that recon already
+      ran (4 of 5 did), which means one approval card each for no new information. Give the validator
+      the matching execution's output up front, or steer it toward a narrow check (a single port with
+      `-p`, or `http_request`).
+- [ ] From the 16k run: the web-analyzer (qwen2.5-coder:7b) wrote its findings as markdown JSON
+      without a `tool` key, so nothing was recorded. It also invented an XSS and asked the user a
+      question. The order was correctly marked `noOutcome`. Options: a format-correction retry when a
+      reply contains JSON blocks that look like findings but no tool call, and/or a tighter
+      web-analyzer prompt.
+- [ ] From the 16k run: duplicate assets for one port (`port 3001/tcp`, `service 3001/tcp:http`,
+      `service 3001`, `service http`). Normalize `upsert_asset` values from agents against the
+      parser-recorded port/service assets.
+- [ ] Phase 4 deferred: MCP steps 3 and 4 (agents calling MCP tools by name); a schema library for
+      request validation (routes still validate by hand, through `routes/validate.ts`).

@@ -17,6 +17,8 @@ vi.mock("./missionStore.js", () => ({
   listMissionIds: vi.fn(async () => []),
   readMissionJson: vi.fn(async () => []),
   writeMissionJson: vi.fn(async () => undefined),
+  writeMissionRecord: vi.fn(async () => undefined),
+  readMissionRecord: vi.fn(async () => undefined),
 }));
 
 const echoTool: ExecTool = {

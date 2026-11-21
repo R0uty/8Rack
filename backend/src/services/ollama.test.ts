@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "../config/env.js";
-import { getTool } from "../extensions/toolRegistry.js";
-import { chat, embed, listModels, resolveOllamaTools, streamChat, streamChatWithTools } from "./ollama.js";
+import { chat, embed, listModels, streamChat } from "./ollama.js";
 import {
   EmbeddingModelUnavailableError,
   OllamaConnectionError,
@@ -10,12 +9,8 @@ import {
   OllamaTimeoutError,
   RequestCancelledError,
 } from "./errors.js";
-import type { ChatRequest, OllamaToolSpec, ToolCall } from "../types/ollama.js";
-import type { Tool } from "../types/tool.js";
+import type { ChatRequest, ToolCall } from "../types/ollama.js";
 
-vi.mock("../extensions/toolRegistry.js", () => ({ getTool: vi.fn() }));
-
-const mockGetTool = vi.mocked(getTool);
 
 function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {}) {
   return {
@@ -346,129 +341,3 @@ describe("chat", () => {
   });
 });
 
-const fixtureTool: Tool = {
-  name: "get_weather",
-  description: "Gets the weather for a city.",
-  parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
-  execute: vi.fn(async (args) => ({ toolName: "get_weather", output: `sunny in ${args.city}` })),
-};
-
-describe("resolveOllamaTools", () => {
-  it("resolves a registered tool into Ollama's native function-calling schema", () => {
-    mockGetTool.mockImplementation((name) => (name === "get_weather" ? fixtureTool : undefined));
-    const { specs, unknown } = resolveOllamaTools(["get_weather"]);
-    expect(unknown).toEqual([]);
-    expect(specs).toEqual<OllamaToolSpec[]>([
-      {
-        type: "function",
-        function: { name: "get_weather", description: fixtureTool.description, parameters: fixtureTool.parameters },
-      },
-    ]);
-  });
-
-  it("reports names that don't resolve to a registered tool", () => {
-    mockGetTool.mockReturnValue(undefined);
-    const { specs, unknown } = resolveOllamaTools(["nope"]);
-    expect(specs).toEqual([]);
-    expect(unknown).toEqual(["nope"]);
-  });
-
-  it("handles a mix of known and unknown names independently", () => {
-    mockGetTool.mockImplementation((name) => (name === "get_weather" ? fixtureTool : undefined));
-    const { specs, unknown } = resolveOllamaTools(["get_weather", "nope"]);
-    expect(specs).toHaveLength(1);
-    expect(unknown).toEqual(["nope"]);
-  });
-});
-
-describe("streamChatWithTools", () => {
-  const toolSpec: OllamaToolSpec = {
-    type: "function",
-    function: { name: "get_weather", description: "d", parameters: { type: "object", properties: {} } },
-  };
-
-  it("passes through streamChat's own chunks unchanged when the model never requests a tool", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamResponse([ndjsonLine({ content: "just an answer" })])));
-    const chunks = await collect(streamChatWithTools({ ...baseRequest, tools: [toolSpec] }));
-    expect(chunks).toHaveLength(1);
-    expect(chunks[0].message.content).toBe("just an answer");
-  });
-
-  it("executes a native tool_calls response, feeds the result back, and continues the conversation", async () => {
-    mockGetTool.mockReturnValue(fixtureTool);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        streamResponse([
-          ndjsonLine({ tool_calls: [{ function: { name: "get_weather", arguments: { city: "NYC" } } }] }),
-        ]),
-      )
-      .mockResolvedValueOnce(streamResponse([ndjsonLine({ content: "It's sunny in NYC." })]));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const chunks = await collect(streamChatWithTools({ ...baseRequest, tools: [toolSpec] }));
-
-    expect(fixtureTool.execute).toHaveBeenCalledWith({ city: "NYC" });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    // A synthetic tool-result chunk is yielded in addition to the model's own two rounds of
-    // output - its content is just the tool's `output` field JSON-stringified (see
-    // ollama.ts#streamChatWithTools), not the whole ToolResult object.
-    const toolResultChunk = chunks.find((c) => c.message.role === "tool");
-    expect(toolResultChunk?.message.content).toBe(JSON.stringify("sunny in NYC"));
-    expect(chunks.at(-1)?.message.content).toBe("It's sunny in NYC.");
-  });
-
-  it("yields an error tool-result for a tool_call naming an unregistered tool", async () => {
-    mockGetTool.mockReturnValue(undefined);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        streamResponse([ndjsonLine({ tool_calls: [{ function: { name: "ghost_tool", arguments: {} } }] })]),
-      )
-      .mockResolvedValueOnce(streamResponse([ndjsonLine({ content: "done" })]));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const chunks = await collect(streamChatWithTools({ ...baseRequest, tools: [toolSpec] }));
-    const toolResultChunk = chunks.find((c) => c.message.role === "tool");
-    expect(JSON.parse(toolResultChunk!.message.content)).toEqual({ error: 'Unknown tool "ghost_tool"' });
-  });
-
-  it("recovers a tag-noncompliant tool call from plain content (fallback parser)", async () => {
-    mockGetTool.mockReturnValue(fixtureTool);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        streamResponse([ndjsonLine({ content: '{"name": "get_weather", "arguments": {"city": "LA"}}' })]),
-      )
-      .mockResolvedValueOnce(streamResponse([ndjsonLine({ content: "It's sunny in LA." })]));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const chunks = await collect(streamChatWithTools({ ...baseRequest, tools: [toolSpec] }));
-
-    expect(fixtureTool.execute).toHaveBeenCalledWith({ city: "LA" });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(chunks.at(-1)?.message.content).toBe("It's sunny in LA.");
-  });
-
-  it("doesn't mistake ordinary prose that happens not to parse as JSON for a tool call", async () => {
-    mockGetTool.mockReturnValue(fixtureTool);
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamResponse([ndjsonLine({ content: "The weather is nice today." })])));
-
-    const chunks = await collect(streamChatWithTools({ ...baseRequest, tools: [toolSpec] }));
-    expect(fixtureTool.execute).not.toHaveBeenCalled();
-    expect(chunks).toHaveLength(1);
-  });
-
-  it("stops after MAX_TOOL_ROUNDS (4) even if the model keeps requesting tools forever", async () => {
-    mockGetTool.mockReturnValue(fixtureTool);
-    const fetchMock = vi.fn().mockImplementation(async () =>
-      streamResponse([ndjsonLine({ tool_calls: [{ function: { name: "get_weather", arguments: { city: "Loop" } } }] })]),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await collect(streamChatWithTools({ ...baseRequest, tools: [toolSpec] }));
-
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(fixtureTool.execute).toHaveBeenCalledTimes(4);
-  });
-});

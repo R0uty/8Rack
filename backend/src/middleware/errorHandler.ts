@@ -13,7 +13,6 @@ import {
   ExecutionNotFoundError,
   FindingNotFoundError,
   InvalidAgentConfigError,
-  InvalidPlanStateError,
   InvalidMissionIdError,
   InvalidTaskStateError,
   InvalidToolArgumentsError,
@@ -24,7 +23,6 @@ import {
   OllamaTimeoutError,
   InvalidScanStateError,
   NoFindingsSelectedError,
-  PlanNotFoundError,
   PrivilegedCommandError,
   MissionNotFoundError,
   ReportNotFoundError,
@@ -35,7 +33,6 @@ import {
   ScanTargetRequiredError,
   TaskNotFoundError,
   TooManyConcurrentExecutionsError,
-  UnknownToolError,
   WorkOrderNotFoundError,
   InvalidWorkOrderStateError,
   RagReindexInProgressError,
@@ -94,10 +91,6 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(400).json({ error: err.message, code: "INVALID_AGENT_CONFIG" });
     return;
   }
-  if (err instanceof UnknownToolError) {
-    res.status(400).json({ error: err.message, code: "INVALID_REQUEST" });
-    return;
-  }
   if (err instanceof ExecToolNotFoundError) {
     res.status(404).json({ error: err.message, code: "TOOL_NOT_FOUND" });
     return;
@@ -140,14 +133,6 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof InvalidMissionIdError) {
     res.status(400).json({ error: err.message, code: "INVALID_MISSION_ID" });
-    return;
-  }
-  if (err instanceof PlanNotFoundError) {
-    res.status(404).json({ error: err.message, code: "PLAN_NOT_FOUND" });
-    return;
-  }
-  if (err instanceof InvalidPlanStateError) {
-    res.status(409).json({ error: err.message, code: "INVALID_PLAN_STATE" });
     return;
   }
   if (err instanceof PrivilegedCommandError) {

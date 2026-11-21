@@ -1,22 +1,28 @@
-export type FindingType =
-  | "port"
-  | "service"
-  | "technology"
-  | "domain"
-  | "subdomain"
-  | "directory"
-  | "endpoint"
-  | "credential"
-  | "cookie"
-  | "api"
-  | "header"
-  | "interesting_file"
-  | "potential_vulnerability"
-  | "confirmed_vulnerability"
-  | "information"
-  | "cve";
+/** The lists below are the one source for these vocabularies: routes, the Orchestrator's pseudo-tools
+ * and the parsers all validate against them. frontend/src/types/finding.ts mirrors them, and
+ * frontend/src/types/backendMirror.test.ts fails if the two drift. */
+export const FINDING_TYPES = [
+  "port",
+  "service",
+  "technology",
+  "domain",
+  "subdomain",
+  "directory",
+  "endpoint",
+  "credential",
+  "cookie",
+  "api",
+  "header",
+  "interesting_file",
+  "potential_vulnerability",
+  "confirmed_vulnerability",
+  "information",
+  "cve",
+] as const;
+export type FindingType = (typeof FINDING_TYPES)[number];
 
-export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
+export const FINDING_SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;
+export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 
 /**
  * A standard bug-bounty triage vocabulary. Renamed wholesale from an earlier, more mechanical set
@@ -24,7 +30,8 @@ export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
  * the old->new mapping applied to every finding loaded from disk, so existing mission data keeps
  * working without a manual migration step.
  */
-export type FindingStatus = "potential" | "investigating" | "confirmed" | "false_positive" | "reported" | "duplicate";
+export const FINDING_STATUSES = ["potential", "investigating", "confirmed", "false_positive", "reported", "duplicate"] as const;
+export type FindingStatus = (typeof FINDING_STATUSES)[number];
 
 export interface FindingHistoryEntry {
   status: FindingStatus;

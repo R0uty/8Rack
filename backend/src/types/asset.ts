@@ -1,4 +1,5 @@
-export type AssetType = "domain" | "subdomain" | "url" | "ip" | "port" | "service" | "api" | "technology";
+export const ASSET_TYPES = ["domain", "subdomain", "url", "ip", "port", "service", "api", "technology"] as const;
+export type AssetType = (typeof ASSET_TYPES)[number];
 
 /**
  * An asset's lifecycle status, independent of any Finding's own triage status - "active" (currently
@@ -6,7 +7,8 @@ export type AssetType = "domain" | "subdomain" | "url" | "ip" | "port" | "servic
  * (was seen once but hasn't been re-confirmed since - not deleted, just stale), "unverified" (agent-
  * reported via the upsert_asset pseudo-tool with no scanner confirmation backing it yet).
  */
-export type AssetStatus = "active" | "inactive" | "unverified";
+export const ASSET_STATUSES = ["active", "inactive", "unverified"] as const;
+export type AssetStatus = (typeof ASSET_STATUSES)[number];
 
 /**
  * The Asset Inventory - a real, deduplicated store of everything discovered for a mission, distinct

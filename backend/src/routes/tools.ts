@@ -92,7 +92,7 @@ toolsRouter.post("/request", async (req, res, next) => {
   }
   try {
     const record = await requestExecution(body);
-    res.json({ execution: record });
+    res.status(201).json({ execution: record });
   } catch (err) {
     next(err);
   }

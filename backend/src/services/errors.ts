@@ -76,13 +76,6 @@ export class InvalidAgentConfigError extends Error {
   }
 }
 
-export class UnknownToolError extends Error {
-  constructor(toolNames: string[]) {
-    super(`Unknown tool(s): ${toolNames.join(", ")}`);
-    this.name = "UnknownToolError";
-  }
-}
-
 export class ExecToolNotFoundError extends Error {
   constructor(toolId: string) {
     super(`Tool "${toolId}" was not found`);
@@ -176,20 +169,6 @@ export class InvalidMissionIdError extends Error {
   constructor(missionId: string) {
     super(`"${missionId}" is not a valid mission id`);
     this.name = "InvalidMissionIdError";
-  }
-}
-
-export class PlanNotFoundError extends Error {
-  constructor(planId: string) {
-    super(`Plan "${planId}" was not found`);
-    this.name = "PlanNotFoundError";
-  }
-}
-
-export class InvalidPlanStateError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "InvalidPlanStateError";
   }
 }
 

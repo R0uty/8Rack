@@ -10,7 +10,7 @@ import {
 } from "../services/agentManager.js";
 import { streamAgentChat } from "../services/chatService.js";
 import { abortOnClientDisconnect, pipeNdjsonStream } from "./streamUtils.js";
-import { isValidMessages, isValidToolNames, sanitizeChatOptions } from "./chatValidation.js";
+import { isValidMessages, sanitizeChatOptions } from "./chatValidation.js";
 import type { Agent } from "../types/agent.js";
 
 export const agentsRouter = Router();
@@ -19,7 +19,6 @@ interface AgentChatRequestBody {
   messages?: unknown;
   options?: unknown;
   keepAlive?: unknown;
-  tools?: unknown;
   model?: unknown;
 }
 
@@ -91,10 +90,6 @@ agentsRouter.post("/:id/chat", async (req, res, next) => {
     res.status(400).json({ error: "messages must be a non-empty array of {role, content}", code: "INVALID_REQUEST" });
     return;
   }
-  if (body.tools !== undefined && !isValidToolNames(body.tools)) {
-    res.status(400).json({ error: "tools must be an array of tool names", code: "INVALID_REQUEST" });
-    return;
-  }
   if (body.model !== undefined && typeof body.model !== "string") {
     res.status(400).json({ error: "model must be a string", code: "INVALID_REQUEST" });
     return;
@@ -107,7 +102,6 @@ agentsRouter.post("/:id/chat", async (req, res, next) => {
       agentId: req.params.id,
       messages: body.messages,
       options: sanitizeChatOptions(body.options),
-      tools: body.tools,
       keepAlive: typeof body.keepAlive === "string" ? body.keepAlive : undefined,
       model: body.model as string | undefined,
     },

@@ -69,9 +69,12 @@ backend/src/
 │                       OLLAMA_BASE_URL, CORS_ORIGIN, WORKSPACE_ROOT, orchestrator loop-prevention
 │                       caps, EMBEDDING_MODEL, OLLAMA_NUM_CTX, NVD_API_KEY, MCP_SERVERS, MCP_RAG_SERVER (all from
 │                       .env; each MCP server's token comes from its own MCP_TOKEN_<ID>)
-├── routes/             one file per concern: models, chat, agents, tools, orchestrator, missions,
-│                       assets, workOrders, findings, plans (multi-agent), rag, scanners, reports, mcp,
-│                       setup (first-run checklist)
+├── app.ts              createApp() - every middleware and router, no listening; index.ts listens
+│                       and hydrates, and the route tests (routes/*.routes.test.ts, via
+│                       test-utils/httpHarness.ts) run against it
+├── routes/             one file per concern: models, chat, agents, tools, orchestrator (read-only),
+│                       missions, assets, workOrders, findings, rag, scanners, reports, mcp, setup
+│                       (first-run checklist); validate.ts has the shared isOneOf/isStringArray checks
 ├── services/           the real logic - see the list below
 ├── middleware/         errorHandler.ts - maps every domain Error subclass (services/errors.ts) to
 │                       an HTTP status + JSON body; every route's catch/next(err) funnels here.
@@ -79,13 +82,11 @@ backend/src/
 │                       this app); requireMission 404s writes to a mission that doesn't exist
 ├── types/              domain types - Agent, OllamaModel, ChatRequest/ChatResponseChunk, ExecTool,
 │                       Finding, Mission, Asset, WorkOrder, MissionEvent, ScanProfile/ScanRun,
-│                       Report, RagSearchResult, plus the one extension-point type that is still
-│                       genuinely unbuilt (tool.ts - see "Later" in TODO.md)
-├── extensions/         toolRegistry.ts (wired into the native Ollama tool-calling path, but zero
-│                       tools registered - see "Two tool-calling mechanisms" below) and
-│                       scannerRegistry.ts (real - holds the built-in Scan Profiles) are live;
-│                       the still-unbuilt Plugin system's retrievalRegistry.ts/pluginRegistry.ts/
-│                       types/plugin.ts were deleted (commit a65fb26) rather than kept around dead
+│                       Report, RagSearchResult. Enum vocabularies are `as const` arrays here
+│                       (FINDING_TYPES, ASSET_STATUSES, MISSION_STATUSES, ...) with the type derived
+│                       from them - validate against those, don't copy the list. The frontend
+│                       mirrors them; frontend/src/types/backendMirror.test.ts catches drift
+├── extensions/         scannerRegistry.ts (holds the built-in Scan Profiles)
 ├── tools/exec/builtins.ts   the ~20 built-in ExecTools (nmap, ffuf, nuclei, httpx, bash, python,
 │                       filesystem ops, ...) - every one requires human confirmation before running
 ├── scanners/builtins.ts     the 4 built-in Scan Profiles (fixed chains of ExecTool steps - Quick
@@ -101,7 +102,8 @@ Key files under `backend/src/services/`:
 | `ollama.ts` | The only place that talks to Ollama's REST API - chat streaming, embeddings, native tool-calling (`streamChatWithTools`) |
 | `agentManager.ts` / `chatService.ts` | Loads `backend/data/agents/*.json`, assembles a chat request from an agent's config. `agentManager.ts` caches the list after first load - a direct file edit needs `POST /api/agents/reload` (or a create/update/delete through the API) to take effect, it is *not* re-read on every request |
 | `toolManager.ts` / `toolExecutor.ts` | Human-confirmation-gated OS process execution, workspace-sandboxed, per-mission execution history |
-| `orchestrator.ts` / `multiAgentOrchestrator.ts` | The autonomous tool-calling loop - single-agent task, or a chained multi-agent plan. Both still real and load-bearing: every Work Order runs on `orchestrator.ts` underneath, and `factoryDirector.ts` follows the same reuse pattern `multiAgentOrchestrator.ts` established one level down |
+| `orchestrator.ts` | The autonomous tool-calling loop. Every Work Order runs on it underneath; its HTTP routes are read-only (tasks are started, guided and cancelled through their work order). Persists a task after every step |
+| `contextBudget.ts` | Fits what each agent call sends into `num_ctx`: shortens older tool results (oldest first) when the transcript would overflow, calibrated from Ollama's `prompt_eval_count`. Used by `chatService.ts` |
 | `missionManager.ts` / `missionStore.ts` | The mission-scoping primitive everything else below is keyed on - see "Missions" below |
 | `assetManager.ts` | The Asset Inventory - a real, deduplicated store (`upsertAsset`) of everything discovered about a mission, with a parent/child relationship tree |
 | `workOrderManager.ts` | Security Work Orders - a trackable unit of agent work backed 1:1 by a real `OrchestratorTask` |
@@ -120,10 +122,12 @@ Key files under `backend/src/services/`:
 ```
 backend/data/
 ├── agents/*.json          One file per agent (name, model, temperature, systemPrompt, description,
-│                           optional tools[]/execTools[]).
-├── missions/<id>/*.json   Per-mission history (mission.json, executions/tasks/plans/findings/scans/
+│                           optional execTools[]).
+├── missions/<id>/*.json   Per-mission history (mission.json, executions/tasks/findings/scans/
 │                           reports/assets/workorders/activity.json), write-through on every
-│                           mutation. Gitignored - may contain sensitive target/scope info.
+│                           mutation; each finished tool run's output is in
+│                           execution-output/<executionId>.json, not executions.json.
+│                           Gitignored - may contain sensitive target/scope info.
 └── rag/index.json         The RAG knowledge-base index. Gitignored.
 ```
 
@@ -161,7 +165,7 @@ frontend/src/
 SSE's `EventSource` can't send a POST body, and NDJSON is what Ollama's own `/api/chat` speaks, so
 the backend mostly forwards lines through. The frontend reads the response body with
 `ReadableStream` + `TextDecoder`, splitting on `\n`. Every other long-running route in this app
-(orchestrator tasks, multi-agent plans, scan runs, report generation, and the mission event stream
+(scan runs, report generation, and the mission event stream
 `GET /api/missions/:id/events`) follows the same NDJSON convention - see `backend/src/routes/streamUtils.ts`
 and `frontend/src/services/httpClient.ts#readNdjsonStream`, reused rather than reinvented per route.
 
@@ -176,42 +180,31 @@ development. `res.on('close')` only fires on premature connection termination, w
 ### Agents
 
 Agent configs live in `backend/data/agents/*.json` (one file per agent - name, model, temperature,
-systemPrompt, description, optional `tools[]`/`execTools[]`). Editing a file directly does **not**
+systemPrompt, description, optional `execTools[]`). Editing a file directly does **not**
 take effect until `POST /api/agents/reload` is hit (or the file is saved through
 `AgentEditor.tsx`, which calls create/update, both of which reload internally) - `agentManager.ts`
 caches the loaded list after first read, it is not re-read fresh on every request.
-`Agent.tools?: string[]` (native Ollama tool-calling) and `Agent.execTools?: string[]` (an
-allowlist into the Tool Execution Framework's ExecTools, enforced in `orchestrator.ts` both in the
-tools preamble shown to the model and again at request time) are both real and read - see "Two
-tool-calling mechanisms" below for why there are two separate fields. Agents are created and edited from
+`Agent.execTools?: string[]` is an allowlist into the Tool Execution Framework's ExecTools, enforced
+in `orchestrator.ts` both in the tools preamble shown to the model and again at request time. Agents are created and edited from
 the Agents view - there is no chat-session concept any more for an agent selection to open instead.
 
-### Two tool-calling mechanisms - don't conflate them
+### Tool calling
 
-There are genuinely two independent tool-calling paths in this codebase, and they don't talk to
-each other:
+Agents call tools through one mechanism: the Orchestrator's plain-text tool-request convention
+(`services/orchestrator.ts#buildToolsPreamble`/`parseToolRequest`, `Agent.execTools`). The model
+writes `{"tool": "...", "arguments": [...]}` in its reply; the Orchestrator parses it and drives the
+Tool Execution Framework (`toolManager.ts`'s ~20 ExecTools, each behind human approval) *and* the
+pseudo-tools that record structured data instead of executing anything (`create_finding`,
+`upsert_asset`, `validate_finding` - no confirmation, for exactly that reason). A reply with several
+calls runs them in order (`OrchestratorTask.queuedToolCalls`). An exact repeat of a request the human
+rejected is refused without a new approval; a second repeat pauses the task for a note.
 
-1. **Native Ollama tool-calling** (`services/ollama.ts#streamChatWithTools`, `extensions/
-   toolRegistry.ts`, `Agent.tools`) - Ollama's own `tool_calls` wire format. `toolRegistry.ts` is
-   wired into this path but has **zero tools registered**, so it's functionally inert right now -
-   the plumbing exists for whenever something gets registered.
-2. **The Orchestrator's plain-text tool-request convention** (`services/orchestrator.ts#buildToolsPreamble`/
-   `parseToolRequest`, `Agent.execTools`) - a separate JSON-in-plain-text convention the Orchestrator
-   itself parses out of the model's reply (`{"tool": "...", "arguments": [...]}`), used to drive the
-   real Tool Execution Framework (`toolManager.ts`'s ~20 ExecTools) *and* three pseudo-tools that
-   record structured data instead of executing anything (`create_finding`, `upsert_asset`,
-   `validate_finding` - each requires no human confirmation for exactly that reason). This is the
-   path every Work Order and every orchestrator task actually reaches. A reply with several calls runs
-   them in order (`OrchestratorTask.queuedToolCalls`), each real tool behind its own approval.
-
-`chatService.ts#streamAgentChat` only activates native `tools` when `toolsPreamble` is absent
-(the Orchestrator's own tell that a request came from it) - see the comment there for why activating
-both on the same request would be actively harmful (the model could reply in whichever format it
-prefers instead of the one actually being parsed).
+Ollama's native `tool_calls` path (`streamChatWithTools`, `extensions/toolRegistry.ts`,
+`Agent.tools`) was removed in PLAN.md Phase 4 - no agent used it and nothing was registered.
 
 ### Missions
 
-Nearly everything mission-scoped (tool execution history, Orchestrator tasks, multi-agent plans,
+Nearly everything mission-scoped (tool execution history, Orchestrator tasks,
 findings, scan runs, reports, assets, work orders, activity events) is keyed by a `missionId` and
 persisted to `backend/data/missions/<id>/*.json` via `services/missionStore.ts`, hydrated back into
 each service's in-memory `Map` at startup. `missionStore.ts#missionDir(id)` is the one real

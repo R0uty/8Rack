@@ -10,8 +10,7 @@ const MISSION_FILE = "mission.json";
 
 /**
  * Every mission-scoped in-memory store (toolManager's executions, orchestrator's tasks,
- * findingsManager's findings, scanRunner's scans, reportManager's reports,
- * multiAgentOrchestrator's plans) registers a handler here at module load, called by
+ * findingsManager's findings, scanRunner's scans, reportManager's reports, ...) registers a handler here at module load, called by
  * deleteMission() below to purge that store's entries for the deleted mission - a callback
  * registry rather than this module importing each of those services directly, since they already
  * import getMission/etc. from here and a reverse import would be circular. Fixes "ghost records":

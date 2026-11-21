@@ -17,14 +17,11 @@ import type { WorkOrder, WorkOrderCreateInput } from "../types/workOrder.js";
  * The Factory Director: reads a mission's scope/assets/findings/work orders and drives the factory
  * pipeline forward by creating and starting Security Work Orders - never a second execution
  * mechanism, every work order it starts runs through workOrderManager.ts#startWorkOrder, which
- * itself reuses services/orchestrator.ts exactly (the same reuse pattern
- * multiAgentOrchestrator.ts#createPlan already established one level down). Request-driven, not a
- * background timer, consistent with the rest of this app: POST /api/missions/:id/factory/advance
- * (routes/missions.ts) runs one advanceMission() call, which auto-chains through everything that
- * doesn't need human approval and pauses at the same "waiting_approval" point a work order's own
- * underlying OrchestratorTask would pause at - the caller (frontend) calls advance again after the
- * pending confirmation is resolved, exactly the contract multiAgentOrchestrator.ts's resumePlan
- * already has for its own pause points.
+ * itself reuses services/orchestrator.ts exactly. Started by services/missionRunner.ts (from
+ * POST /api/missions/:id/factory/advance), which runs advanceMission() in the background. Each call
+ * auto-chains through everything that doesn't need human approval and pauses at the same "waiting_approval" point a work order's own
+ * underlying OrchestratorTask would pause at. The runner calls it again once that confirmation
+ * is settled.
  */
 
 const RECON_AGENT_ID = "recon-agent";

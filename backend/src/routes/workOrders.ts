@@ -8,6 +8,7 @@ import {
 } from "../services/workOrderManager.js";
 import { guideWorkOrderRun, startWorkOrderRun } from "../services/missionRunner.js";
 import { WorkOrderNotFoundError } from "../services/errors.js";
+import { isStringArray } from "./validate.js";
 
 interface CreateWorkOrderBody {
   agentId?: unknown;
@@ -18,10 +19,6 @@ interface CreateWorkOrderBody {
   relatedAssets?: unknown;
   relatedFindings?: unknown;
   retryOf?: unknown;
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((v) => typeof v === "string");
 }
 
 /** Mission-scoped Work Order routes - GET/POST /api/missions/:missionId/workorders[...]. MUST be

@@ -4,6 +4,7 @@ import { Markdown } from "./Markdown";
 import { Button, EmptyState, GlassPanel, IconButton, SELECT_CLASS, Sheet, Skeleton, Notice } from "./ui";
 import { relativeTime } from "../lib/relativeTime";
 import { useAppNav } from "../lib/appNav";
+import { REPORT_STATUSES } from "../types/report";
 import type { Report, ReportStatus } from "../types/report";
 
 interface ReportsPanelProps {
@@ -16,7 +17,6 @@ interface ReportsPanelProps {
   onChangeStatus?: (id: string, status: ReportStatus) => void;
 }
 
-const REPORT_STATUSES: ReportStatus[] = ["draft", "ai_generated", "human_review", "ready", "submitted"];
 
 function exportMarkdown(report: Report): void {
   const blob = new Blob([report.markdown], { type: "text/markdown" });

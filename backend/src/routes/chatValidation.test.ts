@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isValidMessages, isValidToolNames, sanitizeChatOptions } from "./chatValidation.js";
+import { isValidMessages, sanitizeChatOptions } from "./chatValidation.js";
 
 describe("isValidMessages", () => {
   it("accepts a non-empty array of well-formed messages", () => {
@@ -12,16 +12,6 @@ describe("isValidMessages", () => {
 
   it("rejects a message with an invalid role", () => {
     expect(isValidMessages([{ role: "tool", content: "hi" }])).toBe(false);
-  });
-});
-
-describe("isValidToolNames", () => {
-  it("accepts an array of strings", () => {
-    expect(isValidToolNames(["bash", "nmap"])).toBe(true);
-  });
-
-  it("rejects a non-array", () => {
-    expect(isValidToolNames("bash")).toBe(false);
   });
 });
 

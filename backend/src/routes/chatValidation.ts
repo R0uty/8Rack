@@ -15,10 +15,6 @@ export function isValidMessages(messages: unknown): messages is ChatMessage[] {
   );
 }
 
-export function isValidToolNames(tools: unknown): tools is string[] {
-  return Array.isArray(tools) && tools.every((t) => typeof t === "string");
-}
-
 const MAX_NUM_CTX = 131_072;
 const MAX_NUM_PREDICT = 131_072;
 

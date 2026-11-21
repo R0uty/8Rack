@@ -3,17 +3,19 @@
  * migrates the 4 legacy values a mission.json may still hold on disk (from before this expansion)
  * to their nearest equivalent here on every read, so old mission files keep working unmodified.
  */
-export type MissionStatus =
-  | "draft"
-  | "ready"
-  | "recon"
-  | "investigating"
-  | "validating"
-  | "reporting"
-  | "review"
-  | "completed"
-  | "paused"
-  | "cancelled";
+export const MISSION_STATUSES = [
+  "draft",
+  "ready",
+  "recon",
+  "investigating",
+  "validating",
+  "reporting",
+  "review",
+  "completed",
+  "paused",
+  "cancelled",
+] as const;
+export type MissionStatus = (typeof MISSION_STATUSES)[number];
 
 /** A mission.json written before the status expansion may still hold one of these. */
 type LegacyMissionStatus = "planning" | "active" | "paused" | "completed";
