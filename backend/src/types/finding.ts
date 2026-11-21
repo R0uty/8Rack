@@ -85,7 +85,7 @@ export interface Finding {
   metadata: Record<string, unknown>;
   /** Structured evidence items, oldest first - HTTP requests/responses, terminal output, tool
    * results, agent reasoning summaries, or a free-text note. No binary attachment support
-   * (screenshots/files) yet - see DEVELOPMENT.md's Findings & Evidence section for why. */
+   * (screenshots/files) yet - see "Findings & Evidence System" in docs/history for why. */
   evidence: EvidenceItem[];
   tags: string[];
   status: FindingStatus;

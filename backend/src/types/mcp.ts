@@ -1,5 +1,5 @@
-/** MCP servers 8Rack connects to as a client - see services/mcpClient.ts and "Planned: MCP servers as the
- * tool and RAG providers" in DEVELOPMENT.md. */
+/** MCP servers 8Rack connects to as a client - see services/mcpClient.ts and "Knowledge base and
+ * MCP" in DEVELOPMENT.md. */
 
 /**
  * - `checking`: configured, not answered yet (startup, or a check in progress for the first time)

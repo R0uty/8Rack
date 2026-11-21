@@ -112,8 +112,8 @@ edit or add one and hit "Reload" in the sidebar, no restart needed.
     └── rag/       # Python MCP server for the knowledge base (optional - see its README)
 ```
 
-See `CLAUDE.md` for a fuller architecture overview and `DEVELOPMENT.md` for the complete build
-history and the reasoning behind every non-obvious decision.
+See `CLAUDE.md` for a fuller architecture overview, and `DEVELOPMENT.md` for how the system works and
+why.
 
 ## Moving tools and RAG to MCP servers
 
@@ -149,8 +149,8 @@ still runs in your local Ollama.
 
 Setup for what exists now is under [Configuration](#configuration) (`MCP_SERVERS`, `MCP_TOKEN_<ID>`,
 `MCP_RAG_SERVER`), and the RAG server's own setup is in `mcp-servers/rag/README.md`.
-The full design is in `DEVELOPMENT.md`, under "Planned: MCP servers as the tool and RAG providers", and
-the remaining steps are in `TODO.md`.
+A summary of the design is in `DEVELOPMENT.md` under "Knowledge base and MCP". The full reasoning is in
+`docs/history/development-3-mcp-and-review.md`, and the remaining steps are in `TODO.md`.
 
 ## Requirements
 
@@ -231,5 +231,6 @@ cd frontend && npx tsc -b && npm run lint
 ## Docs
 
 - `CLAUDE.md` — architecture overview and commands, for quick orientation
-- `DEVELOPMENT.md` — full build history and the reasoning behind every non-obvious decision
-- `TODO.md` — the current actionable next-steps list
+- `DEVELOPMENT.md` — how the system works now, and why
+- `TODO.md` — open work only
+- `docs/history/` — build notes, audits and old plans, kept as written (index in its `README.md`)

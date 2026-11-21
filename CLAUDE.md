@@ -15,10 +15,11 @@ TypeScript, ESM) and `frontend/` (React + TypeScript + Vite), plus `mcp-servers/
 Python MCP server for the knowledge base, with its own venv and tests (`.venv/bin/python -m pytest`; see
 its README). No accounts, no external database, no cloud storage - everything is local by design.
 
-For the full build history, key architectural decisions (and why), and known gaps, read
-`DEVELOPMENT.md` before making non-trivial changes - it has context that isn't obvious from the
-code alone, including the "Bug Bounty Factory transformation" and "Nav simplification" sections
-covering the most recent large changes. `TODO.md` has the current actionable next-steps list.
+Read `DEVELOPMENT.md` before making non-trivial changes. It describes how the system works now and why
+(the safety model, the orchestrator's loop guards, persistence, the conventions), which isn't obvious
+from the code alone. `TODO.md` lists open work only. How everything got here (build notes, audits,
+live runs, old plans) is in `docs/history/`, kept as written and not updated. Its `README.md` maps every
+old section heading ("Nav simplification", "Security scanners", ...) to the file that now holds it.
 
 ## Commands
 
@@ -51,7 +52,8 @@ cd frontend && npm run build      # tsc -b && vite build
 Automated tests exist on both sides: `cd backend && npm test` (Vitest, service-level unit tests)
 and `cd frontend && npm test` (Vitest + React Testing Library). Verification for a given change is
 still routinely rounded out with manual `curl` against the backend and browser automation against
-the frontend - see `DEVELOPMENT.md` for what's been verified live vs. by tests alone.
+the frontend, and by running a throwaway mission against a local target - see `DEVELOPMENT.md`'s
+"Testing" section.
 
 Ollama must be running separately (`ollama serve`, default `http://localhost:11434`) - this
 project only wraps it, it doesn't manage its lifecycle.
@@ -60,8 +62,8 @@ project only wraps it, it doesn't manage its lifecycle.
 
 The frontend never talks to Ollama directly - everything goes through the backend, which just
 calls `/api/*` and stays unaware of Ollama's existence. Every route/feature below is fully built
-(not a placeholder) unless explicitly marked otherwise; `DEVELOPMENT.md` has a dedicated section
-per feature with the full design rationale and what was verified - this section is just the map.
+(not a placeholder) unless explicitly marked otherwise. `DEVELOPMENT.md` has the design and its reasoning for each area,
+and this section is just the map.
 
 ```
 backend/src/
@@ -113,7 +115,7 @@ Key files under `backend/src/services/`:
 | `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `knowledgeBase.ts` | The one entry point for the knowledge base (Orchestrator's `search_knowledge_base`, `/api/rag/*`, startup) - routes to the RAG MCP server named by `MCP_RAG_SERVER`, or to `ragIndex.ts` when unset. No fallback to the local index when the server is down |
 | `ragIndex.ts` | The built-in knowledge-base indexer/search over `WORKSPACE_ROOT` - only reached through `knowledgeBase.ts` |
-| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS`, lists their tools (Tools → MCP servers), and `callTool` (used only by `knowledgeBase.ts` so far; agents can't call MCP tools by name yet). See "Planned: MCP servers as the tool and RAG providers" and "RAG server (step 2)" in `DEVELOPMENT.md` |
+| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS`, lists their tools (Tools → MCP servers), and `callTool` (used only by `knowledgeBase.ts` so far; agents can't call MCP tools by name yet). See "Knowledge base and MCP" in `DEVELOPMENT.md`, and the MCP steps in `TODO.md` |
 | `missionAttention.ts` | Everything on a mission waiting on a human (`GET /api/missions/:id/attention`): tool approvals with tool description/targets/agent text, running tools, orders needing a note, failed orders not yet retried. Feeds the dashboard's Needs-you queue |
 | `setupCheck.ts` | The first-run checklist (`GET /api/setup`): Ollama reachable, each enabled agent's model and the embedding model pulled, which recon tools are missing (with install commands) |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
@@ -139,10 +141,10 @@ frontend/src/
 │                        ExecutionHistoryPanel/ToolRegistry/KnowledgeBasePanel). MissionSwitcher +
 │                        MissionEditor are the only mission picker/editor. components/layout/
 │                        (AppShell, Sidebar, TopBar) and components/ui/ (GlassPanel, Button, Sheet,
-│                        StatusPill, ...) are the shared primitives every view is built from. See
-│                        "UI cleanup" in DEVELOPMENT.md for what was cut and why. There is no Chat/
-│                        Workbench/Plans surface any more - see "Nav simplification" in
-│                        DEVELOPMENT.md for why (Work Orders replaced Workbench's freestanding
+│                        StatusPill, Notice, EmptyState, ...) are the shared primitives every view is
+│                        built from. See "UI cleanup" in docs/history for what was cut and why. There
+│                        is no Chat/Workbench/Plans surface any more - see "Nav simplification" in
+│                        docs/history for why (Work Orders replaced Workbench's freestanding
 │                        agent-run-a-tool UI, the Factory Director replaced hand-authored Plans,
 │                        and plain no-mission Chat never fit the mission model).
 ├── hooks/               One hook per domain - useModels, useAgents, useTools, useMissions,
@@ -200,7 +202,8 @@ calls runs them in order (`OrchestratorTask.queuedToolCalls`). An exact repeat o
 rejected is refused without a new approval; a second repeat pauses the task for a note.
 
 Ollama's native `tool_calls` path (`streamChatWithTools`, `extensions/toolRegistry.ts`,
-`Agent.tools`) was removed in PLAN.md Phase 4 - no agent used it and nothing was registered.
+`Agent.tools`) was removed on 2026-11-21 (review Phase 4): no agent used it, and nothing was registered.
+The loop guards and the context budget are described in `DEVELOPMENT.md`'s "The orchestrator (one agent's tool loop)".
 
 ### Missions
 
@@ -209,25 +212,22 @@ findings, scan runs, reports, assets, work orders, activity events) is keyed by 
 persisted to `backend/data/missions/<id>/*.json` via `services/missionStore.ts`, hydrated back into
 each service's in-memory `Map` at startup. `missionStore.ts#missionDir(id)` is the one real
 chokepoint every one of those files' paths funnels through - it rejects anything that isn't
-UUID-shaped before ever building a path (the fix for a real path-traversal finding, see
-`DEVELOPMENT.md`'s "Fixed: projectId path-traversal" section - the finding predates the rename but
-the fix and its reasoning are unchanged) - if you add a new mission-scoped store, route it through
-`readMissionJson`/`writeMissionJson`, not a hand-rolled path.
+UUID-shaped before ever building a path (the fix for a real path-traversal finding; see "Fixed:
+projectId path-traversal" in docs/history - the finding predates the rename but the fix and its
+reasoning are unchanged) - if you add a new mission-scoped store, route it through
+`readMissionJson`/`writeMissionJson` (or `writeMissionRecord`/`readMissionRecord` for one file per
+record, as tool output does), not a hand-rolled path.
 
 There is one current mission, owned by `App.tsx` (`useSelectedMission`, remembered in `localStorage`)
 and picked in the sidebar's `MissionSwitcher`; every mission-scoped view receives it as a `mission`
-prop. This reverses the earlier per-view `MissionPanel` pattern - see "UI cleanup" in
-`DEVELOPMENT.md` for why. App.tsx keeps one event stream open for the selected mission
+prop. This reverses the earlier per-view `MissionPanel` pattern (see "UI cleanup" in docs/history for
+why). App.tsx keeps one event stream open for the selected mission
 (`useMissionEventStream`); each mission-scoped hook re-reads when its store changes
 (`useRefreshOnChange`), and the dashboard shows the server's run state (`useMissionLive`). A run keeps
-going when you switch missions or close the tab - see "Phase 2" in `DEVELOPMENT.md`.
+going when you switch missions or close the tab - see "Runs, events and attention" in `DEVELOPMENT.md`.
 
 ### Settings
 
-`SettingsPanel.tsx` (temperature/top_p/max tokens/context size/keep-alive, persisted in
-`localStorage` via `useSettings.ts`) previously configured manual (no-agent) Chat requests. Once
-Chat was removed (see "Nav simplification" in DEVELOPMENT.md), nothing in the app read those values
-any more - every agent's own sampling settings come from its own `backend/data/agents/*.json`
-config. **Removed outright (POLISH.md Phase B, 2026-09-20)** - `SettingsPanel.tsx`,
-`useSettings.ts`, `types/settings.ts`, the App wiring, the TopBar gear button, and the Command
-Palette's settings command. There is no settings surface any more.
+There is no settings surface. Every agent's sampling settings come from its own
+`backend/data/agents/*.json` file, and server settings from `backend/.env`. The old Settings panel
+configured manual Chat, and was removed with it (2026-09-20).

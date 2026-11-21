@@ -14,7 +14,7 @@ const STATE: Record<McpServerState, { tone: Tone; label: string }> = {
 /**
  * The MCP servers named in the backend's .env and the tools each one offers (see
  * backend/src/services/mcpClient.ts). Read-only for now: agents can't call these tools until the
- * approval gate and enable switch are wired in - TODO.md "MCP tool and RAG providers", steps 2-3.
+ * approval gate and enable switch are wired in - TODO.md "MCP (steps 3 and 4)".
  */
 export function McpServersPanel() {
   const { servers, loading, checking, error, check } = useMcpServers();

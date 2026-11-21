@@ -1,3 +1,6 @@
+> Archived 2026-11-21 from PLAN.md. A record of what was built and why at the time; it is not kept
+> current. For the current design see DEVELOPMENT.md; for open work see TODO.md.
+
 # 8Rack - review and fix plan (2026-11-09)
 
 Whole-project review on branch `rag-mcp-server` at `571ccc4`. Supersedes nothing: `TODO.md` stays the
