@@ -759,3 +759,38 @@ This step was built on the `main` from before the 2026-11 review phases and merg
 - The "MCP step 3" item in `TODO.md` was closed; "Scope for MCP tools" was closed with it (MCP tools
   are scope-checked with no exemptions). Two parts of step 3 weren't built and stay open in `TODO.md`:
   the setting that picks local or MCP execution for a tool, and live output for MCP runs.
+
+## Validators reuse runs instead of re-scanning (2026-11-21)
+
+Follow-up to the 16k run above, in which 4 of 5 validators asked for the same
+`nmap -sV --top-ports 1000` that recon had already run. Each one was an approval card for output
+that already existed.
+
+- `orchestrator.ts#findReusableRun`: an identical request (same tool and arguments) to a successful
+  run of a read-only scanner in this mission from the last 24 hours is answered with that run's
+  recorded output, marked `reused`. Nothing runs, so there's no card. The run is kept in
+  `task.reusedExecutionIds`, and a verdict counts it in `validationExecutionIds`.
+- The validation objective no longer says "reproduce it with a real tool". It asks for one narrow
+  check (`nmap -sV -p <port> <host>`, or `http_request`), and says a repeated scan returns recorded
+  output.
+- Inspect labels a reused result "earlier run reused, not run again", and counts reused runs in the
+  Produced list.
+
+Tests: 6 in `orchestrator.test.ts` covering:
+- reuse instead of an approval;
+- the second repeat getting a short reminder;
+- a narrower command still asking for approval;
+- no reuse of failed, stale, other-mission or bash runs;
+- the newest run picked when several match;
+- the verdict resting on the reused run.
+
+Plus 2 in `TaskTranscript.test.tsx`. Backend 673, frontend 262.
+
+**Live, on a throwaway mission scoped to `127.0.0.1`** (`qwen2.5-coder:7b`, a human approving in the
+UI): recon ran the broad scan once. **No validator asked for it again.** Of five validator orders:
+- Two asked for a one-port check (`-p 3001`, `-p 3000`), each approved by the human.
+- Three asked for one of those same checks again, got the recorded output, and needed no card.
+
+Four findings were confirmed, each resting on one recorded run. One validator ran its check but
+ended in prose without a verdict. The Director seeded a second order for that finding, which got the
+reused run and recorded the verdict (see TODO.md).

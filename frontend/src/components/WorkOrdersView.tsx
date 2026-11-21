@@ -261,12 +261,17 @@ function WorkOrderCard({ workOrder, agents, findings, retried = false, onRefresh
           )}
           {task?.error && workOrder.status !== "failed" && <Notice>{task.error}</Notice>}
 
-          {task && (task.toolExecutionIds.length > 0 || produced.length > 0) && (
+          {task && (task.toolExecutionIds.length > 0 || (task.reusedExecutionIds?.length ?? 0) > 0 || produced.length > 0) && (
             <div className="flex flex-col gap-1.5 text-xs">
               <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Produced</p>
               {task.toolExecutionIds.length > 0 && (
                 <p className="flex items-center gap-2 text-text">
                   {task.toolExecutionIds.length} tool run{task.toolExecutionIds.length === 1 ? "" : "s"}
+                  {!!task.reusedExecutionIds?.length && (
+                    <span className="text-muted">
+                      + {task.reusedExecutionIds.length} earlier run{task.reusedExecutionIds.length === 1 ? "" : "s"} reused
+                    </span>
+                  )}
                   {openView && (
                     <Button variant="ghost" size="sm" onClick={() => openView("tools")}>
                       Open in Tools history

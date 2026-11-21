@@ -151,7 +151,10 @@ function planSeeds(
       agentId: VALIDATOR_AGENT_ID,
       objective:
         `Validate finding "${finding.title}" (id: ${finding.id}, target: ${finding.target}) for this ` +
-        `mission. Call query_findings with ["${finding.id}"] for its full evidence, then reproduce it with a real tool. Assess reproducibility, whether the ` +
+        `mission. Call query_findings with ["${finding.id}"] for its full evidence, then reproduce it with ` +
+        "one narrow, real check aimed at exactly this finding - for a port or service, nmap -sV -p <port> " +
+        "<host>; for a web finding, http_request to the URL. Don't repeat a broad scan that already ran: " +
+        "asking for an identical command again only returns its recorded output. Assess reproducibility, whether the " +
         "target is actually in scope, whether the evidence is sufficient, whether the impact is " +
         "realistic, and whether this is likely a duplicate - then call validate_finding with your verdict.",
       target: finding.target,

@@ -26,6 +26,8 @@ export interface OrchestratorTask {
   toolExecutionIds: string[];
   toolCallCount: number;
   pendingExecutionId?: string;
+  /** Earlier runs whose recorded output answered an identical request instead of running it again. */
+  reusedExecutionIds?: string[];
   finalResponse?: string;
   error?: string;
   /** Agent working time, excluding time parked on a human decision - what the time cap counts. */

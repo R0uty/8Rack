@@ -138,6 +138,17 @@ in control of what runs and against what.
     work is already done.
   - An exact repeat of a request the human rejected gets a refusal instead of a new approval card. A
     second refused repeat pauses the task for a note.
+- **Commands that already ran** (`findReusableRun`): if an agent asks for exactly the same command
+  (tool and arguments) as a successful run in this mission from the last 24 hours, it gets that
+  run's recorded output, marked `reused`. Nothing runs, so there's no approval card. A second repeat
+  in the same task gets a short reminder instead of the output again. This applies only to the
+  read-only scanners (nmap, httpx, ffuf, katana, nuclei, subfinder, amass, whois, dig, nslookup), not
+  to bash, python, curl, `http_request` or the filesystem tools. Their output can depend on state
+  that changes between runs, or they change state themselves. MCP tools (`<server>.<tool>`) are
+  never reused yet, even an MCP-hosted nmap.
+  - Reused runs are kept in `OrchestratorTask.reusedExecutionIds`, and a validator's verdict can rest
+    on them.
+  - Any change to the arguments, such as a single port, is a new request and goes to a human.
 - **What goes back into the transcript:** tool results pass through `truncateForTranscript`, and
   pseudo-tool results are sent once (no `parsedOutput` copy).
 - **Context budget** (`contextBudget.ts`, called from `chatService.ts` on every agent call): if the
@@ -160,7 +171,8 @@ in control of what runs and against what.
   - Each `domain`/`subdomain`/`ip` asset, plus each concrete in-scope host once recon has found
     anything (`withScopeHosts`): one enumeration order for the Web Analyzer, with the known ports and
     services in its objective.
-  - Each unsettled finding: one validation order.
+  - Each unsettled finding: one validation order. Its objective asks for one narrow check aimed at
+    the finding (`nmap -sV -p <port> <host>`, or `http_request`), not a repeat of a broad scan.
 
   Seeding is idempotent and rule-based, not an LLM planner, so it's predictable and testable. It's
   capped at `MAX_WORK_ORDERS_PER_ADVANCE` (25) per run.
@@ -213,7 +225,8 @@ in control of what runs and against what.
   Agents add theirs with `upsert_asset`, as `unverified`. Agent-supplied values aren't normalized
   against parser ones, so duplicates under different names happen (`TODO.md`).
 - **Validation:** a verdict (`confirmed` / `false_positive` / `duplicate`) stores
-  `validationExecutionIds`: the completed real runs in that task. Empty means the agent judged without
+  `validationExecutionIds`: the completed real runs in that task, plus any earlier run reused for it.
+  Empty means the agent judged without
   running anything, and the finding shows "Unverified". A human status change clears the agent's
   verdict.
 - **Evidence** stays an array on the finding (each item with its own id and optional

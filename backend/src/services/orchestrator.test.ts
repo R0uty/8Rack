@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAgent } from "./agentManager.js";
 import { streamAgentChat } from "./chatService.js";
-import { cancelExecution, getExecution, listExecToolsWithStatus, rejectExecution, requestExecution } from "./toolManager.js";
+import {
+  cancelExecution,
+  getExecution,
+  listExecToolsWithStatus,
+  listExecutions,
+  rejectExecution,
+  requestExecution,
+} from "./toolManager.js";
 import { env } from "../config/env.js";
 import {
   AgentNotFoundError,
@@ -14,6 +21,7 @@ import {
   cancelTask,
   continueTask,
   createTask,
+  findReusableRun,
   getTask,
   listTasks,
   parseToolRequest,
@@ -38,6 +46,7 @@ vi.mock("./chatService.js", () => ({ streamAgentChat: vi.fn() }));
 vi.mock("./toolManager.js", () => ({
   requestExecution: vi.fn(),
   getExecution: vi.fn(),
+  listExecutions: vi.fn(() => []),
   cancelExecution: vi.fn(),
   rejectExecution: vi.fn(),
   listExecToolsWithStatus: vi.fn(() => []),
@@ -72,6 +81,7 @@ const mockStreamAgentChat = vi.mocked(streamAgentChat);
 const mockRequestExecution = vi.mocked(requestExecution);
 const mockListExecTools = vi.mocked(listExecToolsWithStatus);
 const mockGetExecution = vi.mocked(getExecution);
+const mockListExecutions = vi.mocked(listExecutions);
 const mockCancelExecution = vi.mocked(cancelExecution);
 const mockRejectExecution = vi.mocked(rejectExecution);
 const mockGetRagStatus = vi.mocked(getRagStatus);
@@ -2034,5 +2044,129 @@ describe("repeat of a rejected request", () => {
 
     expect(mockRequestExecution).toHaveBeenCalledTimes(1);
     expect(resumed.status).toBe("waiting_confirmation");
+  });
+});
+
+describe("repeat of a command that already ran in the mission", () => {
+  const NMAP_ARGS = ["-sV", "--top-ports", "1000", "127.0.0.1"];
+  const nmapRun = (overrides: Partial<ExecutionRecord> = {}) =>
+    fixtureExecution({
+      toolId: "nmap",
+      arguments: NMAP_ARGS,
+      missionId: "proj-reuse",
+      finishedAt: Date.now() - 60_000,
+      result: {
+        stdout: "3001/tcp open http Node.js Express framework\n",
+        stderr: "",
+        exitCode: 0,
+        executionTimeMs: 900,
+        success: true,
+        timedOut: false,
+        cancelled: false,
+        truncated: false,
+      },
+      ...overrides,
+    });
+
+  afterEach(() => mockListExecutions.mockReturnValue([]));
+
+  it("answers an identical request with the recorded output instead of a new approval", async () => {
+    const earlier = nmapRun();
+    mockListExecutions.mockReturnValue([earlier]);
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([JSON.stringify({ tool: "nmap", arguments: NMAP_ARGS }), "Port 3001 is open."]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-reuse");
+
+    expect(mockRequestExecution).not.toHaveBeenCalled();
+    expect(task.status).toBe("completed");
+    expect(task.reusedExecutionIds).toEqual([earlier.id]);
+    const result = JSON.parse(task.messages.find((m) => m.role === "tool")!.content);
+    expect(result).toMatchObject({ tool: "nmap", reused: true, executionId: earlier.id, success: true });
+    expect(result.stdout).toContain("3001/tcp open");
+  });
+
+  it("sends the output once - a second identical request gets a short reminder", async () => {
+    mockListExecutions.mockReturnValue([nmapRun()]);
+    const call = JSON.stringify({ tool: "nmap", arguments: NMAP_ARGS });
+    mockStreamAgentChat.mockImplementation(repliesGenerator([call, call, "Done."]));
+
+    const task = await createTask("test-agent", "objective", "proj-reuse");
+
+    const results = task.messages.filter((m) => m.role === "tool").map((m) => JSON.parse(m.content));
+    expect(results).toHaveLength(2);
+    expect(results[0].stdout).toContain("3001/tcp open");
+    expect(results[1].stdout).toBe("");
+    expect(results[1].note).toMatch(/already have this output/);
+    expect(task.reusedExecutionIds).toHaveLength(1);
+  });
+
+  it("still asks a human for a narrower command", async () => {
+    mockListExecutions.mockReturnValue([nmapRun()]);
+    const narrow = ["-sV", "-p", "3001", "127.0.0.1"];
+    mockRequestExecution.mockResolvedValue(fixtureExecution({ toolId: "nmap", arguments: narrow, status: "pending_confirmation" }));
+    mockStreamAgentChat.mockImplementation(repliesGenerator([JSON.stringify({ tool: "nmap", arguments: narrow })]));
+
+    const task = await createTask("test-agent", "objective", "proj-reuse");
+
+    expect(mockRequestExecution).toHaveBeenCalledTimes(1);
+    expect(task.status).toBe("waiting_confirmation");
+    expect(task.reusedExecutionIds).toBeUndefined();
+  });
+
+  it("doesn't reuse a failed or stale run, another mission's run, or a tool whose output can change", () => {
+    const now = Date.now();
+    mockListExecutions.mockReturnValue([nmapRun({ status: "failed" })]);
+    expect(findReusableRun("proj-reuse", "nmap", NMAP_ARGS, now)).toBeUndefined();
+
+    mockListExecutions.mockReturnValue([nmapRun({ finishedAt: now - 25 * 60 * 60 * 1000 })]);
+    expect(findReusableRun("proj-reuse", "nmap", NMAP_ARGS, now)).toBeUndefined();
+
+    const bash = fixtureExecution({ toolId: "bash", arguments: ["-c", "date"], finishedAt: now });
+    mockListExecutions.mockReturnValue([bash]);
+    expect(findReusableRun("proj-reuse", "bash", ["-c", "date"], now)).toBeUndefined();
+
+    // listExecutions is per mission - another mission's identical run is never offered.
+    mockListExecutions.mockReturnValue([]);
+    expect(findReusableRun("proj-other", "nmap", NMAP_ARGS, now)).toBeUndefined();
+    expect(mockListExecutions).toHaveBeenLastCalledWith("proj-other");
+  });
+
+  it("picks the newest identical successful run", () => {
+    const older = nmapRun({ finishedAt: Date.now() - 3_600_000 });
+    const newer = nmapRun({ finishedAt: Date.now() - 60_000 });
+    mockListExecutions.mockReturnValue([older, newer]);
+    expect(findReusableRun("proj-reuse", "nmap", NMAP_ARGS)?.id).toBe(newer.id);
+  });
+
+  it("lets the validator's verdict rest on the reused run", async () => {
+    const missionId = "proj-reuse-verdict";
+    const earlier = nmapRun({ missionId });
+    mockListExecutions.mockReturnValue([earlier]);
+    mockGetExecution.mockImplementation((id) => (id === earlier.id ? earlier : undefined));
+    const finding = await createFinding(missionId, {
+      type: "port",
+      severity: "info",
+      title: "Port 3001/tcp open",
+      description: "From nmap.",
+      target: "127.0.0.1",
+      value: "3001/tcp",
+    });
+    const verdict = JSON.stringify({ findingId: finding.id, verdict: "confirmed", notes: "nmap shows 3001/tcp open." });
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([
+        JSON.stringify({ tool: "nmap", arguments: NMAP_ARGS }),
+        `{"tool": "validate_finding", "arguments": [${JSON.stringify(verdict)}]}`,
+        "Validated.",
+      ]),
+    );
+
+    const task = await createTask("vulnerability-validator", "validate", missionId);
+
+    expect(task.status).toBe("completed");
+    const [updated] = getMissionFindings(missionId);
+    expect(updated.status).toBe("confirmed");
+    expect(updated.validationExecutionIds).toEqual([earlier.id]);
   });
 });
