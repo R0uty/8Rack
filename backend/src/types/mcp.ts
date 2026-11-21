@@ -10,9 +10,15 @@
 export type McpServerState = "checking" | "online" | "error" | "misconfigured";
 
 export interface McpToolInfo {
+  /** The catalog id 8Rack assigns this tool - `<serverId>.<name>`. What an agent (and the
+   * Orchestrator's allowlist) refer to it by, kept distinct from the server's own `name` so two
+   * servers offering a `nmap` tool don't collide. */
+  id: string;
   name: string;
   /** The server's own text - untrusted, and capped in length. */
   description: string;
+  /** A discovered tool starts disabled; a human enables it before any agent can call it. Persisted. */
+  enabled: boolean;
 }
 
 export interface McpServerStatus {

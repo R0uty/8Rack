@@ -16,3 +16,15 @@ export async function fetchMcpServers(): Promise<McpServerStatus[]> {
 export async function refreshMcpServers(): Promise<McpServerStatus[]> {
   return readServers(await apiFetch("/api/mcp/servers/refresh", { method: "POST" }));
 }
+
+/** Enables or disables a discovered MCP tool by its `<server>.<tool>` id. Returns the updated server
+ * list so the panel reflects the new state without a full re-check. */
+export async function setMcpToolEnabled(id: string, enabled: boolean): Promise<McpServerStatus[]> {
+  return readServers(
+    await apiFetch(`/api/mcp/tools/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }),
+  );
+}

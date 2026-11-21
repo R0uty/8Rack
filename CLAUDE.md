@@ -11,8 +11,9 @@ Discovery → Enumeration → Analysis → Vulnerability Discovery → Validatio
 Human Review - driven by purpose-built agents, real tool execution gated behind human confirmation,
 and a Factory Director that reads a mission's scope/assets/findings and advances that pipeline on
 its own between approvals. Two main workspaces, no shared root `package.json`: `backend/` (Express +
-TypeScript, ESM) and `frontend/` (React + TypeScript + Vite), plus `mcp-servers/rag/` - an optional
-Python MCP server for the knowledge base, with its own venv and tests (`.venv/bin/python -m pytest`; see
+TypeScript, ESM) and `frontend/` (React + TypeScript + Vite), plus `mcp-servers/rag/` and
+`mcp-servers/tools/` - optional Python MCP servers for the knowledge base and for running recon tools on
+a scanning host, each with its own venv and tests (`.venv/bin/python -m pytest`; see
 its README). No accounts, no external database, no cloud storage - everything is local by design.
 
 Read `DEVELOPMENT.md` before making non-trivial changes. It describes how the system works now and why
@@ -69,7 +70,7 @@ and this section is just the map.
 backend/src/
 ├── config/env.ts      PORT, HOST (default 127.0.0.1 - no auth on this app, see below),
 │                       OLLAMA_BASE_URL, CORS_ORIGIN, WORKSPACE_ROOT, orchestrator loop-prevention
-│                       caps, EMBEDDING_MODEL, OLLAMA_NUM_CTX, NVD_API_KEY, MCP_SERVERS, MCP_RAG_SERVER (all from
+│                       caps, EMBEDDING_MODEL, OLLAMA_NUM_CTX, NVD_API_KEY, MCP_SERVERS, MCP_RAG_SERVER, MCP_TOOL_TIMEOUT_MS (all from
 │                       .env; each MCP server's token comes from its own MCP_TOKEN_<ID>)
 ├── app.ts              createApp() - every middleware and router, no listening; index.ts listens
 │                       and hydrates, and the route tests (routes/*.routes.test.ts, via
@@ -103,7 +104,7 @@ Key files under `backend/src/services/`:
 | --- | --- |
 | `ollama.ts` | The only place that talks to Ollama's REST API - chat streaming, embeddings, native tool-calling (`streamChatWithTools`) |
 | `agentManager.ts` / `chatService.ts` | Loads `backend/data/agents/*.json`, assembles a chat request from an agent's config. `agentManager.ts` caches the list after first load - a direct file edit needs `POST /api/agents/reload` (or a create/update/delete through the API) to take effect, it is *not* re-read on every request |
-| `toolManager.ts` / `toolExecutor.ts` | Human-confirmation-gated OS process execution, workspace-sandboxed, per-mission execution history |
+| `toolManager.ts` / `toolExecutor.ts` | Human-confirmation-gated OS process execution (or an MCP tool call, `runMcpRecord`), workspace-sandboxed, per-mission execution history |
 | `orchestrator.ts` | The autonomous tool-calling loop. Every Work Order runs on it underneath; its HTTP routes are read-only (tasks are started, guided and cancelled through their work order). Persists a task after every step |
 | `contextBudget.ts` | Fits what each agent call sends into `num_ctx`: shortens older tool results (oldest first) when the transcript would overflow, calibrated from Ollama's `prompt_eval_count`. Used by `chatService.ts` |
 | `missionManager.ts` / `missionStore.ts` | The mission-scoping primitive everything else below is keyed on - see "Missions" below |
@@ -115,7 +116,7 @@ Key files under `backend/src/services/`:
 | `findingsManager.ts` / `cveLookup.ts` | The Findings Engine (parses tool output into structured, deduplicated findings) + on-demand NVD CVE correlation. Also owns the `validate_finding`-driven Finding Validation transition (`validateFinding`) |
 | `knowledgeBase.ts` | The one entry point for the knowledge base (Orchestrator's `search_knowledge_base`, `/api/rag/*`, startup) - routes to the RAG MCP server named by `MCP_RAG_SERVER`, or to `ragIndex.ts` when unset. No fallback to the local index when the server is down |
 | `ragIndex.ts` | The built-in knowledge-base indexer/search over `WORKSPACE_ROOT` - only reached through `knowledgeBase.ts` |
-| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS`, lists their tools (Tools → MCP servers), and `callTool` (used only by `knowledgeBase.ts` so far; agents can't call MCP tools by name yet). See "Knowledge base and MCP" in `DEVELOPMENT.md`, and the MCP steps in `TODO.md` |
+| `mcpClient.ts` | 8Rack as an MCP client - connects to the servers in `MCP_SERVERS`, lists their tools (Tools → MCP servers), `callTool` for `knowledgeBase.ts`, and a registry of agent-callable tools (`<server>.<tool>`) with a persisted enable switch (discovered tools start disabled; `backend/data/mcp/tool-overrides.json`). `callMcpTool` is reached only through `toolManager.ts#runMcpRecord`, behind the normal approval and scope checks. See "Knowledge base and MCP" in `DEVELOPMENT.md` |
 | `missionAttention.ts` | Everything on a mission waiting on a human (`GET /api/missions/:id/attention`): tool approvals with tool description/targets/agent text, running tools, orders needing a note, failed orders not yet retried. Feeds the dashboard's Needs-you queue |
 | `setupCheck.ts` | The first-run checklist (`GET /api/setup`): Ollama reachable, each enabled agent's model and the embedding model pulled, which recon tools are missing (with install commands) |
 | `scanRunner.ts` | Scan Profiles - deterministic (non-agent) chained tool runs |
@@ -198,7 +199,9 @@ writes `{"tool": "...", "arguments": [...]}` in its reply; the Orchestrator pars
 Tool Execution Framework (`toolManager.ts`'s ~20 ExecTools, each behind human approval) *and* the
 pseudo-tools that record structured data instead of executing anything (`create_finding`,
 `upsert_asset`, `validate_finding` - no confirmation, for exactly that reason). A reply with several
-calls runs them in order (`OrchestratorTask.queuedToolCalls`). An exact repeat of a request the human
+calls runs them in order (`OrchestratorTask.queuedToolCalls`). Enabled MCP tools are listed and requested the
+same way, by their `<server>.<tool>` id, and run on the tool server through the same approval and scope
+checks (`toolManager.ts#runMcpRecord`). An exact repeat of a request the human
 rejected is refused without a new approval; a second repeat pauses the task for a note.
 
 Ollama's native `tool_calls` path (`streamChatWithTools`, `extensions/toolRegistry.ts`,

@@ -56,29 +56,22 @@ These are what an operator notices most. All were seen on `qwen2.5-coder:7b`, th
 - [ ] **Report generation as the last automatic step:** deliberately not done. The Director stops at
       `reporting` and a human generates the report. Revisit only if that changes.
 
-## MCP (steps 3 and 4)
+## MCP (step 4 and what step 3 left)
 
 Design and reasoning: `DEVELOPMENT.md`, "Knowledge base and MCP", and in full in
 `docs/history/development-3-mcp-and-review.md` ("Planned: MCP servers as the tool and RAG providers").
 
-- [ ] **3. A tool server beside the local executor.** A Python project in `mcp-servers/tools/`, running
-      on the scanning host over HTTPS and checking the bearer token from `MCP_TOKEN_<ID>`.
-      - It reimplements the ExecTools: definitions, argument checks, timeouts, output limits, and
-        killing the process group on cancel. It runs argument lists, never a shell.
-        `toolExecutor.ts` and `tools/exec/builtins.ts` are the reference.
-      - It returns raw stdout, stderr and exit code, so the parsers keep working. It owns path
-        containment on its own filesystem.
-      - 8Rack keeps the approval gate, the scope checks (at request and confirm time), the
-        enable/disable overrides, `ingestExecution`, and history.
-      - A setting picks local or MCP execution.
-      - This step also brings the enable switch (discovered tools start disabled) and adds enabled
-        MCP tools to the Orchestrator's catalog.
-- [ ] **Scope for MCP tools.** Scope-check by default. A tool without a target is exempted in 8Rack's
-      own config, never because the server's description says so.
+- [ ] **Local or MCP per tool.** Step 3 put each MCP tool beside the local one as its own
+      `<server>.<tool>` catalog entry; the setting that picks one execution path for a tool wasn't
+      built. Decide whether step 4's comparison needs it, or whether agents' `execTools` allowlists are
+      enough to point a mission at one side.
+- [ ] **Live output for MCP runs.** An MCP tool's output arrives only when the call ends; local runs
+      stream it to the approval card.
 - [ ] **Scan source IP.** Record the scanning host's address on each mission (some programs require
       registered source IPs) and show it on the approval card.
-- [ ] **Server unreachable.** Show the server as offline in the Tool Registry and fail requests with a
-      clear error. A run in progress when the connection drops is marked failed, not left running.
+- [ ] **Server unreachable.** A run whose connection drops already settles as failed, and Tools → MCP
+      servers shows the server's error. Still missing: a request for a tool on an offline server fails
+      as "tool not found" (its tools leave the registry) instead of saying the server is offline.
 - [ ] **4. Compare, then remove the local executor.** Run the same mission both ways; remove
       `toolExecutor.ts` execution only once findings, assets and reports match.
 - [ ] **Remove the local knowledge-base index** (`ragIndex.ts`, `backend/data/rag/`, the `ollama.ts`
