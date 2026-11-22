@@ -12,6 +12,7 @@ import {
 } from "./workOrderManager.js";
 import { InvalidWorkOrderStateError, RunInProgressError, WorkOrderNotFoundError } from "./errors.js";
 import type { MissionRunState } from "../types/missionRun.js";
+import type { WorkOrder } from "../types/workOrder.js";
 
 /**
  * A mission's factory run, owned by the server. Before this, a run lived inside one streaming
@@ -63,7 +64,12 @@ function settledState(missionId: string, result: FactoryAdvanceResult): Omit<Mis
   const wo = result.workOrder;
   if (wo && workOrderNeedsGuidance(wo)) return { status: "waiting_guidance", workOrderId: wo.id, reason: result.blockedReason };
   if (result.blockedReason) return { status: "blocked", workOrderId: wo?.id, reason: result.blockedReason };
-  const waiting = wo?.status === "waiting_approval" ? wo : listWorkOrders(missionId).find((o) => o.status === "waiting_approval");
+  return parkedState(missionId, wo?.status === "waiting_approval" ? wo : undefined);
+}
+
+/** The order a stopped run is parked on: `preferred`, else any order of the mission still waiting. */
+function parkedState(missionId: string, preferred?: WorkOrder): Omit<MissionRunState, "missionId" | "updatedAt" | "startedAt"> {
+  const waiting = preferred ?? listWorkOrders(missionId).find((o) => o.status === "waiting_approval");
   if (waiting) {
     return workOrderNeedsGuidance(waiting)
       ? { status: "waiting_guidance", workOrderId: waiting.id, reason: `${waiting.agentId}'s last tool request failed and it needs a note before it can continue.` }
@@ -169,6 +175,15 @@ export function resumeAfterExecution(executionId: string): void {
     return;
   }
   beginRun(missionId);
+}
+
+/** A work order was cancelled. A run parked on it would otherwise keep reporting it as waiting until
+ * the next run starts, since cancelling settles no tool run, so re-settle on whatever is still parked.
+ * A run that is going is left alone; it settles itself when it stops. */
+export function workOrderCancelled(missionId: string, workOrderId: string): void {
+  const run = runs.get(missionId);
+  if (!run || run.state.status === "running" || run.state.workOrderId !== workOrderId) return;
+  setState(run, parkedState(missionId));
 }
 
 /** For tests. */

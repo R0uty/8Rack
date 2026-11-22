@@ -76,6 +76,7 @@ section"). Every heading of the old `DEVELOPMENT.md` is listed below with the fi
 - Phase 3: UI and usability (2026-11-21)
 - Phase 4: backend (2026-11-21)
 - Validators reuse runs instead of re-scanning (2026-11-21)
+- A cancelled order no longer leaves its run "waiting" (2026-11-23)
 
 ## Plans and lists
 

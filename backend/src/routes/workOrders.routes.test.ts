@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { startTestServer, type TestServer } from "../test-utils/httpHarness.js";
 import { getMission } from "../services/missionManager.js";
 import { cancelWorkOrder, createWorkOrder, getWorkOrder } from "../services/workOrderManager.js";
-import { startWorkOrderRun } from "../services/missionRunner.js";
+import { startWorkOrderRun, workOrderCancelled } from "../services/missionRunner.js";
 import { RunInProgressError } from "../services/errors.js";
 import type { WorkOrder } from "../types/workOrder.js";
 
@@ -26,6 +26,7 @@ vi.mock("../services/missionRunner.js", () => ({
   startWorkOrderRun: vi.fn(),
   guideWorkOrderRun: vi.fn(),
   resumeAfterExecution: vi.fn(),
+  workOrderCancelled: vi.fn(),
 }));
 
 const M1 = "11111111-1111-4111-8111-111111111111";
@@ -85,6 +86,15 @@ describe("/api/missions/:id/workorders", () => {
     expect((await server.request("POST", `${base(M1)}/wo-1/cancel`)).status).toBe(404);
     expect(startWorkOrderRun).not.toHaveBeenCalled();
     expect(cancelWorkOrder).not.toHaveBeenCalled();
+  });
+
+  it("cancels an order and lets the mission's run re-settle", async () => {
+    vi.mocked(getWorkOrder).mockReturnValue(order({ status: "waiting_approval" }));
+    vi.mocked(cancelWorkOrder).mockReturnValue(order({ status: "cancelled" }));
+    const res = await server.request("POST", `${base(M1)}/wo-1/cancel`);
+    expect(res.status).toBe(200);
+    expect(res.body.workOrder.status).toBe("cancelled");
+    expect(workOrderCancelled).toHaveBeenCalledWith(M1, "wo-1");
   });
 
   it("answers 409 when a run is already going", async () => {
