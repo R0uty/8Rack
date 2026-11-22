@@ -373,6 +373,12 @@ in control of what runs and against what.
   instead of a target on the host. Kali packages ProjectDiscovery's httpx as `httpx-toolkit`; link it
   as `/usr/local/bin/httpx` so it wins over the Python `httpx`. The server's workspace starts empty,
   so put ffuf wordlists in it.
+- Once `MCP_RAG_SERVER` is set, knowledge-base search fails whenever the RAG server is down; it doesn't
+  fall back to the built-in index. Keep the server running, for example as a systemd user service with
+  `WorkingDirectory=mcp-servers/rag` and `ExecStart=.venv/bin/python -m rag_server`. If the repo is on
+  a disk that mounts after login, add `Restart=always` and `StartLimitIntervalSec=0` so systemd keeps
+  retrying until the disk is mounted. The index survives restarts, so restarting the server doesn't
+  need a reindex.
 - In a hidden browser pane, screenshots and animations lag badly. Read the DOM before concluding the UI
   is stale.
 
