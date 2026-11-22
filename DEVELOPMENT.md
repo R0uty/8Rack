@@ -366,6 +366,13 @@ in control of what runs and against what.
 - The ProjectDiscovery tools (`katana`, `subfinder`, `amass`, `httpx`) are often missing, and
   `/usr/bin/httpx` is usually the unrelated Python one. The setup checklist (`GET /api/setup`) reports
   each case with an install command.
+- The MCP tool server (`mcp-servers/tools/`) can run in a Kali container on the same machine. Give the
+  container `--network host` and keep `TOOLS_MCP_HOST=127.0.0.1`. That keeps it a loopback server,
+  which 8Rack accepts over plain http. On a bridge network the server would have to bind a
+  non-loopback address and so serve HTTPS, and a scan of `127.0.0.1` would hit the container
+  instead of a target on the host. Kali packages ProjectDiscovery's httpx as `httpx-toolkit`; link it
+  as `/usr/local/bin/httpx` so it wins over the Python `httpx`. The server's workspace starts empty,
+  so put ffuf wordlists in it.
 - In a hidden browser pane, screenshots and animations lag badly. Read the DOM before concluding the UI
   is stale.
 
