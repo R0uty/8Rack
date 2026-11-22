@@ -200,6 +200,9 @@ in control of what runs and against what.
   running tool; that has its own Cancel.
 - A settled or rejected execution calls `resumeAfterExecution`. If a run is already going, it sets
   `resumeRequested` instead, so the current run does one more pass before it stops.
+- Cancelling a work order calls `workOrderCancelled`. If a stopped run was parked on that order, it
+  re-settles on any other order still waiting, or goes `idle`. Cancelling settles no tool run, so
+  without this the run kept naming the cancelled order as waiting until the next run started.
 - `missionEvents.ts` is a small pub/sub that `missionStore` can import without a cycle. Every
   `writeMissionJson` publishes `changed` with the store name, gathered over 150 ms per store. The stream
   sends `run_state` first, then `run_state` / `chunk` (tagged with `workOrderId`) / `changed` /

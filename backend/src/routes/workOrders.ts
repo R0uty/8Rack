@@ -6,7 +6,7 @@ import {
   listWorkOrders,
   refreshWorkOrder,
 } from "../services/workOrderManager.js";
-import { guideWorkOrderRun, startWorkOrderRun } from "../services/missionRunner.js";
+import { guideWorkOrderRun, startWorkOrderRun, workOrderCancelled } from "../services/missionRunner.js";
 import { WorkOrderNotFoundError } from "../services/errors.js";
 import { isStringArray } from "./validate.js";
 
@@ -138,7 +138,9 @@ missionWorkOrdersRouter.post("/:workOrderId/refresh", async (req, res, next) => 
 
 missionWorkOrdersRouter.post("/:workOrderId/cancel", (req, res, next) => {
   try {
-    res.json({ workOrder: cancelWorkOrder(req.params.workOrderId) });
+    const workOrder = cancelWorkOrder(req.params.workOrderId);
+    workOrderCancelled(workOrder.missionId, workOrder.id);
+    res.json({ workOrder });
   } catch (err) {
     next(err);
   }

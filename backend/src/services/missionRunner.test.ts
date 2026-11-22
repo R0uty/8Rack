@@ -11,6 +11,7 @@ import {
   startRun,
   startWorkOrderRun,
   stopRun,
+  workOrderCancelled,
 } from "./missionRunner.js";
 import { subscribeMission } from "./missionEvents.js";
 import { InvalidWorkOrderStateError, RequestCancelledError, RunInProgressError, WorkOrderNotFoundError } from "./errors.js";
@@ -239,5 +240,52 @@ describe("missionRunner work order runs", () => {
   it("refuses guidance for an order that isn't waiting on any", () => {
     mockGetWorkOrder.mockReturnValue(wo({ status: "waiting_approval", orchestratorTaskId: "task-1" }));
     expect(() => guideWorkOrderRun(MISSION, "wo-1")).toThrow(InvalidWorkOrderStateError);
+  });
+
+  it("goes idle when the order a run was parked on is cancelled", async () => {
+    mockAdvance.mockResolvedValueOnce({ mission, workOrder: wo({ status: "waiting_approval" }) });
+    startRun(MISSION);
+    await settle();
+    expect(getRunState(MISSION)).toMatchObject({ status: "waiting_approval", workOrderId: "wo-1" });
+
+    const events = collect();
+    mockListWorkOrders.mockReturnValue([wo({ status: "cancelled" })]);
+    workOrderCancelled(MISSION, "wo-1");
+
+    expect(getRunState(MISSION).status).toBe("idle");
+    expect(getRunState(MISSION).workOrderId).toBeUndefined();
+    expect(events).toContainEqual({ type: "run_state", run: expect.objectContaining({ status: "idle" }) });
+  });
+
+  it("moves a parked run to another order still waiting when one is cancelled", async () => {
+    mockAdvance.mockResolvedValueOnce({ mission, workOrder: wo({ status: "waiting_approval" }) });
+    startRun(MISSION);
+    await settle();
+
+    mockListWorkOrders.mockReturnValue([wo({ status: "cancelled" }), wo({ id: "wo-2", status: "waiting_approval" })]);
+    workOrderCancelled(MISSION, "wo-1");
+
+    expect(getRunState(MISSION)).toMatchObject({ status: "waiting_approval", workOrderId: "wo-2" });
+  });
+
+  it("leaves a run alone when the cancelled order isn't the one it's parked on, or it's running", async () => {
+    mockAdvance.mockResolvedValueOnce({ mission, workOrder: wo({ id: "wo-2", status: "waiting_approval" }) });
+    startRun(MISSION);
+    await settle();
+    workOrderCancelled(MISSION, "wo-1");
+    expect(getRunState(MISSION)).toMatchObject({ status: "waiting_approval", workOrderId: "wo-2" });
+
+    const hold = deferred<FactoryAdvanceResult>();
+    mockAdvance.mockReturnValueOnce(hold.promise);
+    startRun(MISSION);
+    workOrderCancelled(MISSION, "wo-2");
+    expect(getRunState(MISSION).status).toBe("running");
+    hold.resolve({ mission });
+    await settle();
+  });
+
+  it("does nothing for a mission with no run", () => {
+    workOrderCancelled(MISSION, "wo-1");
+    expect(getRunState(MISSION).status).toBe("idle");
   });
 });

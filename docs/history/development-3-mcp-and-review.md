@@ -794,3 +794,22 @@ UI): recon ran the broad scan once. **No validator asked for it again.** Of five
 Four findings were confirmed, each resting on one recorded run. One validator ran its check but
 ended in prose without a verdict. The Director seeded a second order for that finding, which got the
 reused run and recorded the verdict (see TODO.md).
+
+## A cancelled order no longer leaves its run "waiting" (2026-11-23)
+
+Found while stopping the first MCP tool test: the recon agent asked for `tools.nmap` on the Kali tool
+server, and the test was stopped by cancelling that work order. The request was rejected and the
+dashboard showed nothing waiting, but `GET /factory/run` still said `waiting_approval` for the
+cancelled order. A run parked on an approval only changed state when a tool run settled or a new run
+started, and cancelling an order does neither. Stop didn't help either: a parked run has no
+generation to abort.
+
+- `missionRunner.ts#workOrderCancelled`, called by the cancel route: a stopped run parked on that
+  order re-settles on any other order still waiting, or goes `idle`. A running run is left alone.
+- `settledState`'s lookup of the parked order is now `parkedState`, shared by both.
+
+Tests: 4 in `missionRunner.test.ts` (goes idle, moves to another waiting order, ignores another
+order or a running run, no run at all) and 1 in `workOrders.routes.test.ts`. Backend 697.
+
+Live: the same mission parked on `tools.nmap` again, the order was cancelled from Work Orders, and
+the run state went straight to `idle`. No scan ran.
