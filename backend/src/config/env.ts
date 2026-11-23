@@ -73,6 +73,9 @@ export const env = {
   ollamaNumCtx: numberFromEnv("OLLAMA_NUM_CTX", 16_384),
   /** Orchestrator loop-prevention caps — see services/orchestrator.ts. */
   maxOrchestratorToolCalls: numberFromEnv("MAX_ORCHESTRATOR_TOOL_CALLS", 20),
+  /** A separate cap for record-only calls (create_finding, upsert_asset, validate_finding), so
+   * bookkeeping doesn't use up the calls an agent needs for real runs. */
+  maxOrchestratorRecordCalls: numberFromEnv("MAX_ORCHESTRATOR_RECORD_CALLS", 60),
   maxOrchestratorTaskTimeMs: numberFromEnv("MAX_ORCHESTRATOR_TASK_TIME_MS", 10 * 60 * 1000),
   /** Global cap on real OS processes spawned at once via the Tool Execution Framework - shared
    * across every caller (manual requests, Orchestrator tasks, Scan Profiles), since they all funnel

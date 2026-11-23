@@ -813,3 +813,55 @@ order or a running run, no run at all) and 1 in `workOrders.routes.test.ts`. Bac
 
 Live: the same mission parked on `tools.nmap` again, the order was cancelled from Work Orders, and
 the run state went straight to `idle`. No scan ran.
+
+## First live mission on the MCP tool server (2026-11-23)
+
+The tool server ran in the `kali-ai` container (host network, loopback, bearer token), with all eight
+`tools.*` tools enabled. The throwaway mission "MCP tools test (local)" was scoped to `127.0.0.2`,
+where a Python `http.server` on port 8080 served an index, a login form, `/api/status.json`,
+`/admin/`, a `robots.txt` and a fake `.env`. The rules said to use the `tools.*` tools. A human
+approved every card in the UI (`qwen2.5-coder:7b`).
+
+**It works like a local run.** 16 approved MCP runs ran on Kali and settled (13 completed, 3 failed
+on a wordlist path); 2 more were rejected:
+- nmap found `8080/tcp open http SimpleHTTPServer 0.6`. The nmap parser recorded the port and
+  service findings and the port/service assets, as for a local run.
+- httpx recorded the live host, katana found all four pages, and ffuf found `.env`, `admin`, `api`,
+  `index.html`, `login.html` and `robots.txt`.
+- Output landed in `execution-output/`. A refused argument came back with the server's message
+  (`"/workspace/wordlists/common.txt" resolves outside the workspace root`).
+
+The run ended with 17 findings (13 confirmed, `.env` among them as medium), 13 assets, and 16
+validator orders completed.
+
+**What it showed** (all in `TODO.md`):
+- The server's workspace was empty, so the first MCP ffuf failed on `wordlists/common.txt`. Copying
+  `backend/workspace/wordlists` into the container fixed it. Told about the missing file, the recon
+  agent guessed `/workspace/wordlists/...`, which the server refuses.
+- Validators ignored the "use `tools.*`" rule. They ran local `http_request` 14 times and local nmap
+  once.
+- MCP runs are never reused. The Web Analyzer's repeats of recon's httpx, nmap and katana, and the
+  retried recon order's four scans, each needed a new card.
+- Both recon orders stopped at `MAX_ORCHESTRATOR_TOOL_CALLS` (20). In each, 10 calls were
+  `upsert_asset`, so only 4-6 were scans.
+- The Web Analyzer left four `potential_vulnerability` findings rated high or medium ("Potential
+  login page exposure", ...) that no run backs.
+
+Also seen live for the first time: a guidance note sent from the Needs-you queue, and a failed recon
+order retried.
+
+## Record-only calls get their own cap (2026-11-23)
+
+From the MCP mission above: both recon orders stopped at `MAX_ORCHESTRATOR_TOOL_CALLS` (20) with 10
+calls spent on `upsert_asset`, so only 4-6 were scans.
+
+- `orchestrator.ts#spendToolCall` takes the tool. `create_finding`, `upsert_asset` and
+  `validate_finding` (`RECORDING_TOOLS`) count against `MAX_ORCHESTRATOR_RECORD_CALLS` (default 60) in
+  `task.recordCallCount`. Everything else, including lookups and malformed calls, still shares the
+  20-call cap, so the loop guard holds, and the time cap bounds both.
+- `toolCallCount` stays the total, so the "N tool calls" in Work Orders is unchanged. A task saved
+  before this has no `recordCallCount`, so all of its calls count against the 20.
+
+Tests: in `orchestrator.test.ts` the create_finding cap test now expects the record cap. Two are new:
+more findings than the tool-call cap allows complete normally, and lookups mixed with record calls
+still stop at 20. Backend 699, frontend 265. Not run live yet.

@@ -77,6 +77,8 @@ section"). Every heading of the old `DEVELOPMENT.md` is listed below with the fi
 - Phase 4: backend (2026-11-21)
 - Validators reuse runs instead of re-scanning (2026-11-21)
 - A cancelled order no longer leaves its run "waiting" (2026-11-23)
+- First live mission on the MCP tool server (2026-11-23)
+- Record-only calls get their own cap (2026-11-23)
 
 ## Plans and lists
 
