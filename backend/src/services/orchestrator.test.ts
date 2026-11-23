@@ -910,23 +910,56 @@ describe("create_finding tool", () => {
     expect(getMissionFindings("proj-create-finding-3")).toHaveLength(0);
   });
 
-  it("still counts against the tool-call cap", async () => {
-    // Each call differs - an exact repeat of a recorded call finishes the task instead (see below).
+  /** A create_finding call that differs each time - an exact repeat of a recorded call finishes the
+   * task instead (see the validate_finding tests). */
+  function distinctFindingCall(n: number): string {
+    const payload = JSON.stringify({ ...JSON.parse(validPayload), value: `value-${n}` });
+    return `{"tool": "create_finding", "arguments": [${JSON.stringify(payload)}]}`;
+  }
+
+  it("counts against its own record-call cap, not the tool-call cap", async () => {
     let call = 0;
     mockStreamAgentChat.mockImplementation(async function* () {
-      const payload = JSON.stringify({ ...JSON.parse(validPayload), value: `value-${call++}` });
-      yield {
-        model: "test-model",
-        created_at: "",
-        message: { role: "assistant", content: `{"tool": "create_finding", "arguments": [${JSON.stringify(payload)}]}` },
-        done: true,
-      };
+      yield { model: "test-model", created_at: "", message: { role: "assistant", content: distinctFindingCall(call++) }, done: true };
     });
 
     const task = await createTask("test-agent", "objective", "proj-create-finding-cap");
 
     expect(task.status).toBe("max_executions_reached");
-    expect(task.toolCallCount).toBe(env.maxOrchestratorToolCalls);
+    expect(task.recordCallCount).toBe(env.maxOrchestratorRecordCalls);
+    expect(task.toolCallCount).toBe(env.maxOrchestratorRecordCalls);
+    expect(task.error).toContain("MAX_ORCHESTRATOR_RECORD_CALLS");
+  });
+
+  it("lets a task record more than the tool-call cap's worth of findings", async () => {
+    const records = env.maxOrchestratorToolCalls + 5;
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([...Array.from({ length: records }, (_, n) => distinctFindingCall(n)), "Done."]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-create-finding-many");
+
+    expect(task.status).toBe("completed");
+    expect(task.finalResponse).toBe("Done.");
+    expect(task.toolCallCount).toBe(records);
+    expect(task.recordCallCount).toBe(records);
+    expect(getMissionFindings("proj-create-finding-many")).toHaveLength(records);
+  });
+
+  it("still stops other calls at the tool-call cap when record calls are mixed in", async () => {
+    mockQueryNvd.mockResolvedValue([]);
+    let call = 0;
+    mockStreamAgentChat.mockImplementation(async function* () {
+      const n = call++;
+      const content = n % 2 === 0 ? distinctFindingCall(n) : `{"tool": "lookup_cves", "arguments": ["nginx ${n}"]}`;
+      yield { model: "test-model", created_at: "", message: { role: "assistant", content }, done: true };
+    });
+
+    const task = await createTask("test-agent", "objective", "proj-create-finding-mixed");
+
+    expect(task.status).toBe("max_executions_reached");
+    expect(task.error).toContain("MAX_ORCHESTRATOR_TOOL_CALLS");
+    expect(task.toolCallCount - (task.recordCallCount ?? 0)).toBe(env.maxOrchestratorToolCalls);
   });
 });
 

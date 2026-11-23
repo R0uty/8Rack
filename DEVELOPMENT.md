@@ -19,7 +19,8 @@ this file is current.
   problems it showed are in `TODO.md`.
 - Not built yet: removing the local executor (MCP step 4), scope by port or path, binary evidence. See
   `TODO.md`. MCP step 3 (agents calling a tool server's tools, `mcp-servers/tools/`) landed on
-  2026-11-22 and hasn't had a live mission run yet.
+  2026-11-22. Its first live mission (2026-11-23, the tool server in a Kali container, a one-port
+  local target) ran 16 MCP tool runs, and their output became findings and assets as local runs' does.
 
 ## The shape of a mission run
 
@@ -129,7 +130,10 @@ in control of what runs and against what.
   that needs a human note), then `completed` / `failed` / `cancelled` / `max_executions_reached` /
   `max_time_reached`.
 - **Caps:** `MAX_ORCHESTRATOR_TOOL_CALLS` (default 20) counts every attempted call, including invalid
-  ones, so a model requesting garbage can't loop forever. `MAX_ORCHESTRATOR_TASK_TIME_MS` (default
+  ones, so a model requesting garbage can't loop forever. The record-only calls (`create_finding`,
+  `upsert_asset`, `validate_finding`) count against `MAX_ORCHESTRATOR_RECORD_CALLS` (default 60)
+  instead (`task.recordCallCount`); otherwise bookkeeping used up a recon order's budget for scans.
+  `toolCallCount` stays the total, which is what Work Orders shows. `MAX_ORCHESTRATOR_TASK_TIME_MS` (default
   10 min) counts the agent's own time only (`activeMs`), not time spent waiting on a human. Each
   generation also gets an `AbortSignal.timeout` for whatever budget is left.
 - **Loop guards for small models:**
@@ -375,7 +379,9 @@ in control of what runs and against what.
   non-loopback address and so serve HTTPS, and a scan of `127.0.0.1` would hit the container
   instead of a target on the host. Kali packages ProjectDiscovery's httpx as `httpx-toolkit`; link it
   as `/usr/local/bin/httpx` so it wins over the Python `httpx`. The server's workspace starts empty,
-  so put ffuf wordlists in it.
+  and agents ask for wordlists by the same relative path as locally (`wordlists/common.txt`), so copy
+  them in: `docker cp backend/workspace/wordlists kali-ai:/workspace/8rack/`. Without that, MCP
+  ffuf fails on a missing file.
 - Once `MCP_RAG_SERVER` is set, knowledge-base search fails whenever the RAG server is down; it doesn't
   fall back to the built-in index. Keep the server running, for example as a systemd user service with
   `WorkingDirectory=mcp-servers/rag` and `ExecStart=.venv/bin/python -m rag_server`. If the repo is on

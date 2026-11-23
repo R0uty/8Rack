@@ -142,7 +142,11 @@ export interface OrchestratorTask {
   messages: ChatMessage[];
   status: TaskStatus;
   toolExecutionIds: string[];
+  /** Every tool call attempted, record-only ones included. */
   toolCallCount: number;
+  /** The share of `toolCallCount` that went to RECORDING_TOOLS, which have their own cap. Missing on
+   * tasks saved before it existed, where every call counted against MAX_ORCHESTRATOR_TOOL_CALLS. */
+  recordCallCount?: number;
   /** Further calls from a reply that requested several, run in order before the model is asked
    * again. Dropped when a human rejects one, a run fails or a human steers the task, since those
    * change what the agent should do next. */
@@ -1060,16 +1064,25 @@ function stopForTime(task: OrchestratorTask): OrchestratorTask {
   return task;
 }
 
-/** Every tool-call attempt counts against the cap, valid or not, so a model that keeps requesting
- * malformed/unknown tools can't loop forever without ever incrementing toward the limit. */
-function spendToolCall(task: OrchestratorTask): boolean {
-  if (task.toolCallCount >= env.maxOrchestratorToolCalls) {
+/** Every tool-call attempt counts against a cap, valid or not, so a model that keeps requesting
+ * malformed/unknown tools can't loop forever without ever incrementing toward the limit. Record-only
+ * calls (RECORDING_TOOLS) have their own, higher cap: a recon order on a small target spent 10 of its
+ * 20 calls on upsert_asset and stopped after a handful of scans. Everything else - real runs,
+ * lookups, malformed calls - shares MAX_ORCHESTRATOR_TOOL_CALLS. */
+function spendToolCall(task: OrchestratorTask, tool?: string): boolean {
+  const records = task.recordCallCount ?? 0;
+  const isRecord = tool !== undefined && RECORDING_TOOLS.has(tool);
+  const [used, cap, name, what] = isRecord
+    ? [records, env.maxOrchestratorRecordCalls, "MAX_ORCHESTRATOR_RECORD_CALLS", "record calls"]
+    : [task.toolCallCount - records, env.maxOrchestratorToolCalls, "MAX_ORCHESTRATOR_TOOL_CALLS", "tool calls"];
+  if (used >= cap) {
     task.status = "max_executions_reached";
-    task.error = `Stopped after ${env.maxOrchestratorToolCalls} tool calls (MAX_ORCHESTRATOR_TOOL_CALLS).`;
+    task.error = `Stopped after ${cap} ${what} (${name}).`;
     touch(task);
     return false;
   }
   task.toolCallCount++;
+  if (isRecord) task.recordCallCount = records + 1;
   return true;
 }
 
@@ -1175,7 +1188,7 @@ async function advance(task: OrchestratorTask, onChunk?: ChunkListener, signal?:
     return task;
   }
 
-  if (!spendToolCall(task)) return task;
+  if (!spendToolCall(task, toolRequest.tool)) return task;
 
   if (toolRequest.tool === SEARCH_KNOWLEDGE_BASE_TOOL) {
     task.messages.push({ role: "tool", content: await runKnowledgeBaseSearch(toolRequest.arguments) });
