@@ -148,8 +148,10 @@ in control of what runs and against what.
   in the same task gets a short reminder instead of the output again. This applies only to the
   read-only scanners (nmap, httpx, ffuf, katana, nuclei, subfinder, amass, whois, dig, nslookup), not
   to bash, python, curl, `http_request` or the filesystem tools. Their output can depend on state
-  that changes between runs, or they change state themselves. MCP tools (`<server>.<tool>`) are
-  never reused yet, even an MCP-hosted nmap.
+  that changes between runs, or they change state themselves. An MCP tool is reused when its name
+  on the server is one of those scanners (`tools.nmap` is the server's `nmap`). Matching is on the
+  catalog id, so a local run and an MCP run, or two servers' runs, never stand in for each other:
+  they scan from different hosts.
   - Reused runs are kept in `OrchestratorTask.reusedExecutionIds`, and a validator's verdict can rest
     on them.
   - Any change to the arguments, such as a single port, is a new request and goes to a human.

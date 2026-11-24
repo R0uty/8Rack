@@ -2166,6 +2166,45 @@ describe("repeat of a command that already ran in the mission", () => {
     expect(mockListExecutions).toHaveBeenLastCalledWith("proj-other");
   });
 
+  it("reuses an MCP scanner's run for the identical request to the same server", async () => {
+    const earlier = nmapRun({ toolId: "tools.nmap", mcp: { serverId: "tools", toolName: "nmap" } });
+    mockListExecutions.mockReturnValue([earlier]);
+    mockStreamAgentChat.mockImplementation(
+      repliesGenerator([JSON.stringify({ tool: "tools.nmap", arguments: NMAP_ARGS }), "Port 3001 is open."]),
+    );
+
+    const task = await createTask("test-agent", "objective", "proj-reuse");
+
+    expect(mockRequestExecution).not.toHaveBeenCalled();
+    expect(task.reusedExecutionIds).toEqual([earlier.id]);
+    const result = JSON.parse(task.messages.find((m) => m.role === "tool")!.content);
+    expect(result).toMatchObject({ tool: "tools.nmap", reused: true, executionId: earlier.id });
+  });
+
+  it("never lets a local run and an MCP run, or two servers' runs, stand in for each other", () => {
+    const local = nmapRun();
+    const kali = nmapRun({ toolId: "tools.nmap", mcp: { serverId: "tools", toolName: "nmap" } });
+    const other = nmapRun({ toolId: "edge.nmap", mcp: { serverId: "edge", toolName: "nmap" } });
+
+    mockListExecutions.mockReturnValue([kali, other]);
+    expect(findReusableRun("proj-reuse", "nmap", NMAP_ARGS)).toBeUndefined();
+    expect(findReusableRun("proj-reuse", "tools.nmap", NMAP_ARGS)?.id).toBe(kali.id);
+
+    mockListExecutions.mockReturnValue([local, other]);
+    expect(findReusableRun("proj-reuse", "tools.nmap", NMAP_ARGS)).toBeUndefined();
+  });
+
+  it("doesn't reuse an MCP tool that isn't a read-only scanner", () => {
+    const run = fixtureExecution({
+      toolId: "tools.run_script",
+      mcp: { serverId: "tools", toolName: "run_script" },
+      arguments: ["x"],
+      finishedAt: Date.now(),
+    });
+    mockListExecutions.mockReturnValue([run]);
+    expect(findReusableRun("proj-reuse", "tools.run_script", ["x"])).toBeUndefined();
+  });
+
   it("picks the newest identical successful run", () => {
     const older = nmapRun({ finishedAt: Date.now() - 3_600_000 });
     const newer = nmapRun({ finishedAt: Date.now() - 60_000 });

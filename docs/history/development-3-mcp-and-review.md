@@ -865,3 +865,18 @@ calls spent on `upsert_asset`, so only 4-6 were scans.
 Tests: in `orchestrator.test.ts` the create_finding cap test now expects the record cap. Two are new:
 more findings than the tool-call cap allows complete normally, and lookups mixed with record calls
 still stop at 20. Backend 699, frontend 265. Not run live yet.
+
+## MCP scanner runs are reused too (2026-11-24)
+
+From the first MCP mission: the Web Analyzer's repeats of recon's httpx, nmap and katana, and the
+retried recon order's scans, each put a new card in front of the human for an identical command.
+`findReusableRun` returned early for any id outside the local scanner list, so `tools.nmap` never
+matched.
+
+- A record now qualifies when its scanner name is reusable: `mcp.toolName` for an MCP run, the
+  tool id for a local one. It still has to match the requested catalog id exactly, so a local nmap
+  and `tools.nmap`, or two servers' nmap, never stand in for each other.
+
+Tests: 3 in `orchestrator.test.ts`. They cover an identical `tools.nmap` request reusing the earlier
+MCP run, local/MCP/other-server runs not crossing over, and a non-scanner MCP tool not being reused.
+Backend 702. Not run live yet.
