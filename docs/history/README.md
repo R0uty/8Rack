@@ -80,6 +80,7 @@ section"). Every heading of the old `DEVELOPMENT.md` is listed below with the fi
 - First live mission on the MCP tool server (2026-11-23)
 - Record-only calls get their own cap (2026-11-23)
 - MCP scanner runs are reused too (2026-11-24)
+- Agents are told where MCP tool paths resolve (2026-11-25)
 
 ## Plans and lists
 

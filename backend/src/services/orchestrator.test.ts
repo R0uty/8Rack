@@ -374,6 +374,27 @@ describe("createTask", () => {
     expect(request.toolsPreamble).not.toContain("tools.nuclei");
   });
 
+  it("tells the agent MCP tool paths are relative to the scanning host's workspace, once", async () => {
+    mockListMcpTools.mockReturnValueOnce([mcpTool("tools.nmap", true), mcpTool("tools.ffuf", true)]);
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+
+    await createTask("test-agent", "objective", "proj-1");
+
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble?.match(/relative to its workspace folder/g)).toHaveLength(1);
+    expect(request.toolsPreamble).toContain("Absolute paths and paths outside that folder are refused");
+  });
+
+  it("leaves the MCP path note out when no MCP tool is offered", async () => {
+    mockListMcpTools.mockReturnValueOnce([mcpTool("tools.nmap", false)]);
+    mockStreamAgentChat.mockImplementation(repliesGenerator(["no tool needed"]));
+
+    await createTask("test-agent", "objective", "proj-1");
+
+    const [[request]] = mockStreamAgentChat.mock.calls;
+    expect(request.toolsPreamble).not.toContain("relative to its workspace folder");
+  });
+
   it("gates MCP tools by the agent's execTools allowlist too", async () => {
     mockListMcpTools.mockReturnValueOnce([mcpTool("tools.nmap", true), mcpTool("tools.httpx", true)]);
     mockGetAgent.mockResolvedValue({ ...fixtureAgent, execTools: ["tools.httpx"] });

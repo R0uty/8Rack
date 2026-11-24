@@ -290,6 +290,16 @@ async function buildToolsPreamble(agentId: string, agent: AgentWithStatus | unde
         `- ${t.id}: ${t.description} Runs on a scanning host and needs human approval; its target must be in ` +
         `mission scope. arguments is the argv to pass, e.g. {"tool": "${t.id}", "arguments": ["<arg1>", "<arg2>"]}.`,
     );
+  // A tool server runs in its own workspace folder and refuses any path outside it. Agents told about a
+  // missing file used to guess absolute paths (/workspace/wordlists/...), so say it once for all of them.
+  // 8Rack doesn't know the folder's absolute path, and doesn't need to: relative paths resolve in it.
+  if (mcpLines.length) {
+    mcpLines.push(
+      "  (File paths in arguments to the <server>.<tool> tools above are on that scanning host, not this " +
+        "machine: give them relative to its workspace folder, e.g. wordlists/common.txt. Absolute paths and " +
+        "paths outside that folder are refused, and a file in this machine's workspace may not exist there.)",
+    );
+  }
 
   const ragStatus = getRagStatus();
   const knowledgeBaseLine =
