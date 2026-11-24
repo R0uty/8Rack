@@ -71,9 +71,6 @@ Design and reasoning: `DEVELOPMENT.md`, "Knowledge base and MCP", and in full in
       enough to point a mission at one side. Seen 2026-11-23: mission rules saying "use the `tools.*`
       tools" were followed by recon and the Web Analyzer but not by validators, which used local
       `nmap` and `http_request` (the tool server has no `http_request`).
-- [ ] **Repeated MCP requests always ask again.** MCP runs are never reused, so the Web Analyzer
-      re-asking for recon's httpx, nmap and katana, and a retried recon order, each needed a new card
-      for an identical command. Extend `findReusableRun` to MCP runs of the same read-only scanners.
 - [ ] **Agents don't know the scanning host's paths.** An agent told about a missing wordlist guessed
       `/workspace/wordlists/...`, which the server refuses (outside `/workspace/8rack`), and nothing
       keeps the server's workspace in step with 8Rack's. Tell agents in the preamble that MCP tool

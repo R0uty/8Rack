@@ -1011,7 +1011,8 @@ function wasRejectedBefore(task: OrchestratorTask, toolId: string, args: string[
 
 /** Read-only scanners whose recorded output can stand in for running the identical command again.
  * Not bash/python/curl/http_request or the filesystem tools: their output can depend on state that
- * changes between runs, or they can change state themselves. */
+ * changes between runs, or they can change state themselves. An MCP tool counts when its name on
+ * the server is one of these (`tools.nmap` is the server's `nmap`). */
 const REUSABLE_RUN_TOOL_IDS = new Set(["nmap", "httpx", "ffuf", "katana", "nuclei", "subfinder", "amass", "whois", "dig", "nslookup"]);
 /** Older than this, a run is stale enough that asking again is reasonable - it goes to a human. */
 const REUSE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -1022,13 +1023,17 @@ const REUSE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * that already exists. The newest successful run of the identical command (same tool, same
  * arguments) in this mission, within REUSE_MAX_AGE_MS, is returned instead - nothing runs, so
  * nothing needs approving. Any change to the arguments, such as a narrower port, is a new request.
+ *
+ * Matched on the catalog id, so a local run and an MCP run of the same scanner, or two servers' runs,
+ * never stand in for each other: they scan from different hosts. A local id must be a reusable
+ * scanner; an MCP record must carry a reusable scanner's `mcp.toolName`.
  */
 export function findReusableRun(missionId: string, toolId: string, args: string[], now = Date.now()): ExecutionRecord | undefined {
-  if (!REUSABLE_RUN_TOOL_IDS.has(toolId)) return undefined;
   const key = JSON.stringify(args);
   let newest: ExecutionRecord | undefined;
   for (const e of listExecutions(missionId)) {
     if (e.status !== "completed" || !e.result?.success || e.toolId !== toolId) continue;
+    if (!REUSABLE_RUN_TOOL_IDS.has(e.mcp ? e.mcp.toolName : e.toolId)) continue;
     if (JSON.stringify(e.arguments) !== key) continue;
     const finished = e.finishedAt ?? e.createdAt;
     if (now - finished > REUSE_MAX_AGE_MS) continue;
