@@ -71,10 +71,6 @@ Design and reasoning: `DEVELOPMENT.md`, "Knowledge base and MCP", and in full in
       enough to point a mission at one side. Seen 2026-11-23: mission rules saying "use the `tools.*`
       tools" were followed by recon and the Web Analyzer but not by validators, which used local
       `nmap` and `http_request` (the tool server has no `http_request`).
-- [ ] **Agents don't know the scanning host's paths.** An agent told about a missing wordlist guessed
-      `/workspace/wordlists/...`, which the server refuses (outside `/workspace/8rack`), and nothing
-      keeps the server's workspace in step with 8Rack's. Tell agents in the preamble that MCP tool
-      paths are relative to the server's workspace, and consider syncing `wordlists/` to it.
 - [ ] **Live output for MCP runs.** An MCP tool's output arrives only when the call ends; local runs
       stream it to the approval card.
 - [ ] **Scan source IP.** Record the scanning host's address on each mission (some programs require

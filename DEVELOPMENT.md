@@ -383,7 +383,9 @@ in control of what runs and against what.
   as `/usr/local/bin/httpx` so it wins over the Python `httpx`. The server's workspace starts empty,
   and agents ask for wordlists by the same relative path as locally (`wordlists/common.txt`), so copy
   them in: `docker cp backend/workspace/wordlists kali-ai:/workspace/8rack/`. Without that, MCP
-  ffuf fails on a missing file.
+  ffuf fails on a missing file. Nothing syncs the two workspaces; re-copy after changing the local
+  wordlists. Whenever an MCP tool is offered, the tools preamble tells the agent that its paths are on
+  the scanning host, relative to that server's workspace, and that absolute paths are refused.
 - Once `MCP_RAG_SERVER` is set, knowledge-base search fails whenever the RAG server is down; it doesn't
   fall back to the built-in index. Keep the server running, for example as a systemd user service with
   `WorkingDirectory=mcp-servers/rag` and `ExecStart=.venv/bin/python -m rag_server`. If the repo is on

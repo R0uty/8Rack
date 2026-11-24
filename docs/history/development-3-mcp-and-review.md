@@ -880,3 +880,19 @@ matched.
 Tests: 3 in `orchestrator.test.ts`. They cover an identical `tools.nmap` request reusing the earlier
 MCP run, local/MCP/other-server runs not crossing over, and a non-scanner MCP tool not being reused.
 Backend 702. Not run live yet.
+
+## Agents are told where MCP tool paths resolve (2026-11-25)
+
+From the first MCP mission: told a wordlist was missing, an agent guessed
+`/workspace/wordlists/...`. The tool server refused it, because it was outside the server's workspace
+(`/workspace/8rack`).
+
+- `buildToolsPreamble` adds one note under the MCP tool lines whenever at least one is offered. File
+  paths go to the scanning host relative to its workspace (e.g. `wordlists/common.txt`), absolute
+  paths are refused, and a file in 8Rack's workspace may not exist there. 8Rack doesn't know the
+  server's absolute path and doesn't need it, since relative paths resolve in it.
+- Syncing `wordlists/` automatically was left out. The server only runs a fixed catalog and has no
+  file-write tool, and a one-time `docker cp` (in DEVELOPMENT.md's environment notes) covers it.
+
+Tests: 2 in `orchestrator.test.ts`. They cover the note appearing once with MCP tools offered, and not
+at all when none is. Backend 704. Not run live yet.
